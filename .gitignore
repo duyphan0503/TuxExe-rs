@@ -1,5 +1,14 @@
 /target
+**/*.rs.bk
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Test binaries
 *.exe
-# Keep hello.c but track compiled hello.exe only if explicitly added
 tests/test_binaries/*.exe
 !tests/test_binaries/.gitkeep
