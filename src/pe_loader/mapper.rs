@@ -128,7 +128,17 @@ pub fn map_pe(pe: &ParsedPe) -> PeResult<MappedImage> {
         "Allocated image mapping"
     );
 
-    // ── 2. Copy sections ────────────────────────────────────────────
+    // ── 2. Copy PE headers ──────────────────────────────────────────
+    // Many programs (and some CRTs) expect the PE headers to be present at the base address.
+    let header_size = pe.header_size as usize;
+    if header_size > 0 {
+        let copy_len = header_size.min(total_size).min(pe.raw.len());
+        unsafe {
+            ptr::copy_nonoverlapping(pe.raw.as_ptr(), base, copy_len);
+        }
+    }
+
+    // ── 3. Copy sections ────────────────────────────────────────────
     for sec in &pe.sections {
         let dst_offset = sec.virtual_address as usize;
         let raw_size = sec.raw_data_size as usize;
@@ -183,45 +193,62 @@ pub fn map_pe(pe: &ParsedPe) -> PeResult<MappedImage> {
         );
     }
 
-    // ── 3. Set per-section memory protection ────────────────────────
-    let alignment = pe.section_alignment.max(1) as usize;
-    for sec in &pe.sections {
-        let virt_size = sec.virtual_size as usize;
-        if virt_size == 0 {
-            continue;
-        }
-
-        let start = sec.virtual_address as usize;
-        // Align protection region to page boundaries.
-        let aligned_start = start & !(alignment - 1);
-        let aligned_end = (start + virt_size + alignment - 1) & !(alignment - 1);
-        let prot_size = aligned_end - aligned_start;
-
-        let prot = section_protection(sec.characteristics);
-
-        let ret = unsafe {
-            libc::mprotect(
-                base.add(aligned_start) as *mut libc::c_void,
-                prot_size,
-                prot,
-            )
-        };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            warn!(
-                section = %sec.name,
-                prot = format_args!("0x{prot:x}"),
-                error = %err,
-                "mprotect failed (non-fatal)"
-            );
-        }
-    }
-
     Ok(MappedImage {
         base,
         size: total_size,
         at_preferred,
     })
+}
+
+impl MappedImage {
+    /// Apply final memory protections to mapped sections (PROT_READ, etc.).
+    /// Call this *after* all relocations and IAT resolution.
+    pub fn apply_protections(&mut self, pe: &ParsedPe) -> PeResult<()> {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+        
+        // ── 1. Apply protection to headers ──────────────────────────
+        let header_size = pe.header_size as usize;
+        if header_size > 0 {
+            let aligned_header_size = (header_size + page_size - 1) & !(page_size - 1);
+            unsafe {
+                libc::mprotect(self.base as *mut libc::c_void, aligned_header_size, libc::PROT_READ);
+            }
+        }
+
+        // ── 2. Apply protection to sections ──────────────────────────
+        let alignment = pe.section_alignment.max(1) as usize;
+        for sec in &pe.sections {
+            let virt_size = sec.virtual_size as usize;
+            if virt_size == 0 {
+                continue;
+            }
+
+            let start = sec.virtual_address as usize;
+            let aligned_start = start & !(alignment - 1);
+            let aligned_end = (start + virt_size + alignment - 1) & !(alignment - 1);
+            let prot_size = aligned_end - aligned_start;
+
+            let prot = section_protection(sec.characteristics);
+
+            let ret = unsafe {
+                libc::mprotect(
+                    self.base.add(aligned_start) as *mut libc::c_void,
+                    prot_size,
+                    prot,
+                )
+            };
+            if ret != 0 {
+                let err = std::io::Error::last_os_error();
+                warn!(
+                    section = %sec.name,
+                    prot = format_args!("0x{prot:x}"),
+                    error = %err,
+                    "mprotect failed (non-fatal)"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Convert PE section characteristics to `mprotect` flags.

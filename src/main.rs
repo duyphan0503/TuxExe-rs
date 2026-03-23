@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::info;
 
 use tuxexe_rs::pe_loader::imports::enumerate_imports;
 use tuxexe_rs::pe_loader::mapper::map_pe;
@@ -64,23 +64,44 @@ fn main() -> Result<()> {
             info!(exe = %exe.display(), ?args, "Preparing to execute PE");
 
             // Phase 1: Load, map, relocate, enumerate imports.
-            let pe = run_pe_loader(&exe)?;
+            let mut pe = run_pe_loader(&exe)?;
 
-            // Display import summary.
-            for dll in &pe.imports.dlls {
-                let funcs: Vec<_> = pe
-                    .imports
-                    .for_dll(dll)
-                    .map(|e| e.import.to_string())
-                    .collect();
-                info!(dll = %dll, "{}", funcs.join(", "));
+            // Resolve and patch imports
+            tuxexe_rs::pe_loader::imports::resolve_imports(&mut pe.mapped, &pe.parsed, &pe.imports)
+                .with_context(|| "Failed to resolve imports")?;
+
+            // Apply memory protection
+            pe.mapped.apply_protections(&pe.parsed)
+                .with_context(|| "Failed to apply memory protections")?;
+
+            // Execute
+            let entry_point_rva = pe.parsed.entry_point_rva as usize;
+            if entry_point_rva == 0 {
+                anyhow::bail!("PE has no entry point or it's statically linked as a DLL.");
             }
 
-            error!(
-                "Cannot execute: no API implementations available \
-                 (Phase 1 — PE loaded but execution requires Phase 2)"
+            let entry_point_addr = pe.mapped.base_addr() + entry_point_rva;
+            info!(
+                va = format_args!("0x{:x}", entry_point_addr),
+                "Jumping to entry point"
             );
-            anyhow::bail!("Execution not yet implemented");
+
+            // Create thread execution block / environment manually or just jump straight to the entry point.
+            // Some very basic things may break if the PE relies purely on FS/GS TEB structures without 
+            // the NT kernel properly backing them up.
+            tuxexe_rs::threading::teb::setup_teb(pe.mapped.base_addr())
+                .map_err(|e| anyhow::anyhow!("Failed to setup TEB: {}", e))?;
+
+            // Note: If the target is a 64-bit Windows PE, its entry point uses the Win64 ABI, but typically takes no args.
+            // On Windows 64-bit, the entry point for EXEs actually doesn't have a standardized ABI signature
+            // typically `void mainCRTStartup()` -> no args.
+            unsafe {
+                let entry_fn: extern "win64" fn() = std::mem::transmute(entry_point_addr);
+                entry_fn(); // JUMP!
+            }
+            
+            info!("Execution finished successfully");
+            Ok(())
         }
 
         Commands::Info { file } => {

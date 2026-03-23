@@ -202,6 +202,55 @@ pub fn enumerate_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<Import
     Ok(ImportTable { entries, dlls })
 }
 
+/// Resolve all enumerated imports and write their addresses into the mapped IAT.
+///
+/// Looks up each function in the `dll_manager` dispatch table. If found, writes
+/// the resulting function pointer into the IAT. Unresolved imports are currently
+/// skipped (logged as warnings) allowing execution to proceed until such a function
+/// is called.
+pub fn resolve_imports(mapped: &mut MappedImage, pe: &ParsedPe, import_table: &ImportTable) -> PeResult<()> {
+    info!("Resolving {} imports", import_table.entries.len());
+
+    let _ptr_size = if pe.is_pe64 { 8 } else { 4 };
+
+    for entry in &import_table.entries {
+        let func_name = match &entry.import {
+            ImportKind::ByName { name, .. } => name.clone(),
+            ImportKind::ByOrdinal(ord) => format!("ordinal#{}", ord),
+        };
+
+        let ptr = crate::dll_manager::resolve_reimplemented_export(&entry.dll, &func_name);
+
+        if ptr == 0 {
+            tracing::warn!(
+                dll = %entry.dll,
+                func = %func_name,
+                "Unresolved import — will crash if called!"
+            );
+            continue;
+        }
+
+        debug!(
+            dll = %entry.dll,
+            func = %func_name,
+            ptr = format_args!("0x{:x}", ptr as usize),
+            "Resolved import"
+        );
+
+        if pe.is_pe64 {
+            mapped.write_u64(entry.iat_rva, ptr as u64).ok_or_else(|| {
+                PeError::Mapping(format!("Failed to write IAT entry at 0x{:x}", entry.iat_rva))
+            })?;
+        } else {
+            mapped.write_u32(entry.iat_rva, ptr as u32).ok_or_else(|| {
+                PeError::Mapping(format!("Failed to write IAT entry at 0x{:x}", entry.iat_rva))
+            })?;
+        }
+    }
+    
+    Ok(())
+}
+
 /// Read a null-terminated ASCII string from the mapped image.
 fn read_ascii_string(mapped: &MappedImage, rva: usize) -> Option<String> {
     let mut s = String::new();

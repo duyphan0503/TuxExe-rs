@@ -139,6 +139,8 @@ pub struct ParsedPe {
     pub reloc_dir: Option<DataDirectory>,
     /// Import data directory.
     pub import_dir: Option<DataDirectory>,
+    /// Total size of all headers (MZ + PE + sections).
+    pub header_size: u32,
     /// DLL characteristics (e.g. DYNAMIC_BASE for ASLR).
     pub dll_characteristics: u16,
 }
@@ -200,6 +202,7 @@ impl ParsedPe {
         let size_of_image = opt.windows_fields.size_of_image as u32;
         let section_alignment = opt.windows_fields.section_alignment as u32;
         let file_alignment = opt.windows_fields.file_alignment as u32;
+        let header_size = opt.windows_fields.size_of_headers as u32;
         let dll_characteristics = opt.windows_fields.dll_characteristics;
         let number_of_sections = pe.header.coff_header.number_of_sections;
 
@@ -254,6 +257,7 @@ impl ParsedPe {
             sections,
             reloc_dir,
             import_dir,
+            header_size,
             dll_characteristics,
         })
     }

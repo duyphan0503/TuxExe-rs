@@ -43,17 +43,22 @@ pub const PSEUDO_STDOUT: Handle = 0xFFFF_FFF5;
 /// Pseudo-handle for `STD_ERROR_HANDLE` (-12 as u32).
 pub const PSEUDO_STDERR: Handle = 0xFFFF_FFF4;
 
+use std::any::Any;
+
 // ── Handle object trait ───────────────────────────────────────────────────────
 
 /// Every object stored in the handle table implements this trait.
 ///
 /// Concrete types: `FileHandle`, `ThreadHandle`, `MutexHandle`, `EventHandle`, …
-pub trait HandleObject: Send + Sync + fmt::Debug {
+pub trait HandleObject: Send + Sync + fmt::Debug + Any {
     /// Human-readable type name for diagnostics.
     fn type_name(&self) -> &'static str;
 
     /// Called when the last reference via `CloseHandle` is dropped.
     fn close(&mut self) {}
+
+    /// Support for downcasting.
+    fn as_any(&self) -> &dyn Any;
 }
 
 // ── Concrete built-in handle types ───────────────────────────────────────────
@@ -69,6 +74,10 @@ pub struct StdioHandle {
 impl HandleObject for StdioHandle {
     fn type_name(&self) -> &'static str {
         "StdioHandle"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -209,6 +218,9 @@ mod tests {
         fn type_name(&self) -> &'static str {
             "DummyObj"
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     fn new_table() -> HandleTable {
@@ -281,6 +293,9 @@ mod tests {
         impl HandleObject for Counter {
             fn type_name(&self) -> &'static str {
                 "Counter"
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
             }
         }
 
