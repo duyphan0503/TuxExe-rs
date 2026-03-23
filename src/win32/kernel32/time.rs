@@ -1,0 +1,1 @@
+//! GetSystemTimeAsFileTime, QueryPerformanceCounter, GetTickCount.

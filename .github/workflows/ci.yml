@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Build & Test ─────────────────────────────────────────────────────────────
+  test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        rust: [stable, "1.75"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.rust }}-
+
+      - name: cargo build (debug)
+        run: cargo build --verbose
+
+      - name: cargo build (release)
+        run: cargo build --release --verbose
+
+      - name: cargo test
+        run: cargo test --verbose
+
+  # ── Linting ──────────────────────────────────────────────────────────────────
+  lint:
+    name: Clippy & Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust + tools
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: lint-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ── MinGW test binary compilation ────────────────────────────────────────────
+  build-test-binaries:
+    name: Build MinGW test binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: Compile hello.exe (PE64)
+        run: |
+          x86_64-w64-mingw32-gcc \
+            -o tests/test_binaries/hello.exe \
+            tests/test_binaries/hello.c \
+            -static
+        # -static: avoid depending on runtime DLLs we haven't implemented yet
+
+      - name: Verify PE magic
+        run: |
+          # First 2 bytes must be 'MZ' (0x4D 0x5A)
+          hexdump -C tests/test_binaries/hello.exe | head -1
+          python3 -c "
+          with open('tests/test_binaries/hello.exe','rb') as f:
+              magic = f.read(2)
+          assert magic == b'MZ', f'Expected MZ, got {magic!r}'
+          print('PE magic OK: MZ')
+          "
+
+      - name: Upload hello.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-exe
+          path: tests/test_binaries/hello.exe

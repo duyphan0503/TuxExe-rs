@@ -1,0 +1,5 @@
+/target
+*.exe
+# Keep hello.c but track compiled hello.exe only if explicitly added
+tests/test_binaries/*.exe
+!tests/test_binaries/.gitkeep

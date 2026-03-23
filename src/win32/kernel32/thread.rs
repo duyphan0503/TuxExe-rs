@@ -1,0 +1,1 @@
+//! CreateThread, ExitThread, GetCurrentThread, GetCurrentThreadId.
