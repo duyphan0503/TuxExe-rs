@@ -42,6 +42,20 @@ pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
                 return addr;
             }
         }
+        "user32" => {
+            let exports = crate::win32::user32::get_exports();
+            if let Some(&addr) = exports.get(func_name) {
+                trace!("Resolved user32!{} -> {:#x}", func_name, addr);
+                return addr;
+            }
+        }
+        "gdi32" => {
+            let exports = crate::win32::gdi32::get_exports();
+            if let Some(&addr) = exports.get(func_name) {
+                trace!("Resolved gdi32!{} -> {:#x}", func_name, addr);
+                return addr;
+            }
+        }
         _ => {}
     }
 
