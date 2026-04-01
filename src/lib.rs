@@ -20,3 +20,13 @@ pub mod threading;
 pub mod utils;
 pub mod win32;
 pub mod wow64;
+
+#[cfg(test)]
+pub mod test_support {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub fn serial_guard() -> MutexGuard<'static, ()> {
+        static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        TEST_LOCK.get_or_init(|| Mutex::new(())).lock().expect("test serial lock poisoned")
+    }
+}

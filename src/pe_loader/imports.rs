@@ -53,9 +53,7 @@ impl ImportTable {
     /// Iterate over imports for a specific DLL (case-insensitive).
     pub fn for_dll(&self, dll: &str) -> impl Iterator<Item = &ImportEntry> {
         let dll_lower = dll.to_ascii_lowercase();
-        self.entries
-            .iter()
-            .filter(move |e| e.dll.to_ascii_lowercase() == dll_lower)
+        self.entries.iter().filter(move |e| e.dll.to_ascii_lowercase() == dll_lower)
     }
 
     /// Total number of imported functions.
@@ -76,10 +74,7 @@ pub fn enumerate_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<Import
         Some(dir) if dir.size > 0 && dir.virtual_address > 0 => dir,
         _ => {
             info!("No import directory — statically linked or no imports");
-            return Ok(ImportTable {
-                entries: Vec::new(),
-                dlls: Vec::new(),
-            });
+            return Ok(ImportTable { entries: Vec::new(), dlls: Vec::new() });
         }
     };
 
@@ -133,11 +128,7 @@ pub fn enumerate_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<Import
         let thunk_table_rva = if ilt_rva != 0 { ilt_rva } else { iat_rva_start };
 
         let thunk_size = if pe.is_pe64 { 8usize } else { 4usize };
-        let ordinal_flag: u64 = if pe.is_pe64 {
-            0x8000_0000_0000_0000
-        } else {
-            0x8000_0000
-        };
+        let ordinal_flag: u64 = if pe.is_pe64 { 0x8000_0000_0000_0000 } else { 0x8000_0000 };
 
         let mut idx = 0usize;
         loop {
@@ -164,10 +155,7 @@ pub fn enumerate_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<Import
                 let hint_name_rva = (thunk_val & 0x7FFF_FFFF) as usize;
                 let hint = mapped.read_u32(hint_name_rva).unwrap_or(0) as u16;
                 let func_name = read_ascii_string(mapped, hint_name_rva + 2).unwrap_or_default();
-                ImportKind::ByName {
-                    hint,
-                    name: func_name,
-                }
+                ImportKind::ByName { hint, name: func_name }
             };
 
             debug!(
@@ -177,11 +165,7 @@ pub fn enumerate_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<Import
                 "  import"
             );
 
-            entries.push(ImportEntry {
-                dll: dll_name.clone(),
-                import,
-                iat_rva: iat_slot_rva,
-            });
+            entries.push(ImportEntry { dll: dll_name.clone(), import, iat_rva: iat_slot_rva });
 
             idx += 1;
         }
@@ -189,17 +173,66 @@ pub fn enumerate_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<Import
         desc_rva += desc_size;
     }
 
-    info!(
-        dll_count = dlls.len(),
-        import_count = entries.len(),
-        "Import enumeration complete"
-    );
+    info!(dll_count = dlls.len(), import_count = entries.len(), "Import enumeration complete");
     for dll in &dlls {
         let count = entries.iter().filter(|e| e.dll.eq_ignore_ascii_case(dll)).count();
         info!(dll = %dll, functions = count, "  required DLL");
     }
 
     Ok(ImportTable { entries, dlls })
+}
+
+/// Resolve all enumerated imports and write their addresses into the mapped IAT.
+///
+/// Looks up each function in the `dll_manager` dispatch table. If found, writes
+/// the resulting function pointer into the IAT. Unresolved imports are currently
+/// skipped (logged as warnings) allowing execution to proceed until such a function
+/// is called.
+pub fn resolve_imports(
+    mapped: &mut MappedImage,
+    pe: &ParsedPe,
+    import_table: &ImportTable,
+) -> PeResult<()> {
+    info!("Resolving {} imports", import_table.entries.len());
+
+    let _ptr_size = if pe.is_pe64 { 8 } else { 4 };
+
+    for entry in &import_table.entries {
+        let func_name = match &entry.import {
+            ImportKind::ByName { name, .. } => name.clone(),
+            ImportKind::ByOrdinal(ord) => format!("ordinal#{}", ord),
+        };
+
+        let ptr = crate::dll_manager::resolve_reimplemented_export(&entry.dll, &func_name);
+
+        if ptr == 0 {
+            tracing::warn!(
+                dll = %entry.dll,
+                func = %func_name,
+                "Unresolved import — will crash if called!"
+            );
+            continue;
+        }
+
+        debug!(
+            dll = %entry.dll,
+            func = %func_name,
+            ptr = format_args!("0x{:x}", ptr as usize),
+            "Resolved import"
+        );
+
+        if pe.is_pe64 {
+            mapped.write_u64(entry.iat_rva, ptr as u64).ok_or_else(|| {
+                PeError::Mapping(format!("Failed to write IAT entry at 0x{:x}", entry.iat_rva))
+            })?;
+        } else {
+            mapped.write_u32(entry.iat_rva, ptr as u32).ok_or_else(|| {
+                PeError::Mapping(format!("Failed to write IAT entry at 0x{:x}", entry.iat_rva))
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Read a null-terminated ASCII string from the mapped image.
@@ -247,10 +280,7 @@ mod tests {
 
     #[test]
     fn import_kind_display() {
-        let by_name = ImportKind::ByName {
-            hint: 42,
-            name: "ExitProcess".into(),
-        };
+        let by_name = ImportKind::ByName { hint: 42, name: "ExitProcess".into() };
         assert!(by_name.to_string().contains("ExitProcess"));
         assert!(by_name.to_string().contains("42"));
 
@@ -264,26 +294,17 @@ mod tests {
             entries: vec![
                 ImportEntry {
                     dll: "KERNEL32.dll".into(),
-                    import: ImportKind::ByName {
-                        hint: 0,
-                        name: "ExitProcess".into(),
-                    },
+                    import: ImportKind::ByName { hint: 0, name: "ExitProcess".into() },
                     iat_rva: 0x1000,
                 },
                 ImportEntry {
                     dll: "msvcrt.dll".into(),
-                    import: ImportKind::ByName {
-                        hint: 0,
-                        name: "printf".into(),
-                    },
+                    import: ImportKind::ByName { hint: 0, name: "printf".into() },
                     iat_rva: 0x1008,
                 },
                 ImportEntry {
                     dll: "KERNEL32.dll".into(),
-                    import: ImportKind::ByName {
-                        hint: 0,
-                        name: "GetStdHandle".into(),
-                    },
+                    import: ImportKind::ByName { hint: 0, name: "GetStdHandle".into() },
                     iat_rva: 0x1010,
                 },
             ],

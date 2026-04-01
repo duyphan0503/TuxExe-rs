@@ -12,3 +12,6 @@
 *.exe
 tests/test_binaries/*.exe
 !tests/test_binaries/.gitkeep
+
+# Local planning doc (not for commits)
+docs/IMPLEMENTATION_PLAN.md

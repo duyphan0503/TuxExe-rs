@@ -95,18 +95,18 @@ msvcrt.dll:   __getmainargs, __set_app_type, _cexit, _amsg_exit,
 ```
 
 ### Tasks
-- [ ] 2.1 `utils/handle.rs` — Implement handle table
+- [x] 2.1 `utils/handle.rs` — Implement handle table
   - Thread-safe handle allocation (AtomicU32 counter)
   - Handle → Box<dyn HandleObject> lookup via DashMap or RwLock<HashMap>
   - Pre-allocate stdin/stdout/stderr handles
-- [ ] 2.2 `nt_kernel/file.rs` — Basic file operations
+- [x] 2.2 `nt_kernel/file.rs` — Basic file operations
   - NtWriteFile → write() for console handles (stdout/stderr)
   - NtReadFile → read() for stdin
-- [ ] 2.3 `win32/kernel32/console.rs` — Console API
+- [x] 2.3 `win32/kernel32/console.rs` — Console API
   - GetStdHandle → return pre-allocated handles (STD_INPUT=-10, STD_OUTPUT=-11, STD_ERROR=-12)
   - WriteConsoleA/W → write to stdout fd
   - WriteFile → write to file descriptor from handle table
-- [ ] 2.4 `win32/kernel32/process.rs` — Process basics
+- [x] 2.4 `win32/kernel32/process.rs` — Process basics
   - ExitProcess → std::process::exit()
   - GetModuleHandleA/W → return base address of loaded PE (NULL = main exe)
   - GetCommandLineA/W → construct from std::env::args()
@@ -114,34 +114,34 @@ msvcrt.dll:   __getmainargs, __set_app_type, _cexit, _amsg_exit,
   - GetCurrentProcessId → libc::getpid()
   - GetCurrentThreadId → libc::gettid()
   - IsProcessorFeaturePresent → hardcode common features
-- [ ] 2.5 `win32/kernel32/time.rs` — Time APIs
+- [x] 2.5 `win32/kernel32/time.rs` — Time APIs
   - GetSystemTimeAsFileTime → clock_gettime → convert to FILETIME
   - QueryPerformanceCounter → clock_gettime(CLOCK_MONOTONIC)
   - QueryPerformanceFrequency → return 1_000_000_000 (ns)
   - GetTickCount → clock_gettime(CLOCK_MONOTONIC) in ms
-- [ ] 2.6 `win32/kernel32/error.rs` — Error handling
+- [x] 2.6 `win32/kernel32/error.rs` — Error handling
   - GetLastError / SetLastError → thread-local storage (std::cell::Cell<u32>)
   - SetUnhandledExceptionFilter → store callback, don't invoke yet
-- [ ] 2.7 `win32/msvcrt/mod.rs` — Minimal C runtime
+- [x] 2.7 `win32/msvcrt/mod.rs` — Minimal C runtime
   - __getmainargs → parse argc/argv from command line
   - __set_app_type → no-op (store value)
   - _initterm → call function pointer array (C++ static initializers)
   - printf → delegate to Rust's libc::printf or implement with format parsing
   - puts → write string + newline to stdout
   - exit → ExitProcess
-- [ ] 2.8 `dll_manager/mod.rs` — DLL dispatch
+- [x] 2.8 `dll_manager/mod.rs` — DLL dispatch
   - When imports reference `kernel32.dll!GetStdHandle`, route to our Rust impl
   - Build a HashMap<(DllName, FuncName), fn pointer> dispatch table
   - Patch IAT entries to point to our Rust function implementations
-- [ ] 2.9 `pe_loader/imports.rs` — Complete IAT resolution
+- [x] 2.9 `pe_loader/imports.rs` — Complete IAT resolution
   - For each import: look up in dispatch table → get function pointer
   - Write function pointer into IAT slot in mapped memory
   - Handle thunking: Windows calling convention (x64: RCX,RDX,R8,R9) matches System V partially — may need shims
-- [ ] 2.10 Entry point execution
+- [x] 2.10 Entry point execution
   - After IAT resolution, jump to AddressOfEntryPoint
   - Use `unsafe { std::mem::transmute }` to cast to `extern "C" fn()` and call
   - Set up minimal TEB before entry (at least FS/GS base with stack info)
-- [ ] 2.11 **CRITICAL**: Calling convention bridge
+- [x] 2.11 **CRITICAL**: Calling convention bridge
   - Windows x64: RCX, RDX, R8, R9, stack (callee cleans shadow space)
   - System V x64: RDI, RSI, RDX, RCX, R8, R9, stack
   - Write assembly thunks that convert between conventions
@@ -426,7 +426,7 @@ A 32-bit Windows console app runs on 64-bit Linux.
 |-------|-----------|--------|-----------|
 | 0 | Project skeleton builds & tests | ✅ | Tooling |
 | 1 | PE headers parsed, sections mapped | ✅ | PE loader correctness |
-| 2 | **hello.exe prints "Hello World"** | ⬜ | End-to-end execution |
+| 2 | **hello.exe prints "Hello World"** | ✅ | End-to-end execution |
 | 3 | Multi-threaded app works | ⬜ | Threading + sync |
 | 4 | File I/O + registry queries work | ⬜ | OS services |
 | 5 | LoadLibrary + DLL plugins work | ⬜ | Dynamic loading |
