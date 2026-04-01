@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 // use std::ffi::c_void;
 use tracing::trace;
 

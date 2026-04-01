@@ -1,3 +1,6 @@
+#![allow(non_snake_case)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 //! Minimal C runtime implementation (msvcrt.dll exports).
 
 use std::ffi::{c_char, c_void, CStr};
@@ -7,7 +10,7 @@ pub extern "win64" fn puts(s: *const c_char) -> i32 {
     if s.is_null() {
         return -1;
     }
-    
+
     let cstr = unsafe { CStr::from_ptr(s) };
     if let Ok(str_slice) = cstr.to_str() {
         println!("{}", str_slice);
@@ -48,9 +51,15 @@ pub extern "win64" fn __getmainargs(
     trace!("__getmainargs()");
     // Return dummy args for now
     unsafe {
-        if !argc.is_null() { *argc = 0; }
-        if !argv.is_null() { *argv = std::ptr::null_mut(); }
-        if !envp.is_null() { *envp = std::ptr::null_mut(); }
+        if !argc.is_null() {
+            *argc = 0;
+        }
+        if !argv.is_null() {
+            *argv = std::ptr::null_mut();
+        }
+        if !envp.is_null() {
+            *envp = std::ptr::null_mut();
+        }
     }
     0
 }
@@ -84,7 +93,9 @@ pub extern "win64" fn exit(status: i32) -> ! {
 }
 
 pub extern "win64" fn wcslen(s: *const u16) -> usize {
-    if s.is_null() { return 0; }
+    if s.is_null() {
+        return 0;
+    }
     let mut len = 0;
     unsafe {
         while *s.add(len) != 0 {
@@ -123,7 +134,12 @@ pub extern "win64" fn abort() -> ! {
     std::process::abort();
 }
 
-pub extern "win64" fn fwrite(ptr: *const c_void, size: usize, nmemb: usize, _stream: *mut c_void) -> usize {
+pub extern "win64" fn fwrite(
+    ptr: *const c_void,
+    size: usize,
+    nmemb: usize,
+    _stream: *mut c_void,
+) -> usize {
     // For now write to stdout
     let total = size * nmemb;
     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, total) };
@@ -150,17 +166,27 @@ pub extern "win64" fn localeconv() -> *mut c_void {
     std::ptr::null_mut()
 }
 
-pub extern "win64" fn ___lc_codepage_func() -> i32 { 0 }
-pub extern "win64" fn ___mb_cur_max_func() -> i32 { 1 }
+pub extern "win64" fn ___lc_codepage_func() -> i32 {
+    0
+}
+pub extern "win64" fn ___mb_cur_max_func() -> i32 {
+    1
+}
 pub extern "win64" fn __setusermatherr(_func: usize) {}
-pub extern "win64" fn _amsg_exit(_v: i32) { trace!("_amsg_exit({})", _v); }
+pub extern "win64" fn _amsg_exit(_v: i32) {
+    trace!("_amsg_exit({})", _v);
+}
 pub extern "win64" fn _cexit() {}
 pub extern "win64" fn _lock(_n: i32) {}
 pub extern "win64" fn _unlock(_n: i32) {}
-pub extern "win64" fn _onexit(_func: usize) -> usize { _func }
+pub extern "win64" fn _onexit(_func: usize) -> usize {
+    _func
+}
 
 static mut ERRNO: i32 = 0;
-pub extern "win64" fn _errno() -> *mut i32 { unsafe { &mut ERRNO } }
+pub extern "win64" fn _errno() -> *mut i32 {
+    &raw mut ERRNO
+}
 
 static mut FMODE: i32 = 0;
 static mut COMMODE: i32 = 0;
@@ -168,18 +194,25 @@ static mut COMMODE: i32 = 0;
 pub extern "win64" fn __iob_func() -> *mut c_void {
     // dummy iob array
     static mut IOB: [u8; 1024] = [0; 1024];
-    unsafe { IOB.as_mut_ptr() as *mut c_void }
+    (&raw mut IOB).cast::<u8>().cast::<c_void>()
 }
 
 static mut INITENV: *mut c_char = std::ptr::null_mut();
 
-pub extern "win64" fn __C_specific_handler(_1: usize, _2: usize, _3: usize, _4: usize) -> i32 { 0 }
+pub extern "win64" fn __C_specific_handler(
+    _dispatcher_context: usize,
+    _exception_record: usize,
+    _context_record: usize,
+    _establisher_frame: usize,
+) -> i32 {
+    0
+}
 
 use std::collections::HashMap;
 
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
-    
+
     exports.insert("puts", puts as usize);
     exports.insert("strlen", strlen as usize);
     exports.insert("wcslen", wcslen as usize);
@@ -197,7 +230,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("fprintf", fprintf as usize);
     exports.insert("vfprintf", vfprintf as usize);
     exports.insert("localeconv", localeconv as usize);
-    
+
     exports.insert("___lc_codepage_func", ___lc_codepage_func as usize);
     exports.insert("___mb_cur_max_func", ___mb_cur_max_func as usize);
     exports.insert("__setusermatherr", __setusermatherr as usize);
@@ -214,13 +247,11 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("__set_app_type", __set_app_type as usize);
     exports.insert("_initterm", _initterm as usize);
     exports.insert("exit", exit as usize);
-    
+
     // Data exports (pointers to globals)
-    unsafe {
-        exports.insert("_fmode", &FMODE as *const i32 as usize);
-        exports.insert("_commode", &COMMODE as *const i32 as usize);
-        exports.insert("__initenv", &INITENV as *const *mut c_char as usize);
-    }
+    exports.insert("_fmode", (&raw const FMODE) as usize);
+    exports.insert("_commode", (&raw const COMMODE) as usize);
+    exports.insert("__initenv", (&raw const INITENV) as usize);
 
     exports
 }

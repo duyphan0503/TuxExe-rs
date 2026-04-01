@@ -1,8 +1,10 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 //! GetSystemTimeAsFileTime, QueryPerformanceCounter, GetTickCount, Sleep.
 
-use tracing::trace;
-use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::trace;
 
 pub extern "win64" fn sleep(dw_milliseconds: u32) {
     trace!("Sleep({})", dw_milliseconds);
@@ -14,30 +16,26 @@ lazy_static::lazy_static! {
 }
 
 pub extern "win64" fn get_tick_count() -> u32 {
-    let elapsed = START_TIME.elapsed().as_millis() as u32;
-    // trace!("GetTickCount() -> {}", elapsed);
-    elapsed
+    START_TIME.elapsed().as_millis() as u32
 }
 
 pub extern "win64" fn get_tick_count_64() -> u64 {
-    let elapsed = START_TIME.elapsed().as_millis() as u64;
-    // trace!("GetTickCount64() -> {}", elapsed);
-    elapsed
+    START_TIME.elapsed().as_millis() as u64
 }
 
 pub extern "win64" fn get_system_time_as_file_time(lp_system_time_as_file_time: *mut u64) {
     if !lp_system_time_as_file_time.is_null() {
         let now = SystemTime::now();
         let since_the_epoch = now.duration_since(UNIX_EPOCH).expect("Time went backwards");
-        
+
         // Windows epoch is Jan 1, 1601. Unix is Jan 1, 1970.
         // Difference is 11644473600 seconds.
         // FILETIME is in 100-nanosecond intervals.
         let secs = since_the_epoch.as_secs() + 11_644_473_600;
         let nanos = since_the_epoch.subsec_nanos() as u64;
-        
+
         let filetime = (secs * 10_000_000) + (nanos / 100);
-        
+
         unsafe {
             *lp_system_time_as_file_time = filetime;
         }

@@ -31,8 +31,8 @@ libc = "0.2"
 # Filesystem helpers
 walkdir = "2"
 
-# Registry storage (optional, later phases)
-# rusqlite = { version = "0.32", features = ["bundled"] }
+# Registry storage
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Logging / tracing
 tracing = "0.1"

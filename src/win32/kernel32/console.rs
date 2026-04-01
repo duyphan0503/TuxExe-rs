@@ -1,7 +1,11 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 //! GetStdHandle, WriteConsoleA/W, ReadConsoleA/W, SetConsoleMode.
 
-use crate::utils::handle::{Handle, INVALID_HANDLE_VALUE, PSEUDO_STDERR, PSEUDO_STDIN, PSEUDO_STDOUT};
 use crate::nt_kernel::file::nt_write_file;
+use crate::utils::handle::{
+    Handle, INVALID_HANDLE_VALUE, PSEUDO_STDERR, PSEUDO_STDIN, PSEUDO_STDOUT,
+};
 use std::ffi::c_void;
 use tracing::trace;
 
@@ -35,7 +39,11 @@ pub extern "win64" fn write_console_a(
         number_of_chars_to_write, // Ascii chars = bytes
         number_of_chars_written,
     );
-    if status == 0 { 1 } else { 0 }
+    if status == 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// Simplified WriteConsoleW
@@ -56,7 +64,7 @@ pub extern "win64" fn write_console_w(
 
     let slice = unsafe { std::slice::from_raw_parts(buffer, number_of_chars_to_write as usize) };
     let string = String::from_utf16_lossy(slice);
-    
+
     let status = nt_write_file(
         console_output,
         string.as_ptr() as *const c_void,

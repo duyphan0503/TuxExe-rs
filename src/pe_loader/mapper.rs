@@ -193,11 +193,7 @@ pub fn map_pe(pe: &ParsedPe) -> PeResult<MappedImage> {
         );
     }
 
-    Ok(MappedImage {
-        base,
-        size: total_size,
-        at_preferred,
-    })
+    Ok(MappedImage { base, size: total_size, at_preferred })
 }
 
 impl MappedImage {
@@ -205,13 +201,17 @@ impl MappedImage {
     /// Call this *after* all relocations and IAT resolution.
     pub fn apply_protections(&mut self, pe: &ParsedPe) -> PeResult<()> {
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-        
+
         // ── 1. Apply protection to headers ──────────────────────────
         let header_size = pe.header_size as usize;
         if header_size > 0 {
             let aligned_header_size = (header_size + page_size - 1) & !(page_size - 1);
             unsafe {
-                libc::mprotect(self.base as *mut libc::c_void, aligned_header_size, libc::PROT_READ);
+                libc::mprotect(
+                    self.base as *mut libc::c_void,
+                    aligned_header_size,
+                    libc::PROT_READ,
+                );
             }
         }
 
@@ -231,11 +231,7 @@ impl MappedImage {
             let prot = section_protection(sec.characteristics);
 
             let ret = unsafe {
-                libc::mprotect(
-                    self.base.add(aligned_start) as *mut libc::c_void,
-                    prot_size,
-                    prot,
-                )
+                libc::mprotect(self.base.add(aligned_start) as *mut libc::c_void, prot_size, prot)
             };
             if ret != 0 {
                 let err = std::io::Error::last_os_error();
@@ -315,10 +311,7 @@ fn alloc_mapping(preferred: usize, size: usize) -> PeResult<(*mut u8, bool)> {
         )
     };
     if addr == libc::MAP_FAILED {
-        return Err(PeError::Mapping(format!(
-            "mmap failed: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(PeError::Mapping(format!("mmap failed: {}", std::io::Error::last_os_error())));
     }
 
     Ok((addr as *mut u8, false))

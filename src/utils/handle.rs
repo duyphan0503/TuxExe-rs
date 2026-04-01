@@ -212,6 +212,7 @@ mod tests {
 
     /// A trivial test object.
     #[derive(Debug)]
+    #[allow(dead_code)]
     struct DummyObj(String);
 
     impl HandleObject for DummyObj {
@@ -289,6 +290,7 @@ mod tests {
     #[test]
     fn with_mut_can_replace_content() {
         #[derive(Debug)]
+        #[allow(dead_code)]
         struct Counter(u32);
         impl HandleObject for Counter {
             fn type_name(&self) -> &'static str {

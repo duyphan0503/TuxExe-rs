@@ -10,13 +10,10 @@ use tracing::trace;
 /// Returns the address of the function if found, or 0 if not implemented.
 pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
     let dll_lower = dll_name.to_lowercase();
-    
+
     // Ignore extensions
-    let base_name = if let Some(idx) = dll_lower.find('.') {
-        &dll_lower[..idx]
-    } else {
-        &dll_lower
-    };
+    let base_name =
+        if let Some(idx) = dll_lower.find('.') { &dll_lower[..idx] } else { &dll_lower };
 
     match base_name {
         "kernel32" => {

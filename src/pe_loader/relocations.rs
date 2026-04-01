@@ -88,12 +88,7 @@ pub fn apply_relocations(pe: &ParsedPe, mapped: &mut MappedImage) -> PeResult<Re
         .ok_or_else(|| PeError::Relocation("relocation directory out of bounds".into()))?
         .to_vec(); // owned copy — avoids aliasing `mapped` while we write fixups
 
-    let mut result = RelocationResult {
-        blocks_processed: 0,
-        fixups_applied: 0,
-        skipped: 0,
-        delta,
-    };
+    let mut result = RelocationResult { blocks_processed: 0, fixups_applied: 0, skipped: 0, delta };
 
     // Walk blocks.
     let mut offset = 0usize;
@@ -121,11 +116,7 @@ pub fn apply_relocations(pe: &ParsedPe, mapped: &mut MappedImage) -> PeResult<Re
 
         let num_entries = (block_size - 8) / 2;
 
-        debug!(
-            page_rva = format_args!("0x{page_rva:08x}"),
-            entries = num_entries,
-            "reloc block"
-        );
+        debug!(page_rva = format_args!("0x{page_rva:08x}"), entries = num_entries, "reloc block");
 
         for i in 0..num_entries {
             let entry_offset = offset + 8 + i * 2;
@@ -145,23 +136,23 @@ pub fn apply_relocations(pe: &ParsedPe, mapped: &mut MappedImage) -> PeResult<Re
                     result.skipped += 1;
                 }
                 IMAGE_REL_BASED_HIGHLOW => {
-                    let old = mapped
-                        .read_u32(fixup_rva)
-                        .ok_or_else(|| PeError::Relocation(format!("HIGHLOW OOB at 0x{fixup_rva:x}")))?;
+                    let old = mapped.read_u32(fixup_rva).ok_or_else(|| {
+                        PeError::Relocation(format!("HIGHLOW OOB at 0x{fixup_rva:x}"))
+                    })?;
                     let new = (old as i64 + delta) as u32;
-                    mapped
-                        .write_u32(fixup_rva, new)
-                        .ok_or_else(|| PeError::Relocation(format!("HIGHLOW write OOB at 0x{fixup_rva:x}")))?;
+                    mapped.write_u32(fixup_rva, new).ok_or_else(|| {
+                        PeError::Relocation(format!("HIGHLOW write OOB at 0x{fixup_rva:x}"))
+                    })?;
                     result.fixups_applied += 1;
                 }
                 IMAGE_REL_BASED_DIR64 => {
-                    let old = mapped
-                        .read_u64(fixup_rva)
-                        .ok_or_else(|| PeError::Relocation(format!("DIR64 OOB at 0x{fixup_rva:x}")))?;
+                    let old = mapped.read_u64(fixup_rva).ok_or_else(|| {
+                        PeError::Relocation(format!("DIR64 OOB at 0x{fixup_rva:x}"))
+                    })?;
                     let new = (old as i64 + delta) as u64;
-                    mapped
-                        .write_u64(fixup_rva, new)
-                        .ok_or_else(|| PeError::Relocation(format!("DIR64 write OOB at 0x{fixup_rva:x}")))?;
+                    mapped.write_u64(fixup_rva, new).ok_or_else(|| {
+                        PeError::Relocation(format!("DIR64 write OOB at 0x{fixup_rva:x}"))
+                    })?;
                     result.fixups_applied += 1;
                 }
                 other => {
@@ -246,7 +237,7 @@ mod tests {
         // BlockSize = 12 (header=8 + 2 entries*2)
         buf[0x404..0x408].copy_from_slice(&12u32.to_le_bytes());
         // Entry 0: type=DIR64 (10 << 12), offset=0x000
-        let entry0: u16 = (IMAGE_REL_BASED_DIR64 << 12) | 0x000;
+        let entry0: u16 = IMAGE_REL_BASED_DIR64 << 12;
         buf[0x408..0x40A].copy_from_slice(&entry0.to_le_bytes());
         // Entry 1: ABSOLUTE (padding)
         buf[0x40A..0x40C].copy_from_slice(&0u16.to_le_bytes());

@@ -1,3 +1,5 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 //! ExitProcess, GetModuleHandleA/W, GetCommandLineA/W, GetCurrentProcessId.
 
 use std::ffi::c_void;
@@ -12,7 +14,9 @@ pub extern "win64" fn exit_process(exit_code: u32) {
 static mut MAIN_IMAGE_BASE: usize = 0x0040_0000; // Will be set during PE loading
 
 pub fn set_main_image_base(base: usize) {
-    unsafe { MAIN_IMAGE_BASE = base; }
+    unsafe {
+        MAIN_IMAGE_BASE = base;
+    }
 }
 
 pub extern "win64" fn get_module_handle_a(module_name: *const i8) -> *mut c_void {

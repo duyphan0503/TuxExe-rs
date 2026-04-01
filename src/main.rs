@@ -3,10 +3,15 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::info;
 
+use tuxexe_rs::exceptions::signals::install_signal_handlers;
+use tuxexe_rs::exceptions::unwind::register_runtime_function_table;
 use tuxexe_rs::pe_loader::imports::enumerate_imports;
 use tuxexe_rs::pe_loader::mapper::map_pe;
 use tuxexe_rs::pe_loader::parser::ParsedPe;
 use tuxexe_rs::pe_loader::relocations::apply_relocations;
+use tuxexe_rs::threading::tls::{invoke_process_attach_callbacks, register_tls_callbacks};
+use tuxexe_rs::utils::handle::init_global_table;
+use tuxexe_rs::win32::kernel32::process::set_main_image_base;
 
 /// TuxExe-rs — run Windows PE executables on Linux.
 #[derive(Parser, Debug)]
@@ -62,17 +67,27 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Run { exe, args } => {
             info!(exe = %exe.display(), ?args, "Preparing to execute PE");
+            init_global_table();
 
             // Phase 1: Load, map, relocate, enumerate imports.
             let mut pe = run_pe_loader(&exe)?;
+            set_main_image_base(pe.mapped.base_addr());
+            register_runtime_function_table(&pe.parsed, &pe.mapped)
+                .map_err(|error| anyhow::anyhow!("Failed to register unwind table: {error}"))?;
+            install_signal_handlers()
+                .map_err(|error| anyhow::anyhow!("Failed to install signal handlers: {error}"))?;
 
             // Resolve and patch imports
             tuxexe_rs::pe_loader::imports::resolve_imports(&mut pe.mapped, &pe.parsed, &pe.imports)
                 .with_context(|| "Failed to resolve imports")?;
 
             // Apply memory protection
-            pe.mapped.apply_protections(&pe.parsed)
+            pe.mapped
+                .apply_protections(&pe.parsed)
                 .with_context(|| "Failed to apply memory protections")?;
+
+            register_tls_callbacks(&pe.parsed, &pe.mapped)
+                .map_err(|error| anyhow::anyhow!("Failed to register TLS callbacks: {error}"))?;
 
             // Execute
             let entry_point_rva = pe.parsed.entry_point_rva as usize;
@@ -81,16 +96,15 @@ fn main() -> Result<()> {
             }
 
             let entry_point_addr = pe.mapped.base_addr() + entry_point_rva;
-            info!(
-                va = format_args!("0x{:x}", entry_point_addr),
-                "Jumping to entry point"
-            );
+            info!(va = format_args!("0x{:x}", entry_point_addr), "Jumping to entry point");
 
             // Create thread execution block / environment manually or just jump straight to the entry point.
-            // Some very basic things may break if the PE relies purely on FS/GS TEB structures without 
+            // Some very basic things may break if the PE relies purely on FS/GS TEB structures without
             // the NT kernel properly backing them up.
             tuxexe_rs::threading::teb::setup_teb(pe.mapped.base_addr())
                 .map_err(|e| anyhow::anyhow!("Failed to setup TEB: {}", e))?;
+
+            invoke_process_attach_callbacks();
 
             // Note: If the target is a 64-bit Windows PE, its entry point uses the Win64 ABI, but typically takes no args.
             // On Windows 64-bit, the entry point for EXEs actually doesn't have a standardized ABI signature
@@ -99,7 +113,7 @@ fn main() -> Result<()> {
                 let entry_fn: extern "win64" fn() = std::mem::transmute(entry_point_addr);
                 entry_fn(); // JUMP!
             }
-            
+
             info!("Execution finished successfully");
             Ok(())
         }
@@ -133,7 +147,11 @@ fn main() -> Result<()> {
                 "  Relocations:  {} fixups applied (delta = {:#x})",
                 pe.reloc_result.fixups_applied, pe.reloc_result.delta
             );
-            println!("  Imports:      {} functions from {} DLLs", pe.imports.total_imports(), pe.imports.dlls.len());
+            println!(
+                "  Imports:      {} functions from {} DLLs",
+                pe.imports.total_imports(),
+                pe.imports.dlls.len()
+            );
             for dll in &pe.imports.dlls {
                 let names: Vec<_> = pe.imports.for_dll(dll).map(|e| e.import.to_string()).collect();
                 println!("    {dll}: {}", names.join(", "));
@@ -174,13 +192,8 @@ fn run_pe_loader(path: &std::path::Path) -> Result<LoadedPe> {
         .with_context(|| "Failed to apply base relocations")?;
 
     // 4. Enumerate imports
-    let imports = enumerate_imports(&parsed, &mapped)
-        .with_context(|| "Failed to enumerate imports")?;
+    let imports =
+        enumerate_imports(&parsed, &mapped).with_context(|| "Failed to enumerate imports")?;
 
-    Ok(LoadedPe {
-        parsed,
-        mapped,
-        reloc_result,
-        imports,
-    })
+    Ok(LoadedPe { parsed, mapped, reloc_result, imports })
 }

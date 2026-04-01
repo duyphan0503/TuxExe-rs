@@ -89,9 +89,7 @@ impl SectionInfo {
 
     /// Build from a `goblin` section table entry.
     fn from_goblin(sec: &SectionTable) -> Self {
-        let name = String::from_utf8_lossy(&sec.name)
-            .trim_end_matches('\0')
-            .to_string();
+        let name = String::from_utf8_lossy(&sec.name).trim_end_matches('\0').to_string();
 
         Self {
             name,
@@ -139,6 +137,8 @@ pub struct ParsedPe {
     pub reloc_dir: Option<DataDirectory>,
     /// Import data directory.
     pub import_dir: Option<DataDirectory>,
+    /// TLS data directory.
+    pub tls_dir: Option<DataDirectory>,
     /// Total size of all headers (MZ + PE + sections).
     pub header_size: u32,
     /// DLL characteristics (e.g. DYNAMIC_BASE for ASLR).
@@ -151,14 +151,8 @@ impl fmt::Debug for ParsedPe {
             .field("machine", &self.machine)
             .field("is_pe64", &self.is_pe64)
             .field("image_base", &format_args!("0x{:x}", self.image_base))
-            .field(
-                "entry_point_rva",
-                &format_args!("0x{:x}", self.entry_point_rva),
-            )
-            .field(
-                "size_of_image",
-                &format_args!("0x{:x}", self.size_of_image),
-            )
+            .field("entry_point_rva", &format_args!("0x{:x}", self.entry_point_rva))
+            .field("size_of_image", &format_args!("0x{:x}", self.size_of_image))
             .field("sections", &self.sections.len())
             .finish()
     }
@@ -174,9 +168,7 @@ impl ParsedPe {
             return Err(PeError::InvalidPe("file too small for DOS header".into()));
         }
         if raw[0] != b'M' || raw[1] != b'Z' {
-            return Err(PeError::InvalidPe(
-                "missing MZ magic (not a PE file)".into(),
-            ));
+            return Err(PeError::InvalidPe("missing MZ magic (not a PE file)".into()));
         }
 
         // ── 2. Parse with goblin ────────────────────────────────────
@@ -199,25 +191,27 @@ impl ParsedPe {
         let is_pe64 = opt.standard_fields.magic == goblin::pe::optional_header::MAGIC_64;
         let image_base = opt.windows_fields.image_base;
         let entry_point_rva = opt.standard_fields.address_of_entry_point as u32;
-        let size_of_image = opt.windows_fields.size_of_image as u32;
-        let section_alignment = opt.windows_fields.section_alignment as u32;
-        let file_alignment = opt.windows_fields.file_alignment as u32;
-        let header_size = opt.windows_fields.size_of_headers as u32;
+        let size_of_image = opt.windows_fields.size_of_image;
+        let section_alignment = opt.windows_fields.section_alignment;
+        let file_alignment = opt.windows_fields.file_alignment;
+        let header_size = opt.windows_fields.size_of_headers;
         let dll_characteristics = opt.windows_fields.dll_characteristics;
         let number_of_sections = pe.header.coff_header.number_of_sections;
 
         // ── 5. Data directories ─────────────────────────────────────
         let data_dirs = &opt.data_directories;
 
-        let import_dir = data_dirs.get_import_table().map(|d| DataDirectory {
-            virtual_address: d.virtual_address,
-            size: d.size,
-        });
+        let import_dir = data_dirs
+            .get_import_table()
+            .map(|d| DataDirectory { virtual_address: d.virtual_address, size: d.size });
 
-        let reloc_dir = data_dirs.get_base_relocation_table().map(|d| DataDirectory {
-            virtual_address: d.virtual_address,
-            size: d.size,
-        });
+        let reloc_dir = data_dirs
+            .get_base_relocation_table()
+            .map(|d| DataDirectory { virtual_address: d.virtual_address, size: d.size });
+
+        let tls_dir = data_dirs
+            .get_tls_table()
+            .map(|d| DataDirectory { virtual_address: d.virtual_address, size: d.size });
 
         // ── 6. Sections ─────────────────────────────────────────────
         let sections: Vec<SectionInfo> = pe.sections.iter().map(SectionInfo::from_goblin).collect();
@@ -257,6 +251,7 @@ impl ParsedPe {
             sections,
             reloc_dir,
             import_dir,
+            tls_dir,
             header_size,
             dll_characteristics,
         })
@@ -355,8 +350,9 @@ pub(crate) mod tests {
         // PointerToRawData
         buf[sec_off + 20..sec_off + 24].copy_from_slice(&0x200u32.to_le_bytes());
         // Characteristics = EXEC | READ | WRITE
-        buf[sec_off + 36..sec_off + 40]
-            .copy_from_slice(&(IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE).to_le_bytes());
+        buf[sec_off + 36..sec_off + 40].copy_from_slice(
+            &(IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE).to_le_bytes(),
+        );
 
         buf
     }
