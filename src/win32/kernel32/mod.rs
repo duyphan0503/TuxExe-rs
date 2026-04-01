@@ -37,6 +37,11 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     // Process
     exports.insert("ExitProcess", process::exit_process as usize);
     exports.insert("GetModuleHandleA", process::get_module_handle_a as usize);
+    exports.insert("GetModuleHandleW", process::get_module_handle_w as usize);
+    exports.insert("LoadLibraryA", process::load_library_a as usize);
+    exports.insert("LoadLibraryW", process::load_library_w as usize);
+    exports.insert("FreeLibrary", process::free_library_api as usize);
+    exports.insert("GetProcAddress", process::get_proc_address as usize);
     exports.insert("GetCommandLineA", process::get_command_line_a as usize);
     exports.insert("GetCommandLineW", process::get_command_line_w as usize);
     exports.insert("GetStartupInfoA", process::get_startup_info_a as usize);

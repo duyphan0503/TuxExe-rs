@@ -139,6 +139,8 @@ pub struct ParsedPe {
     pub import_dir: Option<DataDirectory>,
     /// TLS data directory.
     pub tls_dir: Option<DataDirectory>,
+    /// Delay import data directory.
+    pub delay_import_dir: Option<DataDirectory>,
     /// Total size of all headers (MZ + PE + sections).
     pub header_size: u32,
     /// DLL characteristics (e.g. DYNAMIC_BASE for ASLR).
@@ -213,6 +215,10 @@ impl ParsedPe {
             .get_tls_table()
             .map(|d| DataDirectory { virtual_address: d.virtual_address, size: d.size });
 
+        let delay_import_dir = data_dirs
+            .get_delay_import_descriptor()
+            .map(|d| DataDirectory { virtual_address: d.virtual_address, size: d.size });
+
         // ── 6. Sections ─────────────────────────────────────────────
         let sections: Vec<SectionInfo> = pe.sections.iter().map(SectionInfo::from_goblin).collect();
 
@@ -252,6 +258,7 @@ impl ParsedPe {
             reloc_dir,
             import_dir,
             tls_dir,
+            delay_import_dir,
             header_size,
             dll_characteristics,
         })

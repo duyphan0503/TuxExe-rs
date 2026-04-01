@@ -15,6 +15,7 @@ use super::{PeError, PeResult};
 /// The mapping is an anonymous, private region large enough for the entire
 /// image (`SizeOfImage`).  Sections are copied at their respective
 /// `VirtualAddress` offsets and memory protection is set per section.
+#[derive(Debug)]
 pub struct MappedImage {
     /// Base address of the mapping.
     base: *mut u8,

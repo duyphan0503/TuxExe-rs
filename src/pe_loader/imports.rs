@@ -20,6 +20,8 @@ pub struct ImportEntry {
     pub import: ImportKind,
     /// RVA of the IAT slot (where the resolved address must be written).
     pub iat_rva: usize,
+    /// Whether this import was discovered from delay-import descriptors.
+    pub delayed: bool,
 }
 
 /// Whether a function is imported by name or ordinal.
@@ -165,7 +167,12 @@ pub fn enumerate_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<Import
                 "  import"
             );
 
-            entries.push(ImportEntry { dll: dll_name.clone(), import, iat_rva: iat_slot_rva });
+            entries.push(ImportEntry {
+                dll: dll_name.clone(),
+                import,
+                iat_rva: iat_slot_rva,
+                delayed: false,
+            });
 
             idx += 1;
         }
@@ -178,6 +185,113 @@ pub fn enumerate_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<Import
         let count = entries.iter().filter(|e| e.dll.eq_ignore_ascii_case(dll)).count();
         info!(dll = %dll, functions = count, "  required DLL");
     }
+
+    Ok(ImportTable { entries, dlls })
+}
+
+/// Enumerate delay-loaded imports from IMAGE_DELAY_IMPORT_DESCRIPTOR.
+pub fn enumerate_delay_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<ImportTable> {
+    let delay_dir = match pe.delay_import_dir {
+        Some(dir) if dir.size > 0 && dir.virtual_address > 0 => dir,
+        _ => {
+            info!("No delay import directory");
+            return Ok(ImportTable { entries: Vec::new(), dlls: Vec::new() });
+        }
+    };
+
+    info!(
+        delay_import_rva = format_args!("0x{:x}", delay_dir.virtual_address),
+        delay_import_size = delay_dir.size,
+        "Enumerating PE delay imports"
+    );
+
+    let mut entries = Vec::new();
+    let mut dlls = Vec::new();
+
+    // IMAGE_DELAY_IMPORT_DESCRIPTOR (PE32/PE32+) is 8 DWORDs = 32 bytes.
+    let desc_size = 32usize;
+    let mut desc_rva = delay_dir.virtual_address as usize;
+
+    loop {
+        let gr_attrs = mapped.read_u32(desc_rva).unwrap_or(0);
+        let name_rva_or_va = mapped.read_u32(desc_rva + 4).unwrap_or(0) as usize;
+        let _hmod_rva_or_va = mapped.read_u32(desc_rva + 8).unwrap_or(0);
+        let iat_rva_or_va = mapped.read_u32(desc_rva + 12).unwrap_or(0) as usize;
+        let int_rva_or_va = mapped.read_u32(desc_rva + 16).unwrap_or(0) as usize;
+        let _bound_iat = mapped.read_u32(desc_rva + 20).unwrap_or(0);
+        let _unload_iat = mapped.read_u32(desc_rva + 24).unwrap_or(0);
+        let _timestamp = mapped.read_u32(desc_rva + 28).unwrap_or(0);
+
+        // Terminator descriptor is all zeros.
+        if gr_attrs == 0 && name_rva_or_va == 0 && iat_rva_or_va == 0 && int_rva_or_va == 0 {
+            break;
+        }
+
+        // If attrs bit0 is 1, fields are VAs. We currently support RVA mode only.
+        if gr_attrs & 1 != 0 {
+            debug!(
+                descriptor_rva = format_args!("0x{desc_rva:x}"),
+                "Skipping delay import descriptor using VA form (unsupported)"
+            );
+            desc_rva += desc_size;
+            continue;
+        }
+
+        let dll_name = match read_ascii_string(mapped, name_rva_or_va) {
+            Some(name) => name,
+            None => {
+                desc_rva += desc_size;
+                continue;
+            }
+        };
+
+        if !dlls.iter().any(|d: &String| d.eq_ignore_ascii_case(&dll_name)) {
+            dlls.push(dll_name.clone());
+        }
+
+        let thunk_table_rva = if int_rva_or_va != 0 { int_rva_or_va } else { iat_rva_or_va };
+        let thunk_size = if pe.is_pe64 { 8usize } else { 4usize };
+        let ordinal_flag: u64 = if pe.is_pe64 { 0x8000_0000_0000_0000 } else { 0x8000_0000 };
+
+        let mut idx = 0usize;
+        loop {
+            let thunk_rva = thunk_table_rva + idx * thunk_size;
+            let thunk_val = if pe.is_pe64 {
+                mapped.read_u64(thunk_rva).unwrap_or(0)
+            } else {
+                mapped.read_u32(thunk_rva).unwrap_or(0) as u64
+            };
+            if thunk_val == 0 {
+                break;
+            }
+
+            let iat_slot_rva = iat_rva_or_va + idx * thunk_size;
+            let import = if thunk_val & ordinal_flag != 0 {
+                ImportKind::ByOrdinal((thunk_val & 0xFFFF) as u16)
+            } else {
+                let hint_name_rva = (thunk_val & 0x7FFF_FFFF) as usize;
+                let hint = mapped.read_u32(hint_name_rva).unwrap_or(0) as u16;
+                let func_name = read_ascii_string(mapped, hint_name_rva + 2).unwrap_or_default();
+                ImportKind::ByName { hint, name: func_name }
+            };
+
+            entries.push(ImportEntry {
+                dll: dll_name.clone(),
+                import,
+                iat_rva: iat_slot_rva,
+                delayed: true,
+            });
+            idx += 1;
+        }
+
+        desc_rva += desc_size;
+    }
+
+    info!(
+        dll_count = dlls.len(),
+        import_count = entries.len(),
+        "Delay import enumeration complete"
+    );
 
     Ok(ImportTable { entries, dlls })
 }
@@ -203,21 +317,28 @@ pub fn resolve_imports(
             ImportKind::ByOrdinal(ord) => format!("ordinal#{}", ord),
         };
 
-        let ptr = crate::dll_manager::resolve_reimplemented_export(&entry.dll, &func_name);
+        let ptr = match crate::dll_manager::load_library(&entry.dll) {
+            Ok(handle) => match &entry.import {
+                ImportKind::ByName { name, .. } => crate::dll_manager::resolve_export(handle, name),
+                ImportKind::ByOrdinal(_) => None,
+            },
+            Err(_) => None,
+        };
 
-        if ptr == 0 {
+        let Some(ptr) = ptr else {
             tracing::warn!(
                 dll = %entry.dll,
                 func = %func_name,
+                delayed = entry.delayed,
                 "Unresolved import — will crash if called!"
             );
             continue;
-        }
+        };
 
         debug!(
             dll = %entry.dll,
             func = %func_name,
-            ptr = format_args!("0x{:x}", ptr as usize),
+            ptr = format_args!("0x{:x}", ptr),
             "Resolved import"
         );
 
@@ -296,16 +417,19 @@ mod tests {
                     dll: "KERNEL32.dll".into(),
                     import: ImportKind::ByName { hint: 0, name: "ExitProcess".into() },
                     iat_rva: 0x1000,
+                    delayed: false,
                 },
                 ImportEntry {
                     dll: "msvcrt.dll".into(),
                     import: ImportKind::ByName { hint: 0, name: "printf".into() },
                     iat_rva: 0x1008,
+                    delayed: false,
                 },
                 ImportEntry {
                     dll: "KERNEL32.dll".into(),
                     import: ImportKind::ByName { hint: 0, name: "GetStdHandle".into() },
                     iat_rva: 0x1010,
+                    delayed: false,
                 },
             ],
             dlls: vec!["KERNEL32.dll".into(), "msvcrt.dll".into()],
@@ -316,5 +440,16 @@ mod tests {
 
         let msvcrt: Vec<_> = table.for_dll("MSVCRT.DLL").collect();
         assert_eq!(msvcrt.len(), 1);
+    }
+
+    #[test]
+    fn no_delay_imports_returns_empty() {
+        let pe_bytes = crate::pe_loader::parser::tests::minimal_pe64_pub();
+        let parsed = ParsedPe::from_bytes(pe_bytes).unwrap();
+        let mapped = map_pe(&parsed).unwrap();
+
+        let imports = enumerate_delay_imports(&parsed, &mapped).unwrap();
+        assert_eq!(imports.total_imports(), 0);
+        assert!(imports.dlls.is_empty());
     }
 }
