@@ -7,23 +7,27 @@ This plan is designed for a **solo developer** with an **open-ended timeline**. 
 ---
 
 ## Phase 0: Foundation (Weeks 1-3)
+
 **Goal**: Project skeleton, CI, and tooling.
 
 ### Tasks
+
 - [x] 0.1 Set up project structure (all crate modules as empty `mod.rs` files)
 - [x] 0.2 Configure `Cargo.toml` with initial dependencies (goblin, nix, libc, memmap2, tracing, thiserror, anyhow, clap)
 - [x] 0.3 Create CLI entry point: `tuxexe <path-to-exe> [args...]`
 - [x] 0.4 Set up tracing/logging infrastructure (structured logs with levels)
 - [x] 0.5 Create `utils/wide_string.rs` — UTF-16LE ↔ UTF-8 conversion (needed everywhere)
 - [x] 0.6 Create `utils/handle.rs` — HANDLE table (u32/u64 → trait object mapping)
-- [ ] 0.7 Set up GitHub Actions CI (cargo build, cargo test, cargo clippy, cargo fmt)
-- [ ] 0.8 Write a "hello world" Windows console .exe with MinGW for testing: `x86_64-w64-mingw32-gcc -o hello.exe hello.c`
+- [x] 0.7 Set up GitHub Actions CI (cargo build, cargo test, cargo clippy, cargo fmt)
+- [x] 0.8 Write a "hello world" Windows console .exe with MinGW for testing: `x86_64-w64-mingw32-gcc -o tests/test_binaries/hello.exe tests/test_binaries/hello.c`
 - [x] 0.9 Add `docs/ARCHITECTURE.md` ✅ (done)
 
 ### Deliverable
+
 Running `tuxexe hello.exe` prints a clear error: "PE loaded but no APIs implemented yet."
 
 ### Test
+
 ```bash
 cargo build
 cargo test
@@ -33,9 +37,11 @@ cargo clippy -- -D warnings
 ---
 
 ## Phase 1: PE Loader (Weeks 3-8)
+
 **Goal**: Parse and memory-map a PE64 executable. No API execution yet.
 
 ### Tasks
+
 - [x] 1.1 `pe_loader/parser.rs` — Parse PE headers using `goblin::pe::PE`
   - DOS header validation (MZ magic)
   - PE signature validation
@@ -64,6 +70,7 @@ cargo clippy -- -D warnings
   - Test relocation application
 
 ### Deliverable
+
 ```
 $ tuxexe hello.exe
 [INFO] Loaded PE64: hello.exe
@@ -79,13 +86,15 @@ $ tuxexe hello.exe
 ---
 
 ## Phase 2: Minimal Execution — "Hello World" (Weeks 8-16)
+
 **Goal**: Run a MinGW-compiled "Hello World" .exe that prints to stdout and exits.
 
 ### Required APIs (absolute minimum for hello.exe)
 
 A MinGW hello world typically needs:
+
 ```
-kernel32.dll: GetStdHandle, WriteFile/WriteConsoleA, ExitProcess, 
+kernel32.dll: GetStdHandle, WriteFile/WriteConsoleA, ExitProcess,
               GetModuleHandleA, GetStartupInfoA, GetCommandLineA,
               SetUnhandledExceptionFilter, GetSystemTimeAsFileTime,
               GetCurrentThreadId, GetCurrentProcessId, QueryPerformanceCounter,
@@ -95,6 +104,7 @@ msvcrt.dll:   __getmainargs, __set_app_type, _cexit, _amsg_exit,
 ```
 
 ### Tasks
+
 - [x] 2.1 `utils/handle.rs` — Implement handle table
   - Thread-safe handle allocation (AtomicU32 counter)
   - Handle → Box<dyn HandleObject> lookup via DashMap or RwLock<HashMap>
@@ -123,9 +133,9 @@ msvcrt.dll:   __getmainargs, __set_app_type, _cexit, _amsg_exit,
   - GetLastError / SetLastError → thread-local storage (std::cell::Cell<u32>)
   - SetUnhandledExceptionFilter → store callback, don't invoke yet
 - [x] 2.7 `win32/msvcrt/mod.rs` — Minimal C runtime
-  - __getmainargs → parse argc/argv from command line
-  - __set_app_type → no-op (store value)
-  - _initterm → call function pointer array (C++ static initializers)
+  - \_\_getmainargs → parse argc/argv from command line
+  - \_\_set_app_type → no-op (store value)
+  - \_initterm → call function pointer array (C++ static initializers)
   - printf → delegate to Rust's libc::printf or implement with format parsing
   - puts → write string + newline to stdout
   - exit → ExitProcess
@@ -149,6 +159,7 @@ msvcrt.dll:   __getmainargs, __set_app_type, _cexit, _amsg_exit,
   - Use `global_asm!` or `naked_fn` (nightly) or a code generator
 
 ### Deliverable
+
 ```
 $ tuxexe hello.exe
 Hello, World!
@@ -157,19 +168,22 @@ $ echo $?
 ```
 
 ### Critical Challenge: Calling Convention
+
 This is the single hardest part of Phase 2. Windows x64 ABI differs from System V:
+
 - Different register assignment (RCX vs RDI for first arg)
 - Shadow space (32 bytes reserved on stack by caller in Windows)
 - Different struct passing rules
 
 **Solution**: Generate assembly trampolines for each API function. Example:
+
 ```asm
 ; Thunk for WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nBytes, LPDWORD written, LPOVERLAPPED ovlp)
 ; Windows: RCX=hFile, RDX=lpBuffer, R8=nBytes, R9=written, [RSP+40]=ovlp
 ; System V: RDI=hFile, RSI=lpBuffer, RDX=nBytes, RCX=written, R8=ovlp
 thunk_WriteFile:
     mov rdi, rcx        ; hFile
-    mov rsi, rdx        ; lpBuffer  
+    mov rsi, rdx        ; lpBuffer
     mov rdx, r8         ; nBytes
     mov rcx, r9         ; written
     mov r8, [rsp+40]    ; ovlp (from shadow space + stack)
@@ -179,48 +193,52 @@ thunk_WriteFile:
 ---
 
 ## Phase 3: Memory & Threading (Weeks 16-24)
+
 **Goal**: Support multi-threaded apps and dynamic memory allocation.
 
 ### Tasks
-- [ ] 3.1 `memory/virtual_alloc.rs` — VirtualAlloc/VirtualFree
+
+- [x] 3.1 `memory/virtual_alloc.rs` — VirtualAlloc/VirtualFree
   - MEM_RESERVE: mmap with PROT_NONE
   - MEM_COMMIT: mprotect to requested protection
   - MEM_RELEASE: munmap
   - Track allocations in a BTreeMap<usize, AllocationInfo>
-- [ ] 3.2 `memory/heap.rs` — HeapCreate/HeapAlloc/HeapFree
+- [x] 3.2 `memory/heap.rs` — HeapCreate/HeapAlloc/HeapFree
   - Default process heap → Rust global allocator
-  - Custom heaps → jemalloc instances or simple bump allocator
+  - Custom heaps → tracked heap handles
   - HeapAlloc → malloc + track, HeapFree → free
-- [ ] 3.3 `threading/teb.rs` — Thread Environment Block
+- [x] 3.3 `threading/teb.rs` — Thread Environment Block
   - Allocate TEB struct (4KB) per thread
   - Set GS base via arch_prctl(ARCH_SET_GS) on x64
   - Fields: ExceptionList, StackBase, StackLimit, TlsSlots, LastError, PEB pointer
-- [ ] 3.4 `threading/tls.rs` — Thread Local Storage
+- [x] 3.4 `threading/tls.rs` — Thread Local Storage
   - TlsAlloc → allocate slot index (0-1087)
   - TlsSetValue/TlsGetValue → read/write TEB.TlsSlots[index]
-  - PE TLS directory callbacks → call before thread entry
-- [ ] 3.5 `win32/kernel32/thread.rs` — Thread API
-  - CreateThread → pthread_create with TEB setup wrapper
-  - ExitThread → pthread_exit
+  - PE TLS directory callbacks → call before process/thread entry
+- [x] 3.5 `win32/kernel32/thread.rs` — Thread API
+  - CreateThread → std::thread spawn with TEB setup wrapper
+  - ExitThread → managed guest-thread exit path
   - GetCurrentThread → pseudo-handle (-2)
-  - SuspendThread/ResumeThread → signals or ptrace
-- [ ] 3.6 `win32/kernel32/sync.rs` — Synchronization
-  - Critical sections → pthread_mutex (non-recursive → recursive)
-  - CreateMutex → pthread_mutex (named → shared memory)
-  - CreateEvent → eventfd + custom state
-  - CreateSemaphore → sem_t
-  - WaitForSingleObject → poll/futex with timeout
-  - WaitForMultipleObjects → epoll on eventfds
-- [ ] 3.7 `exceptions/signals.rs` — Signal handler setup
-  - Register SIGSEGV, SIGFPE, SIGILL, SIGTRAP handlers via sigaction
-  - On signal: construct EXCEPTION_RECORD, walk SEH chain
-  - x64: parse .pdata for RUNTIME_FUNCTION unwind info
-- [ ] 3.8 Process Environment Block (PEB)
+  - SuspendThread/ResumeThread → cooperative start gating (not full async suspension yet)
+- [x] 3.6 `win32/kernel32/sync.rs` — Synchronization
+  - Critical sections → recursive mutex-backed implementation
+  - CreateMutex → waitable mutex handle
+  - CreateEvent → condvar-backed event object
+  - CreateSemaphore → condvar-backed semaphore object
+  - WaitForSingleObject → object wait with timeout
+  - WaitForMultipleObjects → handle-array wait support
+- [x] 3.7 `exceptions/signals.rs` — Signal handler setup
+  - [x] Register SIGSEGV, SIGFPE, SIGILL, SIGTRAP handlers via sigaction
+  - [x] On signal: construct EXCEPTION_RECORD, walk SEH chain
+  - [x] x64: parse .pdata for RUNTIME_FUNCTION unwind info
+- [x] 3.8 Process Environment Block (PEB)
   - Allocate PEB with: ImageBaseAddress, ProcessHeap, ProcessParameters
   - ProcessParameters: CommandLine, CurrentDirectory, Environment
 
 ### Deliverable
+
 A multi-threaded Windows console app works:
+
 ```c
 // test_threads.c — compiled with MinGW
 #include <windows.h>
@@ -242,24 +260,26 @@ int main() {
 ---
 
 ## Phase 4: File System & Registry (Weeks 24-32)
+
 **Goal**: Apps can read/write files and access registry.
 
 ### Tasks
-- [ ] 4.1 `filesystem/path.rs` — Path translation
+
+- [x] 4.1 `filesystem/path.rs` — Path translation
   - `C:\foo\bar` → `~/.tuxexe/drive_c/foo/bar`
   - Backslash → forward slash
   - Drive letter resolution from config
   - Special folders: %TEMP%, %USERPROFILE%, %APPDATA%
-- [ ] 4.2 `filesystem/case_fold.rs` — Case-insensitive filesystem
+- [x] 4.2 `filesystem/case_fold.rs` — Case-insensitive filesystem
   - On file open: if exact path fails, scan directory for case-insensitive match
   - Cache results in LRU cache for performance
-- [ ] 4.3 `nt_kernel/file.rs` — Full file operations
+- [x] 4.3 `nt_kernel/file.rs` — Full file operations
   - NtCreateFile with full access mask, share mode, disposition handling
   - NtQueryInformationFile → fstat with struct conversion
   - NtSetInformationFile → ftruncate, rename, etc.
   - NtQueryDirectoryFile → getdents64 with FindFirstFile/FindNextFile semantics
   - File locking: NtLockFile → fcntl(F_SETLK)
-- [ ] 4.4 `win32/kernel32/file.rs` — Win32 file API
+- [x] 4.4 `win32/kernel32/file.rs` — Win32 file API
   - CreateFileA/W, ReadFile, WriteFile, CloseHandle
   - SetFilePointer/Ex → lseek
   - GetFileSize/Ex → fstat
@@ -268,20 +288,22 @@ int main() {
   - CreateDirectoryA/W → mkdir
   - DeleteFileA/W → unlink
   - GetTempPathA/W → $TMPDIR or /tmp
-- [ ] 4.5 `registry/store.rs` — SQLite registry
+- [x] 4.5 `registry/store.rs` — SQLite registry
   - Schema: `CREATE TABLE reg (path TEXT, name TEXT, type INT, data BLOB, PRIMARY KEY(path, name))`
   - RegOpenKeyExA/W → query existence
   - RegQueryValueExA/W → SELECT by path+name
   - RegSetValueExA/W → INSERT OR REPLACE
   - RegEnumKeyExA/W → SELECT DISTINCT child keys
   - RegDeleteKeyA/W → DELETE
-- [ ] 4.6 `registry/defaults.rs` — Minimal registry defaults
+- [x] 4.6 `registry/defaults.rs` — Minimal registry defaults
   - HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion (SystemRoot, etc.)
   - HKCU\Environment
   - HKCR\.exe → exefile
 
 ### Deliverable
+
 A Windows app can create, read, write files and query registry:
+
 ```c
 // test_files.c
 #include <windows.h>
@@ -304,96 +326,110 @@ int main() {
 ---
 
 ## Phase 5: Dynamic DLL Loading (Weeks 32-38)
+
 **Goal**: Support LoadLibrary, runtime DLL loading, and COM basics.
 
 ### Tasks
-- [ ] 5.1 LoadLibraryA/W — Search, load, and initialize DLLs at runtime
-- [ ] 5.2 GetProcAddress — Resolve exports from loaded DLLs
-- [ ] 5.3 FreeLibrary — Unload with reference counting
-- [ ] 5.4 DllMain entry point — Call with DLL_PROCESS_ATTACH/DETACH
-- [ ] 5.5 Delay-load imports — Handle delay-load directory
-- [ ] 5.6 Real Windows DLL loading — Load actual .dll binaries (hybrid approach)
+
+- [x] 5.1 LoadLibraryA/W — Search, load, and initialize DLLs at runtime
+- [x] 5.2 GetProcAddress — Resolve exports from loaded DLLs
+- [x] 5.3 FreeLibrary — Unload with reference counting
+- [x] 5.4 DllMain entry point — Call with DLL_PROCESS_ATTACH/DETACH
+- [x] 5.5 Delay-load imports — Handle delay-load directory
+- [x] 5.6 Real Windows DLL loading — Load actual .dll binaries (hybrid approach)
   - Apply same PE loading pipeline as .exe
   - Resolve inter-DLL dependencies recursively
   - Handle DLL search paths and redirection
 
 ### Deliverable
+
 Apps using LoadLibrary/GetProcAddress work. Plugin-based architectures supported.
 
 ---
 
 ## Phase 6: Networking (Weeks 38-44)
+
 **Goal**: Winsock support for network-enabled applications.
 
 ### Tasks
-- [ ] 6.1 `win32/ws2_32/mod.rs` — Winsock API
+
+- [x] 6.1 `win32/ws2_32/mod.rs` — Winsock API
   - WSAStartup/WSACleanup → no-op (Linux sockets always available)
   - socket → socket (nearly 1:1, translate AF_INET/SOCK_STREAM constants)
   - connect, bind, listen, accept → direct mapping
-  - send/recv → send/recv (handle MSG_* flag differences)
+  - send/recv → send/recv (handle MSG\_\* flag differences)
   - select → select (translate fd_set format)
   - WSAGetLastError → errno mapping to WSA error codes
   - getaddrinfo/freeaddrinfo → direct mapping
-- [ ] 6.2 Async socket support
+- [x] 6.2 Async socket support
   - WSAAsyncSelect → epoll + callback
   - Overlapped I/O → io_uring or epoll wrapper
 
 ### Deliverable
+
 A simple HTTP client or chat application works.
 
 ---
 
 ## Phase 7: GUI — X11/Wayland (Weeks 44-60+)
+
 **Goal**: Basic windowed applications with GDI drawing.
 
 ### Tasks
-- [ ] 7.1 `win32/user32/window.rs` — Window management
+
+- [x] 7.1 `win32/user32/window.rs` — Window management
   - RegisterClassA/W → internal class registry
   - CreateWindowExA/W → xcb_create_window / wayland surface
   - ShowWindow, MoveWindow, SetWindowPos → X11/Wayland equivalents
   - DestroyWindow → cleanup
-- [ ] 7.2 `win32/user32/message.rs` — Message loop
+- [x] 7.2 `win32/user32/message.rs` — Message loop
   - GetMessageA/W → blocking X11/Wayland event read
   - PeekMessageA/W → non-blocking poll
   - TranslateMessage → key translation
   - DispatchMessageA/W → call window procedure
   - PostQuitMessage → WM_QUIT
   - Map X11 events to Windows messages (KeyPress→WM_KEYDOWN, Expose→WM_PAINT, etc.)
-- [ ] 7.3 `win32/gdi32/mod.rs` — Basic drawing
+- [x] 7.3 `win32/gdi32/mod.rs` — Basic drawing
   - BeginPaint/EndPaint → get drawing context
   - TextOutA/W → draw text (Xft or Pango)
   - Rectangle, Ellipse → X11 drawing primitives
   - BitBlt → image copy
   - CreateCompatibleDC, SelectObject → offscreen drawing
-- [ ] 7.4 Keyboard/Mouse input mapping
+- [x] 7.4 Keyboard/Mouse input mapping
   - X11 keysym → Windows virtual key codes
   - Mouse events → WM_MOUSEMOVE, WM_LBUTTONDOWN, etc.
 
 ### Deliverable
+
 A basic Win32 GUI app with a window, message loop, and text drawing works.
 
 ---
 
 ## Phase 8: DXVK Integration (Weeks 60-80+)
+
 **Goal**: DirectX 9/10/11 games render via Vulkan.
 
 ### Tasks
-- [ ] 8.1 Build DXVK as standalone .so libraries
-- [ ] 8.2 Create Wine API shim layer for DXVK's dependencies
-- [ ] 8.3 HWND → X11 Window / Vulkan surface bridging
-- [ ] 8.4 DirectInput → evdev/libinput mapping
-- [ ] 8.5 DirectSound → PipeWire/PulseAudio mapping
-- [ ] 8.6 Test with simple DirectX demo apps
+
+- [x] 8.1 Build DXVK as standalone .so libraries
+- [x] 8.2 Create Wine API shim layer for DXVK's dependencies
+- [x] 8.3 HWND → X11 Window / Vulkan surface bridging
+- [x] 8.4 DirectInput → evdev/libinput mapping
+- [x] 8.5 DirectSound → PipeWire/PulseAudio mapping
+- [x] 8.6 Test with simple DirectX demo apps
 
 ### Deliverable
+
 A DirectX 11 demo app renders correctly via Vulkan.
 
 ---
 
 ## Phase 9: WoW64 — 32-bit Support (Weeks 80-100+)
+
 **Goal**: Run 32-bit PE32 executables on 64-bit Linux.
 
 ### Tasks
+
 - [ ] 9.1 Reserve low 4GB address space on startup
 - [ ] 9.2 PE32 loader variant (32-bit headers, 32-bit relocations)
 - [ ] 9.3 FS segment register setup for 32-bit TEB (modify_ldt)
@@ -402,11 +438,13 @@ A DirectX 11 demo app renders correctly via Vulkan.
 - [ ] 9.6 x86 SEH (frame-based, FS:[0] chain)
 
 ### Deliverable
+
 A 32-bit Windows console app runs on 64-bit Linux.
 
 ---
 
 ## Phase 10+: Advanced Features (Ongoing)
+
 - [ ] COM/OLE/ActiveX basics (CoCreateInstance, IUnknown)
 - [ ] Windows Services emulation
 - [ ] Named pipes (CreateNamedPipe)
@@ -422,18 +460,18 @@ A 32-bit Windows console app runs on 64-bit Linux.
 
 ## Milestone Tracker
 
-| Phase | Milestone | Status | Validates |
-|-------|-----------|--------|-----------|
-| 0 | Project skeleton builds & tests | ✅ | Tooling |
-| 1 | PE headers parsed, sections mapped | ✅ | PE loader correctness |
-| 2 | **hello.exe prints "Hello World"** | ✅ | End-to-end execution |
-| 3 | Multi-threaded app works | ⬜ | Threading + sync |
-| 4 | File I/O + registry queries work | ⬜ | OS services |
-| 5 | LoadLibrary + DLL plugins work | ⬜ | Dynamic loading |
-| 6 | HTTP client app works | ⬜ | Networking |
-| 7 | Win32 GUI window appears | ⬜ | Graphics pipeline |
-| 8 | DirectX demo renders | ⬜ | DXVK integration |
-| 9 | 32-bit exe runs on 64-bit | ⬜ | WoW64 |
+| Phase | Milestone                          | Status | Validates             |
+| ----- | ---------------------------------- | ------ | --------------------- |
+| 0     | Project skeleton builds & tests    | ✅     | Tooling               |
+| 1     | PE headers parsed, sections mapped | ✅     | PE loader correctness |
+| 2     | **hello.exe prints "Hello World"** | ✅     | End-to-end execution  |
+| 3     | Multi-threaded app works           | 🟨     | Threading + sync      |
+| 4     | File I/O + registry queries work   | ✅     | OS services           |
+| 5     | LoadLibrary + DLL plugins work     | ✅     | Dynamic loading       |
+| 6     | HTTP client app works              | ✅     | Networking            |
+| 7     | Win32 GUI window appears           | 🟨     | Graphics pipeline     |
+| 8     | DirectX demo renders               | ✅     | DXVK integration      |
+| 9     | 32-bit exe runs on 64-bit          | ⬜     | WoW64                 |
 
 **The critical milestone is Phase 2**: once "Hello World" runs, everything else is incremental API coverage.
 

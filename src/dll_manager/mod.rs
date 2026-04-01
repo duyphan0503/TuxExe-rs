@@ -56,6 +56,20 @@ pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
                 return addr;
             }
         }
+        "dinput8" => {
+            let exports = crate::win32::dinput8::get_exports();
+            if let Some(&addr) = exports.get(func_name) {
+                trace!("Resolved dinput8!{} -> {:#x}", func_name, addr);
+                return addr;
+            }
+        }
+        "dsound" => {
+            let exports = crate::win32::dsound::get_exports();
+            if let Some(&addr) = exports.get(func_name) {
+                trace!("Resolved dsound!{} -> {:#x}", func_name, addr);
+                return addr;
+            }
+        }
         _ => {}
     }
 

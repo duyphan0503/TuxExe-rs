@@ -65,7 +65,16 @@ fn canonicalize_module_name(name: &str) -> String {
 }
 
 fn is_reimplemented(canonical: &str) -> bool {
-    matches!(canonical, "kernel32.dll" | "msvcrt.dll" | "ws2_32.dll" | "user32.dll" | "gdi32.dll")
+    matches!(
+        canonical,
+        "kernel32.dll"
+            | "msvcrt.dll"
+            | "ws2_32.dll"
+            | "user32.dll"
+            | "gdi32.dll"
+            | "dinput8.dll"
+            | "dsound.dll"
+    )
 }
 
 fn module_key_by_handle(handle: usize) -> Option<String> {
