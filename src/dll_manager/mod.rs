@@ -6,6 +6,11 @@ pub mod search;
 use crate::win32::{kernel32, msvcrt};
 use tracing::trace;
 
+pub use loader::{
+    free_library, get_loaded_module_handle, load_library, resolve_export, LoadedModule,
+    ModuleSource, NativeModule,
+};
+
 /// Resolves an import in a static reimplemented DLL.
 /// Returns the address of the function if found, or 0 if not implemented.
 pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
