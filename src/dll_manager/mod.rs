@@ -3,7 +3,7 @@
 pub mod loader;
 pub mod search;
 
-use crate::win32::{kernel32, msvcrt};
+use crate::win32::{kernel32, msvcrt, ws2_32};
 use tracing::trace;
 
 pub use loader::{
@@ -32,6 +32,13 @@ pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
             let exports = msvcrt::get_exports();
             if let Some(&addr) = exports.get(func_name) {
                 trace!("Resolved msvcrt!{} -> {:#x}", func_name, addr);
+                return addr;
+            }
+        }
+        "ws2_32" => {
+            let exports = ws2_32::get_exports();
+            if let Some(&addr) = exports.get(func_name) {
+                trace!("Resolved ws2_32!{} -> {:#x}", func_name, addr);
                 return addr;
             }
         }
