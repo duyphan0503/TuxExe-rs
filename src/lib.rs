@@ -10,6 +10,7 @@
 //! ```
 
 pub mod dll_manager;
+pub mod dxvk;
 pub mod exceptions;
 pub mod filesystem;
 pub mod memory;

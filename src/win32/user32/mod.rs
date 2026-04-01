@@ -75,6 +75,7 @@ pub(crate) struct WindowRecord {
     pub width: i32,
     pub height: i32,
     pub visible: bool,
+    pub native_window_id: u64,
 }
 
 pub const WM_CREATE: u32 = 0x0001;
@@ -142,7 +143,8 @@ pub(crate) fn create_window(
     height: i32,
 ) -> usize {
     let hwnd = next_hwnd();
-    let record = WindowRecord { wnd_proc, x, y, width, height, visible: false };
+    let record =
+        WindowRecord { wnd_proc, x, y, width, height, visible: false, native_window_id: 0 };
 
     window_registry().write().expect("window registry poisoned").insert(hwnd, record);
     hwnd
@@ -185,6 +187,18 @@ pub(crate) fn window_proc_for(hwnd: usize) -> Option<WindowProc> {
         .expect("window registry poisoned")
         .get(&hwnd)
         .and_then(|window| window.wnd_proc)
+}
+
+pub(crate) fn ensure_native_window_id(hwnd: usize) -> Option<u64> {
+    let mut windows = window_registry().write().expect("window registry poisoned");
+    let window = windows.get_mut(&hwnd)?;
+
+    if window.native_window_id == 0 {
+        // Keep IDs deterministic to simplify test assertions and event replay.
+        window.native_window_id = 0x20_0000_u64 + hwnd as u64;
+    }
+
+    Some(window.native_window_id)
 }
 
 pub(crate) fn enqueue_message(mut msg: Msg) {
