@@ -200,7 +200,6 @@ pub(crate) fn ensure_native_window_id(hwnd: usize) -> Option<u64> {
 
     Some(window.native_window_id)
 }
-
 pub(crate) fn enqueue_message(mut msg: Msg) {
     if msg.time == 0 {
         msg.time = now_ms();
