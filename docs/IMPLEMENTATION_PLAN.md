@@ -430,12 +430,12 @@ A DirectX 11 demo app renders correctly via Vulkan.
 
 ### Tasks
 
-- [ ] 9.1 Reserve low 4GB address space on startup
-- [ ] 9.2 PE32 loader variant (32-bit headers, 32-bit relocations)
-- [ ] 9.3 FS segment register setup for 32-bit TEB (modify_ldt)
-- [ ] 9.4 32→64 thunking layer for API calls
-- [ ] 9.5 Separate 32-bit DLL set (SysWOW64 equivalent)
-- [ ] 9.6 x86 SEH (frame-based, FS:[0] chain)
+- [x] 9.1 Reserve low 4GB address space on startup
+- [x] 9.2 PE32 loader variant (32-bit headers, 32-bit relocations)
+- [x] 9.3 FS segment register setup for 32-bit TEB (modify_ldt)
+- [x] 9.4 32→64 thunking layer for API calls
+- [x] 9.5 Separate 32-bit DLL set (SysWOW64 equivalent)
+- [x] 9.6 x86 SEH (frame-based, FS:[0] chain)
 
 ### Deliverable
 
@@ -471,7 +471,7 @@ A 32-bit Windows console app runs on 64-bit Linux.
 | 6     | HTTP client app works              | ✅     | Networking            |
 | 7     | Win32 GUI window appears           | 🟨     | Graphics pipeline     |
 | 8     | DirectX demo renders               | ✅     | DXVK integration      |
-| 9     | 32-bit exe runs on 64-bit          | ⬜     | WoW64                 |
+| 9     | 32-bit exe runs on 64-bit          | ✅     | WoW64                 |
 
 **The critical milestone is Phase 2**: once "Hello World" runs, everything else is incremental API coverage.
 

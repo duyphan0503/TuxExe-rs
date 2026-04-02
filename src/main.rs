@@ -7,7 +7,7 @@ use tuxexe_rs::exceptions::signals::install_signal_handlers;
 use tuxexe_rs::exceptions::unwind::register_runtime_function_table;
 use tuxexe_rs::pe_loader::imports::enumerate_imports;
 use tuxexe_rs::pe_loader::mapper::map_pe;
-use tuxexe_rs::pe_loader::parser::ParsedPe;
+use tuxexe_rs::pe_loader::parser::{Machine, ParsedPe};
 use tuxexe_rs::pe_loader::relocations::apply_relocations;
 use tuxexe_rs::threading::tls::{invoke_process_attach_callbacks, register_tls_callbacks};
 use tuxexe_rs::utils::handle::init_global_table;
@@ -72,10 +72,18 @@ fn main() -> Result<()> {
             // Phase 1: Load, map, relocate, enumerate imports.
             let mut pe = run_pe_loader(&exe)?;
             set_main_image_base(pe.mapped.base_addr());
-            register_runtime_function_table(&pe.parsed, &pe.mapped)
-                .map_err(|error| anyhow::anyhow!("Failed to register unwind table: {error}"))?;
+            if pe.parsed.machine == Machine::X86 {
+                tuxexe_rs::wow64::setup_wow64_context(pe.mapped.base_addr())
+                    .map_err(|error| anyhow::anyhow!("Failed to setup WoW64 context: {error}"))?;
+            } else {
+                register_runtime_function_table(&pe.parsed, &pe.mapped)
+                    .map_err(|error| anyhow::anyhow!("Failed to register unwind table: {error}"))?;
+            }
             install_signal_handlers()
                 .map_err(|error| anyhow::anyhow!("Failed to install signal handlers: {error}"))?;
+
+            let _wow64_dll_mode_guard = (pe.parsed.machine == Machine::X86)
+                .then(tuxexe_rs::dll_manager::search::enter_wow64_search_mode);
 
             // Resolve and patch imports
             tuxexe_rs::pe_loader::imports::resolve_imports(&mut pe.mapped, &pe.parsed, &pe.imports)
