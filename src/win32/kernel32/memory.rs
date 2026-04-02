@@ -26,6 +26,8 @@ const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 
+const GMEM_ZEROINIT: u32 = 0x0040;
+
 #[derive(Debug)]
 struct FileMappingHandle {
     duplicated_fd: Option<i32>,
@@ -193,12 +195,192 @@ pub extern "win64" fn HeapFree(hHeap: Handle, dwFlags: u32, lpMem: *mut c_void) 
     heap::heap_free(hHeap, dwFlags, lpMem)
 }
 
+pub extern "win64" fn HeapReAlloc(
+    hHeap: Handle,
+    dwFlags: u32,
+    lpMem: *mut c_void,
+    dwBytes: usize,
+) -> *mut c_void {
+    heap::heap_realloc(hHeap, dwFlags, lpMem, dwBytes)
+}
+
+pub extern "win64" fn HeapSize(hHeap: Handle, dwFlags: u32, lpMem: *const c_void) -> usize {
+    heap::heap_size(hHeap, dwFlags, lpMem)
+}
+
 pub extern "win64" fn HeapDestroy(hHeap: Handle) -> i32 {
     heap::heap_destroy(hHeap)
 }
 
 pub extern "win64" fn GetProcessHeap() -> Handle {
     heap::get_process_heap()
+}
+
+pub extern "win64" fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> *mut c_void {
+    let heap = heap::get_process_heap();
+    let mut heap_flags = 0;
+    if (uFlags & GMEM_ZEROINIT) != 0 {
+        heap_flags |= heap::HEAP_ZERO_MEMORY;
+    }
+
+    let ptr = heap::heap_alloc(heap, heap_flags, dwBytes);
+    if ptr.is_null() {
+        set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+    } else {
+        set_last_error(ERROR_SUCCESS);
+    }
+    ptr
+}
+
+pub extern "win64" fn GlobalFree(hMem: *mut c_void) -> *mut c_void {
+    if hMem.is_null() {
+        set_last_error(ERROR_SUCCESS);
+        return std::ptr::null_mut();
+    }
+
+    let heap = heap::get_process_heap();
+    if heap::heap_free(heap, 0, hMem) != 0 {
+        set_last_error(ERROR_SUCCESS);
+        std::ptr::null_mut()
+    } else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        hMem
+    }
+}
+
+pub extern "win64" fn GlobalLock(hMem: *mut c_void) -> *mut c_void {
+    if hMem.is_null() {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return std::ptr::null_mut();
+    }
+
+    let heap = heap::get_process_heap();
+    if heap::heap_contains(heap, hMem) {
+        set_last_error(ERROR_SUCCESS);
+        hMem
+    } else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        std::ptr::null_mut()
+    }
+}
+
+pub extern "win64" fn GlobalUnlock(hMem: *mut c_void) -> i32 {
+    if hMem.is_null() {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    let heap = heap::get_process_heap();
+    if heap::heap_contains(heap, hMem) {
+        // Windows commonly returns FALSE for fixed blocks with NO_ERROR.
+        set_last_error(ERROR_SUCCESS);
+        0
+    } else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        0
+    }
+}
+
+pub extern "win64" fn GlobalReAlloc(hMem: *mut c_void, dwBytes: usize, uFlags: u32) -> *mut c_void {
+    if hMem.is_null() {
+        return GlobalAlloc(uFlags, dwBytes);
+    }
+
+    let heap = heap::get_process_heap();
+    let mut heap_flags = 0;
+    if (uFlags & GMEM_ZEROINIT) != 0 {
+        heap_flags |= heap::HEAP_ZERO_MEMORY;
+    }
+
+    let ptr = heap::heap_realloc(heap, heap_flags, hMem, dwBytes);
+    if ptr.is_null() {
+        set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+    } else {
+        set_last_error(ERROR_SUCCESS);
+    }
+    ptr
+}
+
+pub extern "win64" fn GlobalSize(hMem: *const c_void) -> usize {
+    if hMem.is_null() {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    let heap = heap::get_process_heap();
+    let size = heap::heap_size(heap, 0, hMem);
+    if size == usize::MAX {
+        set_last_error(ERROR_INVALID_HANDLE);
+        0
+    } else {
+        set_last_error(ERROR_SUCCESS);
+        size
+    }
+}
+
+pub extern "win64" fn GlobalFlags(hMem: *mut c_void) -> u32 {
+    if hMem.is_null() {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return u32::MAX;
+    }
+
+    let heap = heap::get_process_heap();
+    if heap::heap_contains(heap, hMem) {
+        set_last_error(ERROR_SUCCESS);
+        0
+    } else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        u32::MAX
+    }
+}
+
+pub extern "win64" fn GlobalHandle(pMem: *const c_void) -> *mut c_void {
+    if pMem.is_null() {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return std::ptr::null_mut();
+    }
+
+    let heap = heap::get_process_heap();
+    let ptr = pMem as *mut c_void;
+    if heap::heap_contains(heap, ptr) {
+        set_last_error(ERROR_SUCCESS);
+        ptr
+    } else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        std::ptr::null_mut()
+    }
+}
+
+pub extern "win64" fn LocalAlloc(uFlags: u32, uBytes: usize) -> *mut c_void {
+    GlobalAlloc(uFlags, uBytes)
+}
+
+pub extern "win64" fn LocalReAlloc(hMem: *mut c_void, uBytes: usize, uFlags: u32) -> *mut c_void {
+    GlobalReAlloc(hMem, uBytes, uFlags)
+}
+
+pub extern "win64" fn LocalLock(hMem: *mut c_void) -> *mut c_void {
+    GlobalLock(hMem)
+}
+
+pub extern "win64" fn LocalUnlock(hMem: *mut c_void) -> i32 {
+    GlobalUnlock(hMem)
+}
+
+pub extern "win64" fn LocalSize(hMem: *const c_void) -> usize {
+    GlobalSize(hMem)
+}
+
+pub extern "win64" fn LocalFlags(hMem: *mut c_void) -> u32 {
+    GlobalFlags(hMem)
+}
+
+pub extern "win64" fn LocalHandle(pMem: *const c_void) -> *mut c_void {
+    GlobalHandle(pMem)
+}
+
+pub extern "win64" fn LocalFree(hMem: *mut c_void) -> *mut c_void {
+    GlobalFree(hMem)
 }
 
 pub extern "win64" fn CreateFileMappingA(
@@ -449,5 +631,49 @@ mod tests {
 
         assert_eq!(UnmapViewOfFile(view), 1);
         assert_eq!(close_handle(mapping), 1);
+    }
+
+    #[test]
+    fn global_alloc_lock_size_and_free_round_trip() {
+        let _guard = serial_guard();
+        let ptr = GlobalAlloc(GMEM_ZEROINIT, 64);
+        assert!(!ptr.is_null());
+
+        let locked = GlobalLock(ptr);
+        assert_eq!(locked, ptr);
+        assert_eq!(GlobalSize(ptr), 64);
+
+        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, 64) };
+        assert!(bytes.iter().all(|b| *b == 0));
+
+        assert_eq!(GlobalUnlock(ptr), 0);
+        assert!(GlobalFree(ptr).is_null());
+    }
+
+    #[test]
+    fn global_realloc_grows_allocation() {
+        let _guard = serial_guard();
+        let ptr = GlobalAlloc(0, 16);
+        assert!(!ptr.is_null());
+
+        let grown = GlobalReAlloc(ptr, 128, 0);
+        assert!(!grown.is_null());
+        assert_eq!(GlobalSize(grown), 128);
+
+        assert!(GlobalFree(grown).is_null());
+    }
+
+    #[test]
+    fn local_alloc_lock_size_and_free_round_trip() {
+        let _guard = serial_guard();
+        let ptr = LocalAlloc(GMEM_ZEROINIT, 32);
+        assert!(!ptr.is_null());
+
+        assert_eq!(LocalLock(ptr), ptr);
+        assert_eq!(LocalSize(ptr), 32);
+        assert_eq!(LocalFlags(ptr), 0);
+        assert_eq!(LocalHandle(ptr), ptr);
+        assert_eq!(LocalUnlock(ptr), 0);
+        assert!(LocalFree(ptr).is_null());
     }
 }

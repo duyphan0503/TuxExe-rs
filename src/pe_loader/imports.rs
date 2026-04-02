@@ -33,6 +33,42 @@ pub enum ImportKind {
     ByOrdinal(u16),
 }
 
+/// Controls how unresolved imports are handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnresolvedImportPolicy {
+    /// Fail fast on unresolved startup-critical imports.
+    StrictStartup,
+    /// Keep permissive fallback behavior for diagnostics.
+    Relaxed,
+}
+
+impl UnresolvedImportPolicy {
+    /// Parse unresolved import policy from environment.
+    ///
+    /// Accepted values for `TUXEXE_IMPORT_POLICY`:
+    /// - `strict` / `strict-startup` (default)
+    /// - `relaxed`
+    pub fn from_env() -> Self {
+        match std::env::var("TUXEXE_IMPORT_POLICY") {
+            Ok(raw) if raw.eq_ignore_ascii_case("relaxed") => Self::Relaxed,
+            Ok(raw)
+                if raw.eq_ignore_ascii_case("strict")
+                    || raw.eq_ignore_ascii_case("strict-startup") =>
+            {
+                Self::StrictStartup
+            }
+            Ok(raw) => {
+                tracing::warn!(
+                    policy = %raw,
+                    "Unknown TUXEXE_IMPORT_POLICY value, defaulting to strict-startup"
+                );
+                Self::StrictStartup
+            }
+            Err(_) => Self::StrictStartup,
+        }
+    }
+}
+
 impl fmt::Display for ImportKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -307,9 +343,13 @@ pub fn resolve_imports(
     pe: &ParsedPe,
     import_table: &ImportTable,
 ) -> PeResult<()> {
-    info!("Resolving {} imports", import_table.entries.len());
+    let policy = UnresolvedImportPolicy::from_env();
+    info!(imports = import_table.entries.len(), ?policy, "Resolving imports");
 
     let _ptr_size = if pe.is_pe64 { 8 } else { 4 };
+    let mut unresolved_total = 0usize;
+    let mut unresolved_startup_critical = 0usize;
+    let mut unresolved_records: Vec<(String, String, bool)> = Vec::new();
 
     for entry in &import_table.entries {
         let func_name = match &entry.import {
@@ -322,17 +362,41 @@ pub fn resolve_imports(
                 ImportKind::ByName { name, .. } => crate::dll_manager::resolve_export(handle, name),
                 ImportKind::ByOrdinal(_) => None,
             },
-            Err(_) => None,
+            Err(error) => {
+                tracing::warn!(
+                    dll = %entry.dll,
+                    func = %func_name,
+                    %error,
+                    "Failed to load dependent module while resolving import"
+                );
+                None
+            }
         };
 
         let ptr = match ptr {
             Some(addr) => addr,
             None => {
+                unresolved_total += 1;
+                let startup_critical = is_startup_critical_import(entry);
+                if startup_critical {
+                    unresolved_startup_critical += 1;
+                }
+                unresolved_records.push((entry.dll.clone(), func_name.clone(), startup_critical));
+
+                if policy == UnresolvedImportPolicy::StrictStartup && startup_critical {
+                    log_unresolved_report(&unresolved_records, policy);
+                    return Err(PeError::Mapping(format!(
+                        "Unresolved startup-critical import: {}!{} (set TUXEXE_IMPORT_POLICY=relaxed for diagnostics)",
+                        entry.dll, func_name
+                    )));
+                }
+
                 if pe.is_pe64 {
                     tracing::warn!(
                         dll = %entry.dll,
                         func = %func_name,
                         delayed = entry.delayed,
+                        iat_rva = format_args!("0x{:x}", entry.iat_rva),
                         fallback = format_args!("0x{:x}", unresolved_import_stub as usize),
                         "Unresolved import — using PE64 fallback stub"
                     );
@@ -352,6 +416,7 @@ pub fn resolve_imports(
         debug!(
             dll = %entry.dll,
             func = %func_name,
+            iat_rva = format_args!("0x{:x}", entry.iat_rva),
             ptr = format_args!("0x{:x}", ptr),
             "Resolved import"
         );
@@ -365,6 +430,16 @@ pub fn resolve_imports(
                 PeError::Mapping(format!("Failed to write IAT entry at 0x{:x}", entry.iat_rva))
             })?;
         }
+    }
+
+    if unresolved_total > 0 {
+        log_unresolved_report(&unresolved_records, policy);
+        tracing::warn!(
+            unresolved_total,
+            unresolved_startup_critical,
+            ?policy,
+            "Import resolution completed with unresolved entries"
+        );
     }
 
     Ok(())
@@ -395,6 +470,83 @@ fn read_ascii_string(mapped: &MappedImage, rva: usize) -> Option<String> {
         None
     } else {
         Some(s)
+    }
+}
+
+fn is_startup_critical_import(entry: &ImportEntry) -> bool {
+    if entry.delayed {
+        return false;
+    }
+
+    let dll = entry.dll.to_ascii_lowercase();
+
+    // Core runtime DLLs must be resolvable during process/DLL startup.
+    let core_runtime = matches!(
+        dll.as_str(),
+        "kernel32.dll"
+            | "kernelbase.dll"
+            | "ntdll.dll"
+            | "user32.dll"
+            | "msvcrt.dll"
+            | "ucrtbase.dll"
+    );
+
+    if core_runtime {
+        return true;
+    }
+
+    // Treat non-system dependency DLLs as startup-critical (e.g. UnityPlayer.dll).
+    let known_system = matches!(
+        dll.as_str(),
+        "advapi32.dll"
+            | "bcrypt.dll"
+            | "crypt32.dll"
+            | "dwmapi.dll"
+            | "gdi32.dll"
+            | "hid.dll"
+            | "imm32.dll"
+            | "ole32.dll"
+            | "oleaut32.dll"
+            | "opengl32.dll"
+            | "setupapi.dll"
+            | "shell32.dll"
+            | "shlwapi.dll"
+            | "version.dll"
+            | "winhttp.dll"
+            | "winmm.dll"
+            | "ws2_32.dll"
+    );
+
+    !known_system
+}
+
+fn log_unresolved_report(records: &[(String, String, bool)], policy: UnresolvedImportPolicy) {
+    use std::collections::BTreeMap;
+
+    if records.is_empty() {
+        return;
+    }
+
+    let mut by_dll: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for (dll, _, startup_critical) in records {
+        let stats = by_dll.entry(dll.as_str()).or_insert((0, 0));
+        stats.0 += 1;
+        if *startup_critical {
+            stats.1 += 1;
+        }
+    }
+
+    tracing::warn!(unresolved = records.len(), ?policy, "Unresolved import report");
+    for (dll, (total, critical)) in by_dll {
+        tracing::warn!(dll, total, startup_critical = critical, "Unresolved imports by DLL");
+    }
+
+    for (dll, func, startup_critical) in records.iter().take(10) {
+        tracing::warn!(dll = %dll, func = %func, startup_critical, "Unresolved import sample");
+    }
+
+    for (dll, func, _) in records.iter().filter(|(_, _, critical)| *critical).take(10) {
+        tracing::warn!(dll = %dll, func = %func, "Startup-critical unresolved import sample");
     }
 }
 
@@ -458,6 +610,41 @@ mod tests {
 
         let msvcrt: Vec<_> = table.for_dll("MSVCRT.DLL").collect();
         assert_eq!(msvcrt.len(), 1);
+    }
+
+    #[test]
+    fn startup_critical_imports_match_loader_expectations() {
+        let critical = ImportEntry {
+            dll: "KERNEL32.dll".into(),
+            import: ImportKind::ByName { hint: 0, name: "CompareStringW".into() },
+            iat_rva: 0x1000,
+            delayed: false,
+        };
+        assert!(is_startup_critical_import(&critical));
+
+        let non_critical_system = ImportEntry {
+            dll: "CRYPT32.dll".into(),
+            import: ImportKind::ByName { hint: 0, name: "CertOpenStore".into() },
+            iat_rva: 0x1008,
+            delayed: false,
+        };
+        assert!(!is_startup_critical_import(&non_critical_system));
+
+        let critical_third_party = ImportEntry {
+            dll: "UnityPlayer.dll".into(),
+            import: ImportKind::ByName { hint: 0, name: "UnityMain".into() },
+            iat_rva: 0x100C,
+            delayed: false,
+        };
+        assert!(is_startup_critical_import(&critical_third_party));
+
+        let delayed = ImportEntry {
+            dll: "KERNEL32.dll".into(),
+            import: ImportKind::ByName { hint: 0, name: "GetProcAddress".into() },
+            iat_rva: 0x1010,
+            delayed: true,
+        };
+        assert!(!is_startup_critical_import(&delayed));
     }
 
     #[test]

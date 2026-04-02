@@ -7,6 +7,7 @@ use std::{
     ffi::c_void,
     sync::{OnceLock, RwLock},
 };
+use tracing::warn;
 
 use crate::utils::handle::{global_table, init_global_table, Handle, HandleObject};
 
@@ -80,6 +81,7 @@ pub fn heap_alloc(heap: Handle, flags: u32, bytes: usize) -> *mut c_void {
     let size = bytes.max(1);
     let mut manager = heap_manager().write().expect("heap manager poisoned");
     let Some(record) = manager.heaps.get_mut(&heap) else {
+        warn!(heap, bytes = size, flags, "HeapAlloc on unknown heap handle");
         return std::ptr::null_mut();
     };
 
@@ -92,6 +94,7 @@ pub fn heap_alloc(heap: Handle, flags: u32, bytes: usize) -> *mut c_void {
     };
 
     if ptr.is_null() {
+        warn!(heap, bytes = size, flags, "HeapAlloc returned null");
         return std::ptr::null_mut();
     }
 
@@ -117,6 +120,55 @@ pub fn heap_free(heap: Handle, _flags: u32, memory: *mut c_void) -> i32 {
         libc::free(memory);
     }
     1
+}
+
+pub fn heap_size(heap: Handle, _flags: u32, memory: *const c_void) -> usize {
+    if memory.is_null() {
+        return usize::MAX;
+    }
+
+    heap_manager()
+        .read()
+        .expect("heap manager poisoned")
+        .heaps
+        .get(&heap)
+        .and_then(|record| record.allocations.get(&(memory as usize)).copied())
+        .unwrap_or(usize::MAX)
+}
+
+pub fn heap_realloc(heap: Handle, flags: u32, memory: *mut c_void, bytes: usize) -> *mut c_void {
+    if memory.is_null() {
+        return heap_alloc(heap, flags, bytes);
+    }
+
+    let size = bytes.max(1);
+    let mut manager = heap_manager().write().expect("heap manager poisoned");
+    let Some(record) = manager.heaps.get_mut(&heap) else {
+        warn!(heap, bytes = size, flags, "HeapReAlloc on unknown heap handle");
+        return std::ptr::null_mut();
+    };
+
+    let Some(old_size) = record.allocations.get(&(memory as usize)).copied() else {
+        warn!(heap, ptr = memory as usize, "HeapReAlloc on unknown allocation");
+        return std::ptr::null_mut();
+    };
+
+    let ptr = unsafe { libc::realloc(memory, size) };
+    if ptr.is_null() {
+        warn!(heap, bytes = size, flags, old_size, "HeapReAlloc returned null");
+        return std::ptr::null_mut();
+    }
+
+    record.allocations.remove(&(memory as usize));
+    record.allocations.insert(ptr as usize, size);
+
+    if (flags & HEAP_ZERO_MEMORY) != 0 && size > old_size {
+        unsafe {
+            std::ptr::write_bytes((ptr as *mut u8).add(old_size), 0, size - old_size);
+        }
+    }
+
+    ptr
 }
 
 pub fn heap_destroy(heap: Handle) -> i32 {
@@ -202,5 +254,19 @@ mod tests {
         assert!(bytes.iter().all(|byte| *byte == 0));
 
         assert_eq!(heap_free(heap, 0, ptr), 1);
+    }
+
+    #[test]
+    fn heap_realloc_updates_tracked_size() {
+        let _guard = serial_guard();
+        let heap = get_process_heap();
+        let ptr = heap_alloc(heap, 0, 16);
+        assert!(!ptr.is_null());
+
+        let grown = heap_realloc(heap, 0, ptr, 64);
+        assert!(!grown.is_null());
+        assert_eq!(heap_size(heap, 0, grown), 64);
+
+        assert_eq!(heap_free(heap, 0, grown), 1);
     }
 }

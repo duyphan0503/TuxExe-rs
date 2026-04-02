@@ -11,7 +11,7 @@ use tuxexe_rs::pe_loader::parser::{Machine, ParsedPe};
 use tuxexe_rs::pe_loader::relocations::apply_relocations;
 use tuxexe_rs::threading::tls::{invoke_process_attach_callbacks, register_tls_callbacks};
 use tuxexe_rs::utils::handle::init_global_table;
-use tuxexe_rs::win32::kernel32::process::set_main_image_base;
+use tuxexe_rs::win32::kernel32::process::{set_main_image_base, set_main_image_path};
 
 /// TuxExe-rs — run Windows PE executables on Linux.
 #[derive(Parser, Debug)]
@@ -68,6 +68,10 @@ fn main() -> Result<()> {
         Commands::Run { exe, args } => {
             info!(exe = %exe.display(), ?args, "Preparing to execute PE");
 
+            tuxexe_rs::dll_manager::search::set_executable_directory(
+                exe.parent().map(PathBuf::from),
+            );
+
             if tuxexe_rs::wow64::try_delegate_x86_run(&exe, &args)
                 .map_err(|error| anyhow::anyhow!("Failed x86 delegation backend: {error}"))?
             {
@@ -80,6 +84,7 @@ fn main() -> Result<()> {
             // Phase 1: Load, map, relocate, enumerate imports.
             let mut pe = run_pe_loader(&exe)?;
             set_main_image_base(pe.mapped.base_addr());
+            set_main_image_path(&exe);
             if pe.parsed.machine == Machine::X86 {
                 tuxexe_rs::wow64::setup_wow64_context(pe.mapped.base_addr())
                     .map_err(|error| anyhow::anyhow!("Failed to setup WoW64 context: {error}"))?;

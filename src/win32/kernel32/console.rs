@@ -7,21 +7,79 @@ use crate::utils::handle::{
     Handle, INVALID_HANDLE_VALUE, PSEUDO_STDERR, PSEUDO_STDIN, PSEUDO_STDOUT,
 };
 use std::ffi::c_void;
+use std::sync::RwLock;
 use tracing::trace;
 
 pub const STD_INPUT_HANDLE: u32 = 0xffff_fff6;
 pub const STD_OUTPUT_HANDLE: u32 = 0xffff_fff5;
 pub const STD_ERROR_HANDLE: u32 = 0xffff_fff4;
 
+#[derive(Clone, Copy)]
+struct StdHandles {
+    stdin: Handle,
+    stdout: Handle,
+    stderr: Handle,
+}
+
+lazy_static::lazy_static! {
+    static ref STD_HANDLES: RwLock<StdHandles> = RwLock::new(StdHandles {
+        stdin: PSEUDO_STDIN,
+        stdout: PSEUDO_STDOUT,
+        stderr: PSEUDO_STDERR,
+    });
+}
+
 /// Retrieves a handle to the specified standard device.
 pub extern "win64" fn get_std_handle(std_handle: u32) -> Handle {
     trace!("GetStdHandle({:#x})", std_handle);
+    let handles = STD_HANDLES.read().expect("std handles lock poisoned");
     match std_handle {
-        STD_INPUT_HANDLE => PSEUDO_STDIN,
-        STD_OUTPUT_HANDLE => PSEUDO_STDOUT,
-        STD_ERROR_HANDLE => PSEUDO_STDERR,
+        STD_INPUT_HANDLE => handles.stdin,
+        STD_OUTPUT_HANDLE => handles.stdout,
+        STD_ERROR_HANDLE => handles.stderr,
         _ => INVALID_HANDLE_VALUE,
     }
+}
+
+pub extern "win64" fn set_std_handle(std_handle: u32, handle: Handle) -> i32 {
+    trace!("SetStdHandle({:#x}, {})", std_handle, handle);
+    let mut handles = STD_HANDLES.write().expect("std handles lock poisoned");
+    match std_handle {
+        STD_INPUT_HANDLE => handles.stdin = handle,
+        STD_OUTPUT_HANDLE => handles.stdout = handle,
+        STD_ERROR_HANDLE => handles.stderr = handle,
+        _ => {
+            super::error::set_last_error(87); // ERROR_INVALID_PARAMETER
+            return 0;
+        }
+    }
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn get_console_cp() -> u32 {
+    // Use UTF-8 code page for Linux host interoperability.
+    65001
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn get_console_mode(handle: Handle, lp_mode: *mut u32) -> i32 {
+    if lp_mode.is_null() {
+        super::error::set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    if !matches!(handle, PSEUDO_STDIN | PSEUDO_STDOUT | PSEUDO_STDERR) {
+        super::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+
+    // Minimal mode bitmask compatible with common runtime checks.
+    unsafe {
+        *lp_mode = 0x0001;
+    }
+    super::error::set_last_error(0);
+    1
 }
 
 /// Simplified WriteConsoleA
@@ -79,5 +137,27 @@ pub extern "win64" fn write_console_w(
         1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_std_handle_updates_get_std_handle() {
+        let original = get_std_handle(STD_OUTPUT_HANDLE);
+        assert_eq!(set_std_handle(STD_OUTPUT_HANDLE, 0x1234_5678), 1);
+        assert_eq!(get_std_handle(STD_OUTPUT_HANDLE), 0x1234_5678);
+
+        // Restore default-like prior value for test isolation.
+        assert_eq!(set_std_handle(STD_OUTPUT_HANDLE, original), 1);
+    }
+
+    #[test]
+    fn get_console_mode_for_stdout_succeeds() {
+        let mut mode = 0_u32;
+        assert_eq!(get_console_mode(PSEUDO_STDOUT, &mut mode), 1);
+        assert_eq!(mode, 0x0001);
     }
 }

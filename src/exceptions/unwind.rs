@@ -6,6 +6,7 @@ use tracing::{debug, info};
 
 use crate::pe_loader::{mapper::MappedImage, parser::ParsedPe};
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeFunction {
     pub begin_address_rva: u32,

@@ -206,6 +206,7 @@ fn allocate_teb(peb_ptr: *mut Peb) -> *mut Teb {
     teb.client_id_unique_process = std::process::id() as usize;
     teb.client_id_unique_thread = current_thread_id();
     teb.peb = peb_ptr;
+    teb.thread_local_storage_pointer = teb.tls_slots.as_mut_ptr().cast::<c_void>();
 
     Box::into_raw(teb)
 }

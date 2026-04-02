@@ -85,9 +85,35 @@ fn module_key_by_handle(handle: usize) -> Option<String> {
         .find_map(|(key, module)| (module.handle == handle).then(|| key.clone()))
 }
 
-fn call_dll_main(native: &NativeModule, reason: u32) {
+fn should_call_dll_main() -> bool {
+    match std::env::var("TUXEXE_CALL_DLLMAIN") {
+        Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
+        Err(_) => false,
+    }
+}
+
+fn should_call_dll_main_for(canonical: &str) -> bool {
+    if should_call_dll_main() {
+        return true;
+    }
+
+    if canonical.eq_ignore_ascii_case("unityplayer.dll") {
+        return matches!(
+            std::env::var("TUXEXE_CALL_UNITY_DLLMAIN"),
+            Ok(value)
+                if matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+        );
+    }
+
+    false
+}
+
+fn call_dll_main(native: &NativeModule, reason: u32) -> Result<(), String> {
     if native.parsed.entry_point_rva == 0 {
-        return;
+        return Ok(());
     }
 
     let entry = native.mapped.base_addr() + native.parsed.entry_point_rva as usize;
@@ -99,11 +125,20 @@ fn call_dll_main(native: &NativeModule, reason: u32) {
     );
 
     // SAFETY: We mapped and relocated the image and call its declared DLL entrypoint ABI.
-    unsafe {
+    let result = unsafe {
         let dll_main: extern "win64" fn(*mut c_void, u32, *mut c_void) -> i32 =
             std::mem::transmute(entry);
-        let _ = dll_main(native.mapped.base_addr() as *mut c_void, reason, std::ptr::null_mut());
+        dll_main(native.mapped.base_addr() as *mut c_void, reason, std::ptr::null_mut())
+    };
+
+    if reason == DLL_PROCESS_ATTACH && result == 0 {
+        return Err(format!(
+            "DllMain returned FALSE during PROCESS_ATTACH for {}",
+            native.path.display()
+        ));
     }
+
+    Ok(())
 }
 
 fn build_export_map(parsed: &ParsedPe, mapped: &MappedImage) -> HashMap<String, usize> {
@@ -124,6 +159,65 @@ fn build_export_map(parsed: &ParsedPe, mapped: &MappedImage) -> HashMap<String, 
     exports
 }
 
+fn prime_unity_dispatch_cache(module_path: &std::path::Path, mapped: &mut MappedImage) {
+    // UnityPlayer contains an encoded dispatch-cache table used to dynamically
+    // resolve Fls*/Tls* and locale helpers during very early startup.
+    //
+    // On our loader path, these slots are observed as zero-initialized, which
+    // decodes to a garbage non-null pointer under Unity's cookie transform and
+    // causes an immediate `jmp rax` crash.
+    //
+    // Seeding slots with Unity's encoded `-1` sentinel forces the intended
+    // slow-path resolution on first use.
+    let name = module_path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    if !name.eq_ignore_ascii_case("unityplayer.dll") {
+        return;
+    }
+
+    const COOKIE_RVA: usize = 0x1ac2168;
+    const HEAP_HANDLE_RVA: usize = 0x1bb1c58;
+    const DISPATCH_TABLE_RVA: usize = 0x1bb1d00;
+    const SLOTS_TO_PRIME: usize = 64;
+
+    let Some(cookie) = mapped.read_u64(COOKIE_RVA) else {
+        warn!("Unity dispatch cache prime skipped: cookie RVA unreadable");
+        return;
+    };
+    let encoded_minus_one = !0u64 ^ cookie;
+
+    for idx in 0..SLOTS_TO_PRIME {
+        let rva = DISPATCH_TABLE_RVA + idx * std::mem::size_of::<u64>();
+        // Best-effort: only patch empty slots.
+        match mapped.read_u64(rva) {
+            Some(0) => {
+                let _ = mapped.write_u64(rva, encoded_minus_one);
+            }
+            Some(_) => {}
+            None => {
+                warn!(slot = idx, "Unity dispatch cache prime stopped: table RVA unreadable");
+                break;
+            }
+        }
+    }
+
+    if matches!(mapped.read_u64(HEAP_HANDLE_RVA), Some(0)) {
+        let process_heap = crate::memory::heap::get_process_heap();
+        let _ = mapped.write_u64(HEAP_HANDLE_RVA, process_heap as u64);
+        info!(
+            heap_handle = process_heap,
+            rva = format_args!("0x{HEAP_HANDLE_RVA:x}"),
+            "Seeded Unity CRT heap handle with process heap"
+        );
+    }
+
+    info!(
+        cookie = format_args!("0x{cookie:x}"),
+        encoded_minus_one = format_args!("0x{encoded_minus_one:x}"),
+        slots = SLOTS_TO_PRIME,
+        "Primed Unity dispatch cache slots"
+    );
+}
+
 fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
     let parsed = ParsedPe::from_file(&path).map_err(|e| format!("parse failed: {e}"))?;
     let mut mapped = map_pe(&parsed).map_err(|e| format!("map failed: {e}"))?;
@@ -137,6 +231,8 @@ fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
         .map_err(|e| format!("delay imports failed: {e}"))?;
     resolve_imports(&mut mapped, &parsed, &delay_imports)
         .map_err(|e| format!("delay IAT failed: {e}"))?;
+
+    prime_unity_dispatch_cache(&path, &mut mapped);
 
     mapped.apply_protections(&parsed).map_err(|e| format!("protections failed: {e}"))?;
 
@@ -190,10 +286,24 @@ pub fn load_library(module_name: &str) -> Result<usize, String> {
 
     match load_native_module(path.clone()) {
         Ok(native) => {
-            call_dll_main(&native, DLL_PROCESS_ATTACH);
+            if should_call_dll_main_for(&canonical) {
+                if let Err(err) = call_dll_main(&native, DLL_PROCESS_ATTACH) {
+                    registry().write().expect("dll registry poisoned").remove(&canonical);
+                    return Err(err);
+                }
+            } else {
+                info!(
+                    module = %canonical,
+                    path = %path.display(),
+                    "Skipping DllMain(PROCESS_ATTACH); set TUXEXE_CALL_DLLMAIN=1 (global) or TUXEXE_CALL_UNITY_DLLMAIN=1 (Unity only)"
+                );
+            }
+
             let mut guard = registry().write().expect("dll registry poisoned");
             if let Some(module) = guard.get_mut(&canonical) {
                 module.source = ModuleSource::Native(Box::new(native));
+            } else {
+                return Err("module disappeared while finalizing native load".to_string());
             }
             info!(
                 module = %canonical,
@@ -204,6 +314,12 @@ pub fn load_library(module_name: &str) -> Result<usize, String> {
             Ok(handle)
         }
         Err(err) => {
+            warn!(
+                module = %canonical,
+                path = %path.display(),
+                %err,
+                "Failed to load native module"
+            );
             registry().write().expect("dll registry poisoned").remove(&canonical);
             Err(err)
         }
@@ -240,8 +356,17 @@ pub fn free_library(module_handle: usize) -> Result<(), String> {
         }
     }
 
-    if let Some(native) = detached_native.as_ref() {
-        call_dll_main(native, DLL_PROCESS_DETACH);
+    if should_call_dll_main() {
+        if let Some(native) = detached_native.as_ref() {
+            if let Err(error) = call_dll_main(native, DLL_PROCESS_DETACH) {
+                warn!(
+                    module = %key,
+                    handle = format_args!("0x{:x}", module_handle),
+                    %error,
+                    "DllMain detach callback reported an error"
+                );
+            }
+        }
     }
 
     info!(
@@ -258,6 +383,20 @@ pub fn get_loaded_module_handle(module_name: &str) -> Option<usize> {
     registry().read().expect("dll registry poisoned").get(&canonical).map(|m| m.handle)
 }
 
+/// Return a displayable module filename/path for a loaded module handle.
+pub fn get_loaded_module_filename(module_handle: usize) -> Option<String> {
+    let key = module_key_by_handle(module_handle)?;
+    let guard = registry().read().expect("dll registry poisoned");
+    let module = guard.get(&key)?;
+
+    match &module.source {
+        ModuleSource::Native(native) => Some(native.path.display().to_string()),
+        ModuleSource::Reimplemented | ModuleSource::LoadingNative(_) => {
+            Some(module.canonical_name.clone())
+        }
+    }
+}
+
 /// Resolve an exported symbol from a loaded module handle.
 pub fn resolve_export(module_handle: usize, proc_name: &str) -> Option<usize> {
     let key = module_key_by_handle(module_handle)?;
@@ -269,7 +408,25 @@ pub fn resolve_export(module_handle: usize, proc_name: &str) -> Option<usize> {
             let addr = super::resolve_reimplemented_export(&module.canonical_name, proc_name);
             (addr != 0).then_some(addr)
         }
-        ModuleSource::Native(native) => native.exports.get(proc_name).copied(),
+        ModuleSource::Native(native) => {
+            let trimmed = proc_name.trim().trim_end_matches('\0').trim();
+            let undecorated = trimmed
+                .strip_prefix('_')
+                .unwrap_or(trimmed)
+                .split_once('@')
+                .and_then(|(name, suffix)| {
+                    suffix.chars().all(|ch| ch.is_ascii_digit()).then_some(name)
+                })
+                .unwrap_or_else(|| trimmed.strip_prefix('_').unwrap_or(trimmed));
+
+            [trimmed, undecorated].into_iter().find_map(|candidate| {
+                native.exports.get(candidate).copied().or_else(|| {
+                    native.exports.iter().find_map(|(name, addr)| {
+                        name.eq_ignore_ascii_case(candidate).then_some(*addr)
+                    })
+                })
+            })
+        }
         ModuleSource::LoadingNative(path) => {
             warn!(
                 module = %module.canonical_name,

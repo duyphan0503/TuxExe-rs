@@ -35,7 +35,7 @@ pub fn signal_to_exception_code(signal: i32) -> u32 {
 extern "C" fn host_signal_handler(
     signal: libc::c_int,
     info: *mut libc::siginfo_t,
-    _context: *mut libc::c_void,
+    context: *mut libc::c_void,
 ) {
     let fault_address = unsafe {
         if info.is_null() {
@@ -59,6 +59,28 @@ extern "C" fn host_signal_handler(
         fault_address,
     };
 
+    let instruction_pointer = extract_instruction_pointer(context);
+    let reg_dump = extract_register_dump(context);
+
+    if instruction_pointer != 0 {
+        let ip_unwind_match = unwind::lookup_runtime_function(instruction_pointer);
+        if let Some(hit) = ip_unwind_match {
+            trace!(
+                instruction_pointer = format_args!("0x{:x}", instruction_pointer),
+                image_base = format_args!("0x{:x}", hit.image_base),
+                begin_rva = format_args!("0x{:x}", hit.function.begin_address_rva),
+                end_rva = format_args!("0x{:x}", hit.function.end_address_rva),
+                unwind_rva = format_args!("0x{:x}", hit.function.unwind_info_rva),
+                "Instruction pointer is covered by RUNTIME_FUNCTION"
+            );
+        } else {
+            trace!(
+                instruction_pointer = format_args!("0x{:x}", instruction_pointer),
+                "No RUNTIME_FUNCTION coverage for instruction pointer"
+            );
+        }
+    }
+
     let unwind_match = unwind::lookup_runtime_function(record.fault_address);
     if let Some(hit) = unwind_match {
         trace!(
@@ -81,11 +103,120 @@ extern "C" fn host_signal_handler(
         return;
     }
 
-    error!(?record, "Unhandled host signal in SEH emulation path");
+    error!(
+        ?record,
+        instruction_pointer = format_args!("0x{:x}", instruction_pointer),
+        rax = format_args!("0x{:x}", reg_dump.rax),
+        rbx = format_args!("0x{:x}", reg_dump.rbx),
+        rcx = format_args!("0x{:x}", reg_dump.rcx),
+        rdx = format_args!("0x{:x}", reg_dump.rdx),
+        rsi = format_args!("0x{:x}", reg_dump.rsi),
+        rdi = format_args!("0x{:x}", reg_dump.rdi),
+        r8 = format_args!("0x{:x}", reg_dump.r8),
+        r9 = format_args!("0x{:x}", reg_dump.r9),
+        r10 = format_args!("0x{:x}", reg_dump.r10),
+        r11 = format_args!("0x{:x}", reg_dump.r11),
+        r12 = format_args!("0x{:x}", reg_dump.r12),
+        r13 = format_args!("0x{:x}", reg_dump.r13),
+        r14 = format_args!("0x{:x}", reg_dump.r14),
+        r15 = format_args!("0x{:x}", reg_dump.r15),
+        rsp = format_args!("0x{:x}", reg_dump.rsp),
+        rbp = format_args!("0x{:x}", reg_dump.rbp),
+        return_address = format_args!("0x{:x}", reg_dump.return_address),
+        "Unhandled host signal in SEH emulation path"
+    );
     // Fall back to default signal behavior once unhandled.
     unsafe {
         libc::signal(signal, libc::SIG_DFL);
         libc::raise(signal);
+    }
+}
+
+fn extract_instruction_pointer(context: *mut libc::c_void) -> usize {
+    if context.is_null() {
+        return 0;
+    }
+
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "x86_64"))]
+    {
+        // SAFETY: context is provided by kernel signal trampoline as ucontext_t.
+        unsafe {
+            let uctx = context.cast::<libc::ucontext_t>();
+            (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] as usize
+        }
+    }
+
+    #[cfg(not(all(any(target_os = "linux", target_os = "android"), target_arch = "x86_64")))]
+    {
+        0
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct RegisterDump {
+    rax: usize,
+    rbx: usize,
+    rcx: usize,
+    rdx: usize,
+    rsi: usize,
+    rdi: usize,
+    r8: usize,
+    r9: usize,
+    r10: usize,
+    r11: usize,
+    r12: usize,
+    r13: usize,
+    r14: usize,
+    r15: usize,
+    rsp: usize,
+    rbp: usize,
+    return_address: usize,
+}
+
+fn extract_register_dump(context: *mut libc::c_void) -> RegisterDump {
+    if context.is_null() {
+        return RegisterDump::default();
+    }
+
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "x86_64"))]
+    {
+        // SAFETY: context is provided by kernel signal trampoline as ucontext_t.
+        unsafe {
+            let uctx = context.cast::<libc::ucontext_t>();
+            let gregs = &(*uctx).uc_mcontext.gregs;
+            let rsp = gregs[libc::REG_RSP as usize] as usize;
+            let return_address = if rsp == 0 {
+                0
+            } else {
+                // Best-effort read of callsite return address.
+                *(rsp as *const usize)
+            };
+
+            RegisterDump {
+                rax: gregs[libc::REG_RAX as usize] as usize,
+                rbx: gregs[libc::REG_RBX as usize] as usize,
+                rcx: gregs[libc::REG_RCX as usize] as usize,
+                rdx: gregs[libc::REG_RDX as usize] as usize,
+                rsi: gregs[libc::REG_RSI as usize] as usize,
+                rdi: gregs[libc::REG_RDI as usize] as usize,
+                r8: gregs[libc::REG_R8 as usize] as usize,
+                r9: gregs[libc::REG_R9 as usize] as usize,
+                r10: gregs[libc::REG_R10 as usize] as usize,
+                r11: gregs[libc::REG_R11 as usize] as usize,
+                r12: gregs[libc::REG_R12 as usize] as usize,
+                r13: gregs[libc::REG_R13 as usize] as usize,
+                r14: gregs[libc::REG_R14 as usize] as usize,
+                r15: gregs[libc::REG_R15 as usize] as usize,
+                rsp,
+                rbp: gregs[libc::REG_RBP as usize] as usize,
+                return_address,
+            }
+        }
+    }
+
+    #[cfg(not(all(any(target_os = "linux", target_os = "android"), target_arch = "x86_64")))]
+    {
+        RegisterDump::default()
     }
 }
 
