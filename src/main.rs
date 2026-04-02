@@ -67,6 +67,14 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Run { exe, args } => {
             info!(exe = %exe.display(), ?args, "Preparing to execute PE");
+
+            if tuxexe_rs::wow64::try_delegate_x86_run(&exe, &args)
+                .map_err(|error| anyhow::anyhow!("Failed x86 delegation backend: {error}"))?
+            {
+                info!(exe = %exe.display(), "Executed x86 binary via delegated backend");
+                return Ok(());
+            }
+
             init_global_table();
 
             // Phase 1: Load, map, relocate, enumerate imports.

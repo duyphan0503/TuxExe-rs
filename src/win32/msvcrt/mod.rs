@@ -190,10 +190,43 @@ pub extern "win64" fn _errno() -> *mut i32 {
 
 static mut FMODE: i32 = 0;
 static mut COMMODE: i32 = 0;
+static mut MB_CUR_MAX_VALUE: i32 = 1;
+static mut IOB: [u8; 1024] = [0; 1024];
+
+pub extern "win64" fn __p__fmode() -> *mut i32 {
+    &raw mut FMODE
+}
+
+pub extern "win64" fn __p__commode() -> *mut i32 {
+    &raw mut COMMODE
+}
+
+pub extern "win64" fn fflush(_stream: *mut c_void) -> i32 {
+    // Flush all streams. This is enough for current console-oriented smoke tests.
+    unsafe { libc::fflush(std::ptr::null_mut()) }
+}
+
+pub extern "win64" fn atoi(s: *const c_char) -> i32 {
+    if s.is_null() {
+        0
+    } else {
+        unsafe { libc::atoi(s) }
+    }
+}
+
+pub extern "win64" fn setlocale(category: i32, locale: *const c_char) -> *mut c_char {
+    unsafe { libc::setlocale(category, locale).cast::<c_char>() }
+}
+
+pub extern "win64" fn strchr(s: *const c_char, c: i32) -> *mut c_char {
+    if s.is_null() {
+        std::ptr::null_mut()
+    } else {
+        unsafe { libc::strchr(s, c).cast::<c_char>() }
+    }
+}
 
 pub extern "win64" fn __iob_func() -> *mut c_void {
-    // dummy iob array
-    static mut IOB: [u8; 1024] = [0; 1024];
     (&raw mut IOB).cast::<u8>().cast::<c_void>()
 }
 
@@ -241,7 +274,15 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("_onexit", _onexit as usize);
     exports.insert("_errno", _errno as usize);
     exports.insert("__iob_func", __iob_func as usize);
+    exports.insert("_iob", (&raw mut IOB) as usize);
     exports.insert("__C_specific_handler", __C_specific_handler as usize);
+    exports.insert("fflush", fflush as usize);
+    exports.insert("atoi", atoi as usize);
+    exports.insert("setlocale", setlocale as usize);
+    exports.insert("strchr", strchr as usize);
+    exports.insert("__p__fmode", __p__fmode as usize);
+    exports.insert("__p__commode", __p__commode as usize);
+    exports.insert("__mb_cur_max", (&raw mut MB_CUR_MAX_VALUE) as usize);
 
     exports.insert("__getmainargs", __getmainargs as usize);
     exports.insert("__set_app_type", __set_app_type as usize);

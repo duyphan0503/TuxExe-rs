@@ -441,6 +441,8 @@ A DirectX 11 demo app renders correctly via Vulkan.
 
 A 32-bit Windows console app runs on 64-bit Linux.
 
+Current runtime behavior: `tuxexe run` delegates x86 execution to an external backend by default (`TUXEXE_X86_BACKEND=wine`). Set `TUXEXE_X86_BACKEND=native` to force in-process experimental path.
+
 ---
 
 ## Phase 10+: Advanced Features (Ongoing)

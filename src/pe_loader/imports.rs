@@ -325,14 +325,28 @@ pub fn resolve_imports(
             Err(_) => None,
         };
 
-        let Some(ptr) = ptr else {
-            tracing::warn!(
-                dll = %entry.dll,
-                func = %func_name,
-                delayed = entry.delayed,
-                "Unresolved import — will crash if called!"
-            );
-            continue;
+        let ptr = match ptr {
+            Some(addr) => addr,
+            None => {
+                if pe.is_pe64 {
+                    tracing::warn!(
+                        dll = %entry.dll,
+                        func = %func_name,
+                        delayed = entry.delayed,
+                        fallback = format_args!("0x{:x}", unresolved_import_stub as usize),
+                        "Unresolved import — using PE64 fallback stub"
+                    );
+                    unresolved_import_stub as usize
+                } else {
+                    tracing::warn!(
+                        dll = %entry.dll,
+                        func = %func_name,
+                        delayed = entry.delayed,
+                        "Unresolved import — will crash if called!"
+                    );
+                    continue;
+                }
+            }
         };
 
         debug!(
@@ -354,6 +368,10 @@ pub fn resolve_imports(
     }
 
     Ok(())
+}
+
+extern "win64" fn unresolved_import_stub() -> usize {
+    0
 }
 
 /// Read a null-terminated ASCII string from the mapped image.

@@ -31,6 +31,18 @@ fn compile_pe32_hello(output_path: &Path) {
     assert!(status.success(), "failed to compile PE32 hello.exe");
 }
 
+fn compile_pe64_hello(output_path: &Path) {
+    let status = Command::new("x86_64-w64-mingw32-gcc")
+        .arg("-o")
+        .arg(output_path)
+        .arg("tests/test_binaries/hello.c")
+        .arg("-static")
+        .status()
+        .expect("failed to spawn x86_64-w64-mingw32-gcc");
+
+    assert!(status.success(), "failed to compile PE64 hello.exe");
+}
+
 #[test]
 fn pe32_info_reports_x86_metadata() {
     let _guard = serial_guard();
@@ -61,6 +73,33 @@ fn pe32_info_reports_x86_metadata() {
         stdout.contains("PE64:         false"),
         "expected PE64 false in output, got:\n{stdout}"
     );
+}
+
+#[test]
+fn pe64_run_hello_world_end_to_end() {
+    let _guard = serial_guard();
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let pe64_path = temp_dir.path().join("hello64.exe");
+    compile_pe64_hello(&pe64_path);
+
+    let output = Command::new(tuxexe_bin())
+        .arg("--log-level")
+        .arg("error")
+        .arg("run")
+        .arg(&pe64_path)
+        .output()
+        .expect("failed to run tuxexe run");
+
+    assert!(
+        output.status.success(),
+        "tuxexe run failed: stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Hello, TuxExe-rs!"), "expected hello output, got:\n{stdout}");
 }
 
 #[test]
