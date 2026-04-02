@@ -448,7 +448,7 @@ A 32-bit Windows console app runs on 64-bit Linux.
 - [ ] COM/OLE/ActiveX basics (CoCreateInstance, IUnknown)
 - [ ] Windows Services emulation
 - [ ] Named pipes (CreateNamedPipe)
-- [ ] Memory-mapped files (CreateFileMapping/MapViewOfFile)
+- [x] Memory-mapped files (CreateFileMapping/MapViewOfFile)
 - [ ] I/O Completion Ports → io_uring
 - [ ] Windows Installer (MSI) basics
 - [ ] .NET CLR hosting (via Mono/CoreCLR)
