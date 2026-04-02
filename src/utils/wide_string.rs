@@ -103,6 +103,23 @@ pub fn from_wide_bytes_os(bytes: &[u8]) -> Result<OsString, WideStringError> {
     from_wide_bytes(bytes).map(OsString::from)
 }
 
+// ── Helper functions for common patterns ─────────────────────────────────────
+
+/// Convert a null-terminated UTF-16 pointer to a Rust String
+/// This is a convenience wrapper around from_wide_ptr
+pub fn wide_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    unsafe { from_wide_ptr(ptr).unwrap_or_default() }
+}
+
+/// Convert a Rust string to a null-terminated UTF-16 vector
+/// This is a convenience wrapper around to_wide_null
+pub fn str_to_wide(s: &str) -> Vec<u16> {
+    to_wide_null(s)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

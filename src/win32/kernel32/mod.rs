@@ -1,12 +1,14 @@
 //! kernel32.dll reimplementation — file I/O, process, thread, memory, console, sync.
 
 pub mod console;
+pub mod env;
 pub mod error;
 pub mod file;
 pub mod memory;
 pub mod process;
 pub mod string;
 pub mod sync;
+pub mod system;
 pub mod thread;
 pub mod time;
 
@@ -250,6 +252,22 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetSystemTimeAsFileTime", time::get_system_time_as_file_time as usize);
     exports.insert("QueryPerformanceCounter", time::query_performance_counter as usize);
     exports.insert("QueryPerformanceFrequency", time::query_performance_frequency as usize);
+
+    // System Information
+    exports.insert("GetSystemInfo", system::GetSystemInfo as usize);
+    exports.insert("GetVersionExA", system::GetVersionExA as usize);
+    exports.insert("GetVersionExW", system::GetVersionExW as usize);
+    exports.insert("GetVersion", system::GetVersion as usize);
+    exports.insert("GetComputerNameA", system::GetComputerNameA as usize);
+    exports.insert("GetComputerNameW", system::GetComputerNameW as usize);
+
+    // Environment Variables
+    exports.insert("GetEnvironmentVariableA", env::GetEnvironmentVariableA as usize);
+    exports.insert("GetEnvironmentVariableW", env::GetEnvironmentVariableW as usize);
+    exports.insert("SetEnvironmentVariableA", env::SetEnvironmentVariableA as usize);
+    exports.insert("SetEnvironmentVariableW", env::SetEnvironmentVariableW as usize);
+    exports.insert("ExpandEnvironmentStringsA", env::ExpandEnvironmentStringsA as usize);
+    exports.insert("ExpandEnvironmentStringsW", env::ExpandEnvironmentStringsW as usize);
 
     exports
 }

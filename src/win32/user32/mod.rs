@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+pub mod dialogs;
 pub mod input;
 pub mod message;
 pub mod window;
@@ -268,6 +269,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("PostQuitMessage", message::PostQuitMessage as usize);
     exports.insert("PostMessageA", message::PostMessageA as usize);
     exports.insert("PostMessageW", message::PostMessageW as usize);
+
+    // Dialogs
+    exports.insert("MessageBoxA", dialogs::MessageBoxA as usize);
+    exports.insert("MessageBoxW", dialogs::MessageBoxW as usize);
 
     exports
 }
