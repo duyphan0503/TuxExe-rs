@@ -83,6 +83,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("HeapFree", memory::HeapFree as usize);
     exports.insert("HeapDestroy", memory::HeapDestroy as usize);
     exports.insert("GetProcessHeap", memory::GetProcessHeap as usize);
+    exports.insert("CreateFileMappingA", memory::CreateFileMappingA as usize);
+    exports.insert("CreateFileMappingW", memory::CreateFileMappingW as usize);
+    exports.insert("MapViewOfFile", memory::MapViewOfFile as usize);
+    exports.insert("UnmapViewOfFile", memory::UnmapViewOfFile as usize);
 
     // String
     exports.insert("IsDBCSLeadByteEx", string::IsDBCSLeadByteEx as usize);
