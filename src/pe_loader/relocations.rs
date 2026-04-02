@@ -246,7 +246,7 @@ mod tests {
         // BlockSize = 12 (header=8 + 2 entries*2)
         buf[0x404..0x408].copy_from_slice(&12u32.to_le_bytes());
         // Entry 0: type=DIR64 (10 << 12), offset=0x000
-        let entry0: u16 = (IMAGE_REL_BASED_DIR64 << 12) | 0x000;
+        let entry0: u16 = IMAGE_REL_BASED_DIR64 << 12;
         buf[0x408..0x40A].copy_from_slice(&entry0.to_le_bytes());
         // Entry 1: ABSOLUTE (padding)
         buf[0x40A..0x40C].copy_from_slice(&0u16.to_le_bytes());

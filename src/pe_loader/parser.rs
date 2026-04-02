@@ -197,9 +197,9 @@ impl ParsedPe {
         let is_pe64 = opt.standard_fields.magic == goblin::pe::optional_header::MAGIC_64;
         let image_base = opt.windows_fields.image_base;
         let entry_point_rva = opt.standard_fields.address_of_entry_point as u32;
-        let size_of_image = opt.windows_fields.size_of_image as u32;
-        let section_alignment = opt.windows_fields.section_alignment as u32;
-        let file_alignment = opt.windows_fields.file_alignment as u32;
+        let size_of_image = opt.windows_fields.size_of_image;
+        let section_alignment = opt.windows_fields.section_alignment;
+        let file_alignment = opt.windows_fields.file_alignment;
         let dll_characteristics = opt.windows_fields.dll_characteristics;
         let number_of_sections = pe.header.coff_header.number_of_sections;
 
