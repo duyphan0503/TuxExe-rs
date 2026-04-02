@@ -3,7 +3,7 @@
 pub mod loader;
 pub mod search;
 
-use crate::win32::{kernel32, msvcrt, ws2_32};
+use crate::win32::{advapi32, kernel32, msvcrt, ws2_32};
 use tracing::trace;
 
 pub use loader::{
@@ -67,6 +67,13 @@ pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
             let exports = crate::win32::dsound::get_exports();
             if let Some(&addr) = exports.get(func_name) {
                 trace!("Resolved dsound!{} -> {:#x}", func_name, addr);
+                return addr;
+            }
+        }
+        "advapi32" => {
+            let exports = advapi32::get_exports();
+            if let Some(&addr) = exports.get(func_name) {
+                trace!("Resolved advapi32!{} -> {:#x}", func_name, addr);
                 return addr;
             }
         }

@@ -75,6 +75,9 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            // Initialize Windows environment variables
+            tuxexe_rs::win32::kernel32::env::init_windows_env_vars();
+
             init_global_table();
 
             // Phase 1: Load, map, relocate, enumerate imports.
