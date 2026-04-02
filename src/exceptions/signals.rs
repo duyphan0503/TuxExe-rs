@@ -76,7 +76,7 @@ extern "C" fn host_signal_handler(
         );
     }
 
-    if seh::walk_seh_chain(&record) {
+    if seh::walk_x86_seh_chain(&record) || seh::walk_seh_chain(&record) {
         trace!("Signal handled by SEH chain");
         return;
     }
