@@ -448,6 +448,8 @@ Compatibility workflow for game bring-up:
 - `tuxexe audit <game.exe>` prints implemented vs missing imports by DLL.
 - Use audit output to prioritize startup-critical API gaps before gameplay-path APIs.
 
+Current runtime behavior: `tuxexe run` delegates x86 execution to an external backend by default (`TUXEXE_X86_BACKEND=wine`). Set `TUXEXE_X86_BACKEND=native` to force in-process experimental path.
+
 ---
 
 ## Phase 10+: Advanced Features (Ongoing)
