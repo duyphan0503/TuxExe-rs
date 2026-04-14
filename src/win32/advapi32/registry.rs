@@ -56,11 +56,11 @@ fn hkey_to_path(hKey: usize) -> Option<String> {
         _ => {
             // Try to get from handle table
             let table = global_table();
-            table.with(hKey as u32, |obj| {
-                obj.as_any()
-                    .downcast_ref::<RegistryKeyHandle>()
-                    .map(|key| key.path.clone())
-            }).flatten()
+            table
+                .with(hKey as u32, |obj| {
+                    obj.as_any().downcast_ref::<RegistryKeyHandle>().map(|key| key.path.clone())
+                })
+                .flatten()
         }
     }
 }
@@ -88,18 +88,11 @@ pub extern "win64" fn RegOpenKeyExA(
     let subkey = if lpSubKey.is_null() {
         String::new()
     } else {
-        unsafe {
-            CStr::from_ptr(lpSubKey as *const i8)
-                .to_string_lossy()
-                .to_string()
-        }
+        unsafe { CStr::from_ptr(lpSubKey as *const i8).to_string_lossy().to_string() }
     };
 
-    let full_path = if subkey.is_empty() {
-        base_path
-    } else {
-        format!("{}\\{}", base_path, subkey)
-    };
+    let full_path =
+        if subkey.is_empty() { base_path } else { format!("{}\\{}", base_path, subkey) };
 
     tracing::trace!("RegOpenKeyExA: opening {}", full_path);
 
@@ -142,13 +135,7 @@ pub extern "win64" fn RegOpenKeyExW(
     subkey_cstr.extend_from_slice(subkey_bytes);
     subkey_cstr.push(0);
 
-    RegOpenKeyExA(
-        hKey,
-        subkey_cstr.as_ptr(),
-        _ulOptions,
-        samDesired,
-        phkResult,
-    )
+    RegOpenKeyExA(hKey, subkey_cstr.as_ptr(), _ulOptions, samDesired, phkResult)
 }
 
 /// RegCloseKey - Close registry key
@@ -193,13 +180,7 @@ pub extern "win64" fn RegQueryValueExA(
     let value_name = if lpValueName.is_null() {
         None
     } else {
-        unsafe {
-            Some(
-                CStr::from_ptr(lpValueName as *const i8)
-                    .to_string_lossy()
-                    .to_string(),
-            )
-        }
+        unsafe { Some(CStr::from_ptr(lpValueName as *const i8).to_string_lossy().to_string()) }
     };
 
     tracing::trace!("RegQueryValueExA: {}\\{:?}", path, value_name);
@@ -267,14 +248,7 @@ pub extern "win64" fn RegQueryValueExW(
     value_name_cstr.extend_from_slice(value_name_bytes);
     value_name_cstr.push(0);
 
-    RegQueryValueExA(
-        hKey,
-        value_name_cstr.as_ptr(),
-        _lpReserved,
-        lpType,
-        lpData,
-        lpcbData,
-    )
+    RegQueryValueExA(hKey, value_name_cstr.as_ptr(), _lpReserved, lpType, lpData, lpcbData)
 }
 
 /// RegSetValueExA - Set registry value (ANSI)
@@ -297,13 +271,7 @@ pub extern "win64" fn RegSetValueExA(
     let value_name = if lpValueName.is_null() {
         None
     } else {
-        unsafe {
-            Some(
-                CStr::from_ptr(lpValueName as *const i8)
-                    .to_string_lossy()
-                    .to_string(),
-            )
-        }
+        unsafe { Some(CStr::from_ptr(lpValueName as *const i8).to_string_lossy().to_string()) }
     };
 
     let data = if lpData.is_null() || cbData == 0 {
@@ -376,18 +344,11 @@ pub extern "win64" fn RegCreateKeyExA(
         let subkey = if lpSubKey.is_null() {
             String::new()
         } else {
-            unsafe {
-                CStr::from_ptr(lpSubKey as *const i8)
-                    .to_string_lossy()
-                    .to_string()
-            }
+            unsafe { CStr::from_ptr(lpSubKey as *const i8).to_string_lossy().to_string() }
         };
 
-        let full_path = if subkey.is_empty() {
-            base_path
-        } else {
-            format!("{}\\{}", base_path, subkey)
-        };
+        let full_path =
+            if subkey.is_empty() { base_path } else { format!("{}\\{}", base_path, subkey) };
 
         // Create a dummy value to ensure the key exists
         let store = get_registry_store();
@@ -452,18 +413,11 @@ pub extern "win64" fn RegDeleteKeyA(hKey: usize, lpSubKey: *const u8) -> i32 {
     let subkey = if lpSubKey.is_null() {
         String::new()
     } else {
-        unsafe {
-            CStr::from_ptr(lpSubKey as *const i8)
-                .to_string_lossy()
-                .to_string()
-        }
+        unsafe { CStr::from_ptr(lpSubKey as *const i8).to_string_lossy().to_string() }
     };
 
-    let full_path = if subkey.is_empty() {
-        base_path
-    } else {
-        format!("{}\\{}", base_path, subkey)
-    };
+    let full_path =
+        if subkey.is_empty() { base_path } else { format!("{}\\{}", base_path, subkey) };
 
     let store = get_registry_store();
     match store.delete_key(&full_path) {

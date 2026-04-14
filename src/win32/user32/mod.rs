@@ -77,6 +77,8 @@ pub(crate) struct WindowRecord {
     pub height: i32,
     pub visible: bool,
     pub native_window_id: u64,
+    /// Win32 HWND of the parent window, 0 = top-level / no parent.
+    pub parent_hwnd: usize,
 }
 
 pub const WM_CREATE: u32 = 0x0001;
@@ -143,12 +145,53 @@ pub(crate) fn create_window(
     width: i32,
     height: i32,
 ) -> usize {
+    create_window_with_parent(wnd_proc, _title, x, y, width, height, 0)
+}
+
+pub(crate) fn create_window_with_parent(
+    wnd_proc: Option<WindowProc>,
+    _title: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    parent_hwnd: usize,
+) -> usize {
     let hwnd = next_hwnd();
-    let record =
-        WindowRecord { wnd_proc, x, y, width, height, visible: false, native_window_id: 0 };
+    let record = WindowRecord {
+        wnd_proc,
+        x,
+        y,
+        width,
+        height,
+        visible: false,
+        native_window_id: 0,
+        parent_hwnd,
+    };
 
     window_registry().write().expect("window registry poisoned").insert(hwnd, record);
     hwnd
+}
+
+pub(crate) fn window_parent(hwnd: usize) -> Option<usize> {
+    window_registry().read().expect("window registry poisoned").get(&hwnd).map(|w| w.parent_hwnd)
+}
+
+pub(crate) fn window_rect(hwnd: usize) -> Option<(i32, i32, i32, i32)> {
+    window_registry()
+        .read()
+        .expect("window registry poisoned")
+        .get(&hwnd)
+        .map(|w| (w.x, w.y, w.x + w.width, w.y + w.height))
+}
+
+pub(crate) fn is_window_visible(hwnd: usize) -> bool {
+    window_registry()
+        .read()
+        .expect("window registry poisoned")
+        .get(&hwnd)
+        .map(|w| w.visible)
+        .unwrap_or(false)
 }
 
 pub(crate) fn update_window_rect(hwnd: usize, x: i32, y: i32, width: i32, height: i32) -> bool {
@@ -188,6 +231,14 @@ pub(crate) fn window_proc_for(hwnd: usize) -> Option<WindowProc> {
         .expect("window registry poisoned")
         .get(&hwnd)
         .and_then(|window| window.wnd_proc)
+}
+
+pub(crate) fn window_origin(hwnd: usize) -> Option<(i32, i32)> {
+    window_registry()
+        .read()
+        .expect("window registry poisoned")
+        .get(&hwnd)
+        .map(|window| (window.x, window.y))
 }
 
 pub(crate) fn ensure_native_window_id(hwnd: usize) -> Option<u64> {
@@ -248,16 +299,137 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
 
     exports.insert("RegisterClassA", window::RegisterClassA as usize);
     exports.insert("RegisterClassW", window::RegisterClassW as usize);
+    exports.insert("RegisterClassExA", window::RegisterClassExA as usize);
+    exports.insert("RegisterClassExW", window::RegisterClassExW as usize);
     exports.insert("CreateWindowExA", window::CreateWindowExA as usize);
     exports.insert("CreateWindowExW", window::CreateWindowExW as usize);
     exports.insert("ShowWindow", window::ShowWindow as usize);
+    exports.insert("UpdateWindow", window::UpdateWindow as usize);
     exports.insert("MoveWindow", window::MoveWindow as usize);
     exports.insert("SetWindowPos", window::SetWindowPos as usize);
+    exports.insert("SetForegroundWindow", window::SetForegroundWindow as usize);
+    exports.insert("GetForegroundWindow", window::GetForegroundWindow as usize);
+    exports.insert("GetDesktopWindow", window::GetDesktopWindow as usize);
+    exports.insert("AllowSetForegroundWindow", window::AllowSetForegroundWindow as usize);
+    exports.insert("GetDC", window::GetDC as usize);
+    exports.insert("GetWindowDC", window::GetWindowDC as usize);
+    exports.insert("GetDCEx", window::GetDCEx as usize);
+    exports.insert("ReleaseDC", window::ReleaseDC as usize);
+    exports.insert("GetWindowPlacement", window::GetWindowPlacement as usize);
+    exports.insert("SetWindowPlacement", window::SetWindowPlacement as usize);
+    exports.insert("AdjustWindowRect", window::AdjustWindowRect as usize);
+    exports.insert("AdjustWindowRectEx", window::AdjustWindowRectEx as usize);
+    exports.insert("SetWindowLongA", window::SetWindowLongA as usize);
+    exports.insert("SetWindowLongW", window::SetWindowLongW as usize);
+    exports.insert("GetWindowLongA", window::GetWindowLongA as usize);
+    exports.insert("GetWindowLongW", window::GetWindowLongW as usize);
+    exports.insert("SetWindowLongPtrA", window::SetWindowLongPtrA as usize);
+    exports.insert("SetWindowLongPtrW", window::SetWindowLongPtrW as usize);
+    exports.insert("GetWindowLongPtrA", window::GetWindowLongPtrA as usize);
+    exports.insert("GetWindowLongPtrW", window::GetWindowLongPtrW as usize);
+    exports.insert("LoadIconA", window::LoadIconA as usize);
+    exports.insert("LoadIconW", window::LoadIconW as usize);
+    exports.insert("DestroyIcon", window::DestroyIcon as usize);
+    exports.insert("LoadCursorA", window::LoadCursorA as usize);
+    exports.insert("LoadCursorW", window::LoadCursorW as usize);
+    exports.insert("DestroyCursor", window::DestroyCursor as usize);
+    exports.insert("SetCursor", window::SetCursor as usize);
+    exports.insert("OpenClipboard", window::OpenClipboard as usize);
+    exports.insert("CloseClipboard", window::CloseClipboard as usize);
+    exports.insert("EmptyClipboard", window::EmptyClipboard as usize);
+    exports.insert("IsClipboardFormatAvailable", window::IsClipboardFormatAvailable as usize);
+    exports.insert("GetClipboardData", window::GetClipboardData as usize);
+    exports.insert("SetClipboardData", window::SetClipboardData as usize);
+    exports.insert("CountClipboardFormats", window::CountClipboardFormats as usize);
+    exports.insert("EnumClipboardFormats", window::EnumClipboardFormats as usize);
+    exports.insert("RegisterClipboardFormatA", window::RegisterClipboardFormatA as usize);
+    exports.insert("RegisterClipboardFormatW", window::RegisterClipboardFormatW as usize);
+    exports.insert("TrackMouseEvent", window::TrackMouseEvent as usize);
+    exports.insert("LoadImageA", window::LoadImageA as usize);
+    exports.insert("LoadImageW", window::LoadImageW as usize);
+    exports.insert("EnumDisplaySettingsA", window::EnumDisplaySettingsA as usize);
+    exports.insert("EnumDisplaySettingsW", window::EnumDisplaySettingsW as usize);
+    exports.insert("EnumDisplaySettingsExA", window::EnumDisplaySettingsExA as usize);
+    exports.insert("EnumDisplaySettingsExW", window::EnumDisplaySettingsExW as usize);
+    exports.insert("EnumDisplayDevicesA", window::EnumDisplayDevicesA as usize);
+    exports.insert("EnumDisplayDevicesW", window::EnumDisplayDevicesW as usize);
+    exports.insert("DisplayConfigGetDeviceInfo", window::DisplayConfigGetDeviceInfo as usize);
+    exports.insert("GetDisplayConfigBufferSizes", window::GetDisplayConfigBufferSizes as usize);
+    exports.insert("QueryDisplayConfig", window::QueryDisplayConfig as usize);
+    exports.insert("GetProcessWindowStation", window::GetProcessWindowStation as usize);
+    exports.insert("GetThreadDesktop", window::GetThreadDesktop as usize);
+    exports.insert("GetUserObjectInformationA", window::GetUserObjectInformationA as usize);
+    exports.insert("GetUserObjectInformationW", window::GetUserObjectInformationW as usize);
+    exports.insert("SystemParametersInfoA", window::SystemParametersInfoA as usize);
+    exports.insert("SystemParametersInfoW", window::SystemParametersInfoW as usize);
+    exports.insert("PtInRect", window::PtInRect as usize);
+    exports.insert("OffsetRect", window::OffsetRect as usize);
+    exports.insert("CopyRect", window::CopyRect as usize);
+    exports.insert("ScreenToClient", window::ScreenToClient as usize);
+    exports.insert("ClientToScreen", window::ClientToScreen as usize);
+    exports.insert("GetCursorPos", window::GetCursorPos as usize);
+    exports.insert("SetCursorPos", window::SetCursorPos as usize);
+    exports.insert("GetSystemMetrics", window::GetSystemMetrics as usize);
+    exports.insert("SetCapture", window::SetCapture as usize);
+    exports.insert("GetCapture", window::GetCapture as usize);
+    exports.insert("ReleaseCapture", window::ReleaseCapture as usize);
+    exports.insert("RegisterDeviceNotificationA", window::RegisterDeviceNotificationA as usize);
+    exports.insert("RegisterDeviceNotificationW", window::RegisterDeviceNotificationW as usize);
+    exports.insert("UnregisterDeviceNotification", window::UnregisterDeviceNotification as usize);
     exports.insert("DestroyWindow", window::DestroyWindow as usize);
+    exports.insert("EnumWindows", window::EnumWindows as usize);
+    exports.insert("EnumDisplayMonitors", window::EnumDisplayMonitors as usize);
+    exports.insert("GetMonitorInfoA", window::GetMonitorInfoA as usize);
+    exports.insert("GetMonitorInfoW", window::GetMonitorInfoW as usize);
+    exports.insert("MonitorFromRect", window::MonitorFromRect as usize);
+    exports.insert("MonitorFromWindow", window::MonitorFromWindow as usize);
     exports.insert("DefWindowProcA", window::DefWindowProcA as usize);
     exports.insert("DefWindowProcW", window::DefWindowProcW as usize);
+    exports.insert("GetParent", window::GetParent as usize);
+    exports.insert("GetWindowRect", window::GetWindowRect as usize);
+    exports.insert("GetClientRect", window::GetClientRect as usize);
+    exports.insert("SetWindowTextW", window::SetWindowTextW as usize);
+    exports.insert("SetWindowTextA", window::SetWindowTextA as usize);
+    exports.insert("ValidateRect", window::ValidateRect as usize);
+    exports.insert("ClipCursor", window::ClipCursor as usize);
+    exports.insert("ShowCursor", window::ShowCursor as usize);
+    exports.insert("DragDetect", window::DragDetect as usize);
+    exports.insert("GetFocus", window::GetFocus as usize);
+    exports.insert("SetFocus", window::SetFocus as usize);
+    exports.insert("GetActiveWindow", window::GetActiveWindow as usize);
+    exports.insert("IsIconic", window::IsIconic as usize);
+    exports.insert("IsWindowVisible", window::IsWindowVisible as usize);
+    exports.insert("UnregisterClassA", window::UnregisterClassA as usize);
+    exports.insert("UnregisterClassW", window::UnregisterClassW as usize);
+    exports.insert("KillTimer", window::KillTimer as usize);
+    exports.insert("SetTimer", window::SetTimer as usize);
+    exports.insert("MsgWaitForMultipleObjects", window::MsgWaitForMultipleObjects as usize);
+    exports.insert("GetCaretBlinkTime", window::GetCaretBlinkTime as usize);
+    exports.insert("GetDoubleClickTime", window::GetDoubleClickTime as usize);
+    exports.insert("IsWindow", window::IsWindow as usize);
+    exports.insert("GetWindowTextW", window::GetWindowTextW as usize);
+    exports.insert("GetWindowTextA", window::GetWindowTextA as usize);
     exports.insert("MapVirtualKeyA", input::MapVirtualKeyA as usize);
     exports.insert("MapVirtualKeyW", input::MapVirtualKeyW as usize);
+    exports.insert("MapVirtualKeyExA", input::MapVirtualKeyExA as usize);
+    exports.insert("MapVirtualKeyExW", input::MapVirtualKeyExW as usize);
+    exports.insert("ToUnicode", input::ToUnicode as usize);
+    exports.insert("ToUnicodeEx", input::ToUnicodeEx as usize);
+    exports.insert("GetKeyNameTextA", input::GetKeyNameTextA as usize);
+    exports.insert("GetKeyNameTextW", input::GetKeyNameTextW as usize);
+    exports.insert("GetAsyncKeyState", input::GetAsyncKeyState as usize);
+    exports.insert("GetKeyState", input::GetKeyState as usize);
+    exports.insert("GetKeyboardState", input::GetKeyboardState as usize);
+    exports.insert("GetKeyboardLayout", input::GetKeyboardLayout as usize);
+    exports.insert("GetKeyboardLayoutList", input::GetKeyboardLayoutList as usize);
+    exports.insert("ActivateKeyboardLayout", input::ActivateKeyboardLayout as usize);
+    exports.insert("GetKeyboardLayoutNameW", input::GetKeyboardLayoutNameW as usize);
+    exports.insert("GetRawInputBuffer", input::GetRawInputBuffer as usize);
+    exports.insert("GetRawInputData", input::GetRawInputData as usize);
+    exports.insert("GetRawInputDeviceInfoA", input::GetRawInputDeviceInfoA as usize);
+    exports.insert("GetRawInputDeviceInfoW", input::GetRawInputDeviceInfoW as usize);
+    exports.insert("GetRawInputDeviceList", input::GetRawInputDeviceList as usize);
+    exports.insert("RegisterRawInputDevices", input::RegisterRawInputDevices as usize);
 
     exports.insert("GetMessageA", message::GetMessageA as usize);
     exports.insert("GetMessageW", message::GetMessageW as usize);
@@ -269,10 +441,26 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("PostQuitMessage", message::PostQuitMessage as usize);
     exports.insert("PostMessageA", message::PostMessageA as usize);
     exports.insert("PostMessageW", message::PostMessageW as usize);
+    exports.insert("SendMessageA", message::SendMessageA as usize);
+    exports.insert("SendMessageW", message::SendMessageW as usize);
+    exports.insert("SendMessageTimeoutA", message::SendMessageTimeoutA as usize);
+    exports.insert("SendMessageTimeoutW", message::SendMessageTimeoutW as usize);
+    exports.insert("GetDlgItem", message::GetDlgItem as usize);
+    exports.insert("SendDlgItemMessageA", message::SendDlgItemMessageA as usize);
+    exports.insert("SendDlgItemMessageW", message::SendDlgItemMessageW as usize);
+    exports.insert("SetDlgItemTextA", message::SetDlgItemTextA as usize);
+    exports.insert("SetDlgItemTextW", message::SetDlgItemTextW as usize);
+    exports.insert("RegisterWindowMessageA", message::RegisterWindowMessageA as usize);
+    exports.insert("RegisterWindowMessageW", message::RegisterWindowMessageW as usize);
+    exports.insert("GetMessageExtraInfo", message::GetMessageExtraInfo as usize);
+    exports.insert("SetMessageExtraInfo", message::SetMessageExtraInfo as usize);
 
     // Dialogs
     exports.insert("MessageBoxA", dialogs::MessageBoxA as usize);
     exports.insert("MessageBoxW", dialogs::MessageBoxW as usize);
+    exports.insert("EndDialog", dialogs::EndDialog as usize);
+    exports.insert("DialogBoxParamA", dialogs::DialogBoxParamA as usize);
+    exports.insert("DialogBoxParamW", dialogs::DialogBoxParamW as usize);
 
     exports
 }

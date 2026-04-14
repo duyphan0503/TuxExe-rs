@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracing::info;
 
+use tuxexe_rs::dll_manager::resolve_reimplemented_export;
 use tuxexe_rs::exceptions::signals::install_signal_handlers;
 use tuxexe_rs::exceptions::unwind::register_runtime_function_table;
-use tuxexe_rs::pe_loader::imports::enumerate_imports;
+use tuxexe_rs::pe_loader::imports::{enumerate_delay_imports, enumerate_imports, ImportKind};
 use tuxexe_rs::pe_loader::mapper::map_pe;
 use tuxexe_rs::pe_loader::parser::{Machine, ParsedPe};
 use tuxexe_rs::pe_loader::relocations::apply_relocations;
@@ -46,6 +48,13 @@ enum Commands {
         #[arg(value_name = "PE_FILE")]
         file: PathBuf,
     },
+
+    /// Show compatibility audit (implemented vs missing imports by DLL)
+    Audit {
+        /// Path to the Windows PE executable or DLL
+        #[arg(value_name = "PE_FILE")]
+        file: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -72,10 +81,8 @@ fn main() -> Result<()> {
                 exe.parent().map(PathBuf::from),
             );
 
-            if tuxexe_rs::wow64::try_delegate_x86_run(&exe, &args)
-                .map_err(|error| anyhow::anyhow!("Failed x86 delegation backend: {error}"))?
-            {
-                info!(exe = %exe.display(), "Executed x86 binary via delegated backend");
+            if tuxexe_rs::wow64::enforce_native_x86_backend().is_some() {
+                info!(exe = %exe.display(), "Executed x86 binary via native-only compatibility path");
                 return Ok(());
             }
 
@@ -89,7 +96,7 @@ fn main() -> Result<()> {
             set_main_image_base(pe.mapped.base_addr());
             set_main_image_path(&exe);
             if pe.parsed.machine == Machine::X86 {
-                tuxexe_rs::wow64::setup_wow64_context(pe.mapped.base_addr())
+                tuxexe_rs::wow64::setup_wow64_context(pe.mapped.base_addr(), pe.mapped.size())
                     .map_err(|error| anyhow::anyhow!("Failed to setup WoW64 context: {error}"))?;
             } else {
                 register_runtime_function_table(&pe.parsed, &pe.mapped)
@@ -113,6 +120,10 @@ fn main() -> Result<()> {
             register_tls_callbacks(&pe.parsed, &pe.mapped)
                 .map_err(|error| anyhow::anyhow!("Failed to register TLS callbacks: {error}"))?;
 
+            // Initialize static TLS
+            tuxexe_rs::threading::tls::initialize_static_tls(&pe.parsed, &mut pe.mapped)
+                .map_err(|error| anyhow::anyhow!("Failed to initialize static TLS: {error}"))?;
+
             // Execute
             let entry_point_rva = pe.parsed.entry_point_rva as usize;
             if entry_point_rva == 0 {
@@ -122,23 +133,23 @@ fn main() -> Result<()> {
             let entry_point_addr = pe.mapped.base_addr() + entry_point_rva;
             info!(va = format_args!("0x{:x}", entry_point_addr), "Jumping to entry point");
 
-            // Create thread execution block / environment manually or just jump straight to the entry point.
-            // Some very basic things may break if the PE relies purely on FS/GS TEB structures without
-            // the NT kernel properly backing them up.
             tuxexe_rs::threading::teb::setup_teb(pe.mapped.base_addr())
                 .map_err(|e| anyhow::anyhow!("Failed to setup TEB: {}", e))?;
 
             invoke_process_attach_callbacks();
 
-            // Note: If the target is a 64-bit Windows PE, its entry point uses the Win64 ABI, but typically takes no args.
-            // On Windows 64-bit, the entry point for EXEs actually doesn't have a standardized ABI signature
-            // typically `void mainCRTStartup()` -> no args.
             unsafe {
                 let entry_fn: extern "win64" fn() = std::mem::transmute(entry_point_addr);
-                entry_fn(); // JUMP!
+                entry_fn();
             }
 
             info!("Execution finished successfully");
+            Ok(())
+        }
+
+        Commands::Audit { file } => {
+            info!(file = %file.display(), "Auditing PE import compatibility");
+            run_compat_audit(&file)?;
             Ok(())
         }
 
@@ -193,6 +204,91 @@ struct LoadedPe {
     mapped: tuxexe_rs::pe_loader::mapper::MappedImage,
     reloc_result: tuxexe_rs::pe_loader::relocations::RelocationResult,
     imports: tuxexe_rs::pe_loader::imports::ImportTable,
+}
+
+fn run_compat_audit(path: &std::path::Path) -> Result<()> {
+    let pe = run_pe_loader(path)?;
+    let delay_imports = enumerate_delay_imports(&pe.parsed, &pe.mapped)
+        .with_context(|| "Failed to enumerate delay imports")?;
+
+    let mut by_dll: BTreeMap<String, BTreeMap<String, bool>> = BTreeMap::new();
+
+    let mut ingest = |dll: &str, import: &ImportKind| {
+        let symbol = match import {
+            ImportKind::ByName { name, .. } => name.clone(),
+            ImportKind::ByOrdinal(ord) => format!("#{ord}"),
+        };
+
+        let implemented = resolve_reimplemented_export(dll, &symbol) != 0;
+        by_dll
+            .entry(dll.to_ascii_lowercase())
+            .or_default()
+            .entry(symbol)
+            .and_modify(|existing| *existing = *existing || implemented)
+            .or_insert(implemented);
+    };
+
+    for entry in &pe.imports.entries {
+        ingest(&entry.dll, &entry.import);
+    }
+    for entry in &delay_imports.entries {
+        ingest(&entry.dll, &entry.import);
+    }
+
+    let mut implemented_total = 0usize;
+    let mut total = 0usize;
+    for symbols in by_dll.values() {
+        total += symbols.len();
+        implemented_total += symbols.values().filter(|ok| **ok).count();
+    }
+    let missing_total = total.saturating_sub(implemented_total);
+    let percent = if total == 0 {
+        100.0
+    } else {
+        (implemented_total as f64 / total as f64) * 100.0
+    };
+
+    println!("Compatibility Audit: {}", path.display());
+    println!(
+        "Summary: implemented {implemented_total}/{total} ({percent:.1}%), missing {missing_total}"
+    );
+    println!(
+        "(normal imports: {}, delay imports: {})",
+        pe.imports.entries.len(),
+        delay_imports.entries.len()
+    );
+    println!("By DLL:");
+
+    for (dll, symbols) in &by_dll {
+        let dll_total = symbols.len();
+        let dll_impl = symbols.values().filter(|ok| **ok).count();
+        let dll_missing = dll_total.saturating_sub(dll_impl);
+        println!("  {dll}: {dll_impl}/{dll_total} implemented, {dll_missing} missing");
+
+        if dll_missing > 0 {
+            let missing = symbols
+                .iter()
+                .filter_map(|(name, ok)| (!*ok).then_some(name.as_str()))
+                .take(12)
+                .collect::<Vec<_>>();
+            println!("    missing(sample): {}", missing.join(", "));
+        }
+    }
+
+    let missing_dlls = by_dll
+        .iter()
+        .filter(|(_, symbols)| symbols.values().any(|ok| !ok))
+        .map(|(dll, _)| dll.clone())
+        .collect::<BTreeSet<_>>();
+
+    if !missing_dlls.is_empty() {
+        println!(
+            "\nPriority DLLs to implement next: {}",
+            missing_dlls.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    Ok(())
 }
 
 /// Run the full PE loading pipeline.

@@ -3,6 +3,9 @@
 use std::ffi::CStr;
 use std::process::Command;
 
+const ERROR_SUCCESS: u32 = 0;
+const ERROR_INVALID_WINDOW_HANDLE: u32 = 1400;
+
 // MessageBox constants
 pub const MB_OK: u32 = 0x00000000;
 pub const MB_OKCANCEL: u32 = 0x00000001;
@@ -24,6 +27,13 @@ pub const IDRETRY: i32 = 4;
 pub const IDIGNORE: i32 = 5;
 pub const IDYES: i32 = 6;
 pub const IDNO: i32 = 7;
+const WM_INITDIALOG: u32 = 0x0110;
+
+pub type DialogProc = unsafe extern "win64" fn(usize, u32, usize, isize) -> isize;
+
+fn set_last_error(value: u32) {
+    crate::win32::kernel32::error::set_last_error(value);
+}
 
 /// MessageBoxA - Display message box (ANSI)
 #[no_mangle]
@@ -40,16 +50,12 @@ pub extern "win64" fn MessageBoxA(
     }
 
     unsafe {
-        let text = CStr::from_ptr(lpText as *const i8)
-            .to_string_lossy()
-            .to_string();
+        let text = CStr::from_ptr(lpText as *const i8).to_string_lossy().to_string();
 
         let caption = if lpCaption.is_null() {
             "TuxExe Application".to_string()
         } else {
-            CStr::from_ptr(lpCaption as *const i8)
-                .to_string_lossy()
-                .to_string()
+            CStr::from_ptr(lpCaption as *const i8).to_string_lossy().to_string()
         };
 
         show_message_box(&text, &caption, uType)
@@ -79,6 +85,48 @@ pub extern "win64" fn MessageBoxW(
     };
 
     show_message_box(&text, &caption, uType)
+}
+
+pub extern "win64" fn EndDialog(hDlg: usize, _nResult: isize) -> i32 {
+    if hDlg != 0 && !super::window_exists(hDlg) {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn DialogBoxParamW(
+    _hInstance: usize,
+    _lpTemplateName: *const u16,
+    hWndParent: usize,
+    lpDialogFunc: Option<DialogProc>,
+    dwInitParam: isize,
+) -> isize {
+    if hWndParent != 0 && !super::window_exists(hWndParent) {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return -1;
+    }
+
+    if let Some(dialog_proc) = lpDialogFunc {
+        unsafe {
+            let _ = dialog_proc(hWndParent, WM_INITDIALOG, 0, dwInitParam);
+        }
+    }
+
+    set_last_error(ERROR_SUCCESS);
+    IDOK as isize
+}
+
+pub extern "win64" fn DialogBoxParamA(
+    hInstance: usize,
+    lpTemplateName: *const u8,
+    hWndParent: usize,
+    lpDialogFunc: Option<DialogProc>,
+    dwInitParam: isize,
+) -> isize {
+    DialogBoxParamW(hInstance, lpTemplateName.cast(), hWndParent, lpDialogFunc, dwInitParam)
 }
 
 fn show_message_box(text: &str, caption: &str, uType: u32) -> i32 {
@@ -118,7 +166,12 @@ fn show_message_box(text: &str, caption: &str, uType: u32) -> i32 {
     }
 }
 
-fn show_zenity_dialog(text: &str, caption: &str, button_type: u32, icon_type: u32) -> Result<i32, ()> {
+fn show_zenity_dialog(
+    text: &str,
+    caption: &str,
+    button_type: u32,
+    icon_type: u32,
+) -> Result<i32, ()> {
     // Check if zenity is available
     if Command::new("which").arg("zenity").output().is_err() {
         return Err(());
@@ -128,11 +181,21 @@ fn show_zenity_dialog(text: &str, caption: &str, button_type: u32, icon_type: u3
 
     // Set icon type
     match icon_type {
-        MB_ICONERROR => { cmd.arg("--error"); }
-        MB_ICONWARNING => { cmd.arg("--warning"); }
-        MB_ICONINFORMATION => { cmd.arg("--info"); }
-        MB_ICONQUESTION => { cmd.arg("--question"); }
-        _ => { cmd.arg("--info"); }
+        MB_ICONERROR => {
+            cmd.arg("--error");
+        }
+        MB_ICONWARNING => {
+            cmd.arg("--warning");
+        }
+        MB_ICONINFORMATION => {
+            cmd.arg("--info");
+        }
+        MB_ICONQUESTION => {
+            cmd.arg("--question");
+        }
+        _ => {
+            cmd.arg("--info");
+        }
     }
 
     cmd.arg("--title").arg(caption);
@@ -178,7 +241,12 @@ fn show_zenity_dialog(text: &str, caption: &str, button_type: u32, icon_type: u3
     }
 }
 
-fn show_kdialog_dialog(text: &str, caption: &str, button_type: u32, icon_type: u32) -> Result<i32, ()> {
+fn show_kdialog_dialog(
+    text: &str,
+    caption: &str,
+    button_type: u32,
+    icon_type: u32,
+) -> Result<i32, ()> {
     // Check if kdialog is available
     if Command::new("which").arg("kdialog").output().is_err() {
         return Err(());
@@ -190,17 +258,29 @@ fn show_kdialog_dialog(text: &str, caption: &str, button_type: u32, icon_type: u
 
     // Set message type
     match icon_type {
-        MB_ICONERROR => { cmd.arg("--error"); }
-        MB_ICONWARNING => { cmd.arg("--sorry"); }
-        MB_ICONINFORMATION => { cmd.arg("--msgbox"); }
-        MB_ICONQUESTION => {
-            match button_type {
-                MB_YESNO | MB_YESNOCANCEL => { cmd.arg("--yesno"); }
-                MB_OKCANCEL => { cmd.arg("--yesno"); }
-                _ => { cmd.arg("--msgbox"); }
-            }
+        MB_ICONERROR => {
+            cmd.arg("--error");
         }
-        _ => { cmd.arg("--msgbox"); }
+        MB_ICONWARNING => {
+            cmd.arg("--sorry");
+        }
+        MB_ICONINFORMATION => {
+            cmd.arg("--msgbox");
+        }
+        MB_ICONQUESTION => match button_type {
+            MB_YESNO | MB_YESNOCANCEL => {
+                cmd.arg("--yesno");
+            }
+            MB_OKCANCEL => {
+                cmd.arg("--yesno");
+            }
+            _ => {
+                cmd.arg("--msgbox");
+            }
+        },
+        _ => {
+            cmd.arg("--msgbox");
+        }
     }
 
     cmd.arg(text);

@@ -188,11 +188,23 @@ pub extern "win64" fn HeapCreate(
 }
 
 pub extern "win64" fn HeapAlloc(hHeap: Handle, dwFlags: u32, dwBytes: usize) -> *mut c_void {
-    heap::heap_alloc(hHeap, dwFlags, dwBytes)
+    let ptr = heap::heap_alloc(hHeap, dwFlags, dwBytes);
+    if ptr.is_null() {
+        set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+    } else {
+        set_last_error(ERROR_SUCCESS);
+    }
+    ptr
 }
 
 pub extern "win64" fn HeapFree(hHeap: Handle, dwFlags: u32, lpMem: *mut c_void) -> i32 {
-    heap::heap_free(hHeap, dwFlags, lpMem)
+    let ok = heap::heap_free(hHeap, dwFlags, lpMem);
+    if ok == 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+    } else {
+        set_last_error(ERROR_SUCCESS);
+    }
+    ok
 }
 
 pub extern "win64" fn HeapReAlloc(
@@ -201,11 +213,23 @@ pub extern "win64" fn HeapReAlloc(
     lpMem: *mut c_void,
     dwBytes: usize,
 ) -> *mut c_void {
-    heap::heap_realloc(hHeap, dwFlags, lpMem, dwBytes)
+    let ptr = heap::heap_realloc(hHeap, dwFlags, lpMem, dwBytes);
+    if ptr.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+    } else {
+        set_last_error(ERROR_SUCCESS);
+    }
+    ptr
 }
 
 pub extern "win64" fn HeapSize(hHeap: Handle, dwFlags: u32, lpMem: *const c_void) -> usize {
-    heap::heap_size(hHeap, dwFlags, lpMem)
+    let size = heap::heap_size(hHeap, dwFlags, lpMem);
+    if size == usize::MAX {
+        set_last_error(ERROR_INVALID_PARAMETER);
+    } else {
+        set_last_error(ERROR_SUCCESS);
+    }
+    size
 }
 
 pub extern "win64" fn HeapDestroy(hHeap: Handle) -> i32 {
@@ -214,6 +238,40 @@ pub extern "win64" fn HeapDestroy(hHeap: Handle) -> i32 {
 
 pub extern "win64" fn GetProcessHeap() -> Handle {
     heap::get_process_heap()
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn HeapQueryInformation(
+    _h_heap: Handle,
+    _heap_information_class: u32,
+    heap_information: *mut c_void,
+    heap_information_length: usize,
+    return_length: *mut usize,
+) -> i32 {
+    if !return_length.is_null() {
+        unsafe {
+            *return_length = 0;
+        }
+    }
+
+    if !heap_information.is_null() && heap_information_length > 0 {
+        unsafe {
+            std::ptr::write_bytes(heap_information.cast::<u8>(), 0, heap_information_length);
+        }
+    }
+
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn HeapSetInformation(
+    _h_heap: Handle,
+    _heap_information_class: u32,
+    _heap_information: *mut c_void,
+    _heap_information_length: usize,
+) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
 }
 
 pub extern "win64" fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> *mut c_void {

@@ -129,6 +129,79 @@ pub extern "win64" fn SelectObject(_hdc: usize, _hObject: usize) -> usize {
     0
 }
 
+/// Pixel format descriptor for OpenGL
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PixelFormatDescriptor {
+    pub nSize: u16,
+    pub nVersion: u16,
+    pub dwFlags: u32,
+    pub iPixelType: u8,
+    pub cColorBits: u8,
+    pub cRedBits: u8,
+    pub cRedShift: u8,
+    pub cGreenBits: u8,
+    pub cGreenShift: u8,
+    pub cBlueBits: u8,
+    pub cBlueShift: u8,
+    pub cAlphaBits: u8,
+    pub cAlphaShift: u8,
+    pub cAccumBits: u8,
+    pub cAccumRedBits: u8,
+    pub cAccumGreenBits: u8,
+    pub cAccumBlueBits: u8,
+    pub cAccumAlphaBits: u8,
+    pub cDepthBits: u8,
+    pub cStencilBits: u8,
+    pub cAuxBuffers: u8,
+    pub iLayerType: u8,
+    pub bReserved: u8,
+    pub dwLayerMask: u32,
+    pub dwVisibleMask: u32,
+    pub dwDamageMask: u32,
+}
+
+pub extern "win64" fn GetDeviceCaps(_hdc: usize, _nIndex: i32) -> i32 {
+    // Return sensible defaults for common queries
+    // Windows GDI device capabilities: https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-getdevicecaps
+    if _nIndex == 8 /*HORZRES*/ {
+        1920 // Width in pixels
+    } else if _nIndex == 10 /*VERTRES*/ {
+        1080 // Height in pixels
+    } else if _nIndex == 12 /*BITSPIXEL*/ {
+        32 // Bits per pixel
+    } else if _nIndex == 14 /*PLANES*/ {
+        1 // Number of color planes
+    } else if _nIndex == 88 /*LOGPIXELSX*/ {
+        96 // Horizontal DPI
+    } else if _nIndex == 90 /*LOGPIXELSY*/ {
+        96 // Vertical DPI
+    } else if _nIndex == 116 /*VREFRESH*/ {
+        60 // Vertical refresh rate
+    } else if _nIndex == 38 /*RASTERCAPS*/ {
+        0x00000001 // RC_BITBLT
+    } else {
+        0
+    }
+}
+
+pub extern "win64" fn SetPixelFormat(_hdc: usize, _format: i32, _ppfd: *const PixelFormatDescriptor) -> i32 {
+    // Always succeed — we're stubbing OpenGL anyway
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn ChoosePixelFormat(_hdc: usize, _ppfd: *const PixelFormatDescriptor) -> i32 {
+    // Return format 1 — good enough for basic OpenGL
+    1
+}
+
+pub extern "win64" fn SwapBuffers(_hdc: usize) -> i32 {
+    // No-op — nothing to swap
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
 
@@ -141,6 +214,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("BitBlt", BitBlt as usize);
     exports.insert("CreateCompatibleDC", CreateCompatibleDC as usize);
     exports.insert("SelectObject", SelectObject as usize);
+    exports.insert("GetDeviceCaps", GetDeviceCaps as usize);
+    exports.insert("SetPixelFormat", SetPixelFormat as usize);
+    exports.insert("ChoosePixelFormat", ChoosePixelFormat as usize);
+    exports.insert("SwapBuffers", SwapBuffers as usize);
 
     exports
 }

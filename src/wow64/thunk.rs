@@ -1,5 +1,7 @@
 //! 32→64 bit thunking — convert 32-bit API parameters for 64-bit internal handlers.
 
+use std::collections::BTreeMap;
+
 /// Signature-level description for each 32-bit argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThunkArgKind {
@@ -18,6 +20,48 @@ pub enum ThunkArgValue {
     Bool(bool),
     Pointer(usize),
     Handle(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThunkCallSpec {
+    pub api_name: String,
+    pub signature: Vec<ThunkArgKind>,
+}
+
+impl ThunkCallSpec {
+    pub fn new(api_name: impl Into<String>, signature: &[ThunkArgKind]) -> Self {
+        Self { api_name: api_name.into(), signature: signature.to_vec() }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ThunkDispatcher {
+    registry: BTreeMap<String, ThunkCallSpec>,
+}
+
+impl ThunkDispatcher {
+    pub fn register(&mut self, api_name: impl Into<String>, signature: &[ThunkArgKind]) {
+        let api_name = api_name.into();
+        let key = api_name.to_ascii_lowercase();
+        self.registry.insert(key, ThunkCallSpec::new(api_name, signature));
+    }
+
+    pub fn normalize_call(
+        &self,
+        api_name: &str,
+        args32: &[u32],
+    ) -> Result<Vec<ThunkArgValue>, String> {
+        let key = api_name.to_ascii_lowercase();
+        let spec = self
+            .registry
+            .get(&key)
+            .ok_or_else(|| format!("missing thunk signature for {api_name}"))?;
+        thunk_call_frame(args32, &spec.signature)
+    }
+
+    pub fn known_api_count(&self) -> usize {
+        self.registry.len()
+    }
 }
 
 /// Convert one 32-bit argument to a widened internal value.
@@ -81,5 +125,36 @@ mod tests {
                 ThunkArgValue::Bool(true),
             ]
         );
+    }
+
+    #[test]
+    fn dispatcher_normalizes_registered_calls() {
+        let mut dispatcher = ThunkDispatcher::default();
+        dispatcher.register(
+            "CreateFileW",
+            &[
+                ThunkArgKind::Pointer,
+                ThunkArgKind::U32,
+                ThunkArgKind::U32,
+                ThunkArgKind::Pointer,
+                ThunkArgKind::U32,
+                ThunkArgKind::U32,
+                ThunkArgKind::Handle,
+            ],
+        );
+
+        let values = dispatcher
+            .normalize_call("createfilew", &[0x1000, 1, 2, 0, 3, 4, 0xFFFF_FF01])
+            .expect("registered call should normalize");
+        assert_eq!(values.len(), 7);
+        assert_eq!(values[0], ThunkArgValue::Pointer(0x1000));
+        assert_eq!(values[6], ThunkArgValue::Handle(0xFFFF_FF01));
+    }
+
+    #[test]
+    fn dispatcher_rejects_unknown_api() {
+        let dispatcher = ThunkDispatcher::default();
+        let err = dispatcher.normalize_call("UnknownApi", &[]).expect_err("unknown API must fail");
+        assert!(err.contains("missing thunk signature"));
     }
 }

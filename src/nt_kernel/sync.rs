@@ -5,10 +5,11 @@ use std::{
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
+use tracing::warn;
 
 use crate::{
     nt_kernel::thread,
-    utils::handle::{global_table, init_global_table, Handle, HandleObject, INVALID_HANDLE_VALUE},
+    utils::handle::{global_table, init_global_table, Handle, HandleObject},
 };
 
 pub const WAIT_OBJECT_0: u32 = 0;
@@ -42,44 +43,6 @@ impl MutexHandleObject {
         }
     }
 
-    fn wait(&self, timeout_ms: u32) -> u32 {
-        let (lock, condvar) = &*self.state;
-        let mut guard = lock.lock().expect("mutex state poisoned");
-        let current_tid = thread::current_os_thread_id();
-
-        let acquired = if timeout_ms == INFINITE {
-            while matches!(guard.owner_tid, Some(owner) if owner != current_tid) {
-                guard = condvar.wait(guard).expect("mutex state poisoned");
-            }
-            true
-        } else {
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            while matches!(guard.owner_tid, Some(owner) if owner != current_tid) {
-                let now = Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                let remaining = deadline.saturating_duration_since(now);
-                let (next, timeout) =
-                    condvar.wait_timeout(guard, remaining).expect("mutex state poisoned");
-                guard = next;
-                if timeout.timed_out() {
-                    break;
-                }
-            }
-
-            !matches!(guard.owner_tid, Some(owner) if owner != current_tid)
-        };
-
-        if !acquired {
-            return WAIT_TIMEOUT;
-        }
-
-        guard.owner_tid = Some(current_tid);
-        guard.recursion_count = guard.recursion_count.saturating_add(1);
-        WAIT_OBJECT_0
-    }
-
     fn release(&self) -> i32 {
         let (lock, condvar) = &*self.state;
         let mut guard = lock.lock().expect("mutex state poisoned");
@@ -96,6 +59,44 @@ impl MutexHandleObject {
         }
         1
     }
+}
+
+fn wait_on_mutex_state(state: Arc<(Mutex<MutexState>, Condvar)>, timeout_ms: u32) -> u32 {
+    let (lock, condvar) = &*state;
+    let mut guard = lock.lock().expect("mutex state poisoned");
+    let current_tid = thread::current_os_thread_id();
+
+    let acquired = if timeout_ms == INFINITE {
+        while matches!(guard.owner_tid, Some(owner) if owner != current_tid) {
+            guard = condvar.wait(guard).expect("mutex state poisoned");
+        }
+        true
+    } else {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        while matches!(guard.owner_tid, Some(owner) if owner != current_tid) {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next, timeout) =
+                condvar.wait_timeout(guard, remaining).expect("mutex state poisoned");
+            guard = next;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+
+        !matches!(guard.owner_tid, Some(owner) if owner != current_tid)
+    };
+
+    if !acquired {
+        return WAIT_TIMEOUT;
+    }
+
+    guard.owner_tid = Some(current_tid);
+    guard.recursion_count = guard.recursion_count.saturating_add(1);
+    WAIT_OBJECT_0
 }
 
 impl HandleObject for MutexHandleObject {
@@ -129,44 +130,6 @@ impl EventHandleObject {
         }
     }
 
-    fn wait(&self, timeout_ms: u32) -> u32 {
-        let (lock, condvar) = &*self.state;
-        let mut guard = lock.lock().expect("event state poisoned");
-
-        let signaled = if timeout_ms == INFINITE {
-            while !guard.signaled {
-                guard = condvar.wait(guard).expect("event state poisoned");
-            }
-            true
-        } else {
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            while !guard.signaled {
-                let now = Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                let remaining = deadline.saturating_duration_since(now);
-                let (next, timeout) =
-                    condvar.wait_timeout(guard, remaining).expect("event state poisoned");
-                guard = next;
-                if timeout.timed_out() {
-                    break;
-                }
-            }
-            guard.signaled
-        };
-
-        if !signaled {
-            return WAIT_TIMEOUT;
-        }
-
-        if !guard.manual_reset {
-            guard.signaled = false;
-        }
-
-        WAIT_OBJECT_0
-    }
-
     fn set(&self) -> i32 {
         let (lock, condvar) = &*self.state;
         let mut guard = lock.lock().expect("event state poisoned");
@@ -181,6 +144,44 @@ impl EventHandleObject {
         guard.signaled = false;
         1
     }
+}
+
+fn wait_on_event_state(state: Arc<(Mutex<EventState>, Condvar)>, timeout_ms: u32) -> u32 {
+    let (lock, condvar) = &*state;
+    let mut guard = lock.lock().expect("event state poisoned");
+
+    let signaled = if timeout_ms == INFINITE {
+        while !guard.signaled {
+            guard = condvar.wait(guard).expect("event state poisoned");
+        }
+        true
+    } else {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        while !guard.signaled {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next, timeout) =
+                condvar.wait_timeout(guard, remaining).expect("event state poisoned");
+            guard = next;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+        guard.signaled
+    };
+
+    if !signaled {
+        return WAIT_TIMEOUT;
+    }
+
+    if !guard.manual_reset {
+        guard.signaled = false;
+    }
+
+    WAIT_OBJECT_0
 }
 
 impl HandleObject for EventHandleObject {
@@ -214,42 +215,6 @@ impl SemaphoreHandleObject {
         }
     }
 
-    fn wait(&self, timeout_ms: u32) -> u32 {
-        let (lock, condvar) = &*self.state;
-        let mut guard = lock.lock().expect("semaphore state poisoned");
-
-        let acquired = if timeout_ms == INFINITE {
-            while guard.count <= 0 {
-                guard = condvar.wait(guard).expect("semaphore state poisoned");
-            }
-            true
-        } else {
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            while guard.count <= 0 {
-                let now = Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                let remaining = deadline.saturating_duration_since(now);
-                let (next, timeout) =
-                    condvar.wait_timeout(guard, remaining).expect("semaphore state poisoned");
-                guard = next;
-                if timeout.timed_out() {
-                    break;
-                }
-            }
-
-            guard.count > 0
-        };
-
-        if !acquired {
-            return WAIT_TIMEOUT;
-        }
-
-        guard.count -= 1;
-        WAIT_OBJECT_0
-    }
-
     fn release(&self, release_count: i32, previous_count: *mut i32) -> i32 {
         let (lock, condvar) = &*self.state;
         let mut guard = lock.lock().expect("semaphore state poisoned");
@@ -267,6 +232,42 @@ impl SemaphoreHandleObject {
         condvar.notify_all();
         1
     }
+}
+
+fn wait_on_semaphore_state(state: Arc<(Mutex<SemaphoreState>, Condvar)>, timeout_ms: u32) -> u32 {
+    let (lock, condvar) = &*state;
+    let mut guard = lock.lock().expect("semaphore state poisoned");
+
+    let acquired = if timeout_ms == INFINITE {
+        while guard.count <= 0 {
+            guard = condvar.wait(guard).expect("semaphore state poisoned");
+        }
+        true
+    } else {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        while guard.count <= 0 {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next, timeout) =
+                condvar.wait_timeout(guard, remaining).expect("semaphore state poisoned");
+            guard = next;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+
+        guard.count > 0
+    };
+
+    if !acquired {
+        return WAIT_TIMEOUT;
+    }
+
+    guard.count -= 1;
+    WAIT_OBJECT_0
 }
 
 impl HandleObject for SemaphoreHandleObject {
@@ -290,12 +291,31 @@ pub fn create_event(manual_reset: bool, initial_state: bool) -> Handle {
 }
 
 pub fn create_semaphore(initial_count: i32, maximum_count: i32) -> Handle {
-    if initial_count < 0 || maximum_count <= 0 || initial_count > maximum_count {
-        return INVALID_HANDLE_VALUE;
+    // Be permissive like Windows compatibility layers: some games pass
+    // out-of-range values during probing and expect a usable semaphore.
+    let mut normalized_initial = initial_count;
+    let mut normalized_max = maximum_count;
+    if normalized_max <= 0 {
+        normalized_max = i32::MAX;
+    }
+    if normalized_initial < 0 {
+        normalized_initial = 0;
+    }
+    if normalized_initial > normalized_max {
+        normalized_initial = normalized_max;
+    }
+    if normalized_initial != initial_count || normalized_max != maximum_count {
+        warn!(
+            initial_count,
+            maximum_count,
+            normalized_initial,
+            normalized_max,
+            "Normalized CreateSemaphore arguments"
+        );
     }
 
     init_global_table();
-    global_table().alloc(Box::new(SemaphoreHandleObject::new(initial_count, maximum_count)))
+    global_table().alloc(Box::new(SemaphoreHandleObject::new(normalized_initial, normalized_max)))
 }
 
 pub fn release_mutex(handle: Handle) -> i32 {
@@ -338,23 +358,36 @@ pub fn release_semaphore(handle: Handle, release_count: i32, previous_count: *mu
 }
 
 pub fn wait_for_single_object(handle: Handle, timeout_ms: u32) -> u32 {
-    let result = global_table().with(handle, |object| {
-        if let Some(thread) = object.as_any().downcast_ref::<thread::ThreadHandleObject>() {
-            return Some(thread.wait(timeout_ms));
+    enum WaitTarget {
+        Thread(Handle),
+        Mutex(Arc<(Mutex<MutexState>, Condvar)>),
+        Event(Arc<(Mutex<EventState>, Condvar)>),
+        Semaphore(Arc<(Mutex<SemaphoreState>, Condvar)>),
+    }
+
+    let target = global_table().with(handle, |object| {
+        if object.as_any().is::<thread::ThreadHandleObject>() {
+            return Some(WaitTarget::Thread(handle));
         }
         if let Some(mutex) = object.as_any().downcast_ref::<MutexHandleObject>() {
-            return Some(mutex.wait(timeout_ms));
+            return Some(WaitTarget::Mutex(mutex.state.clone()));
         }
         if let Some(event) = object.as_any().downcast_ref::<EventHandleObject>() {
-            return Some(event.wait(timeout_ms));
+            return Some(WaitTarget::Event(event.state.clone()));
         }
         if let Some(semaphore) = object.as_any().downcast_ref::<SemaphoreHandleObject>() {
-            return Some(semaphore.wait(timeout_ms));
+            return Some(WaitTarget::Semaphore(semaphore.state.clone()));
         }
         None
     });
 
-    result.flatten().unwrap_or(WAIT_FAILED)
+    match target.flatten() {
+        Some(WaitTarget::Thread(thread_handle)) => thread::wait_for_thread(thread_handle, timeout_ms),
+        Some(WaitTarget::Mutex(state)) => wait_on_mutex_state(state, timeout_ms),
+        Some(WaitTarget::Event(state)) => wait_on_event_state(state, timeout_ms),
+        Some(WaitTarget::Semaphore(state)) => wait_on_semaphore_state(state, timeout_ms),
+        None => WAIT_FAILED,
+    }
 }
 
 pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms: u32) -> u32 {
@@ -414,6 +447,7 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
 mod tests {
     use super::*;
     use crate::test_support::serial_guard;
+    use crate::utils::handle::INVALID_HANDLE_VALUE;
 
     #[test]
     fn event_can_be_set_and_waited() {

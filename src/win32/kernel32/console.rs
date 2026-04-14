@@ -62,6 +62,30 @@ pub extern "win64" fn get_console_cp() -> u32 {
     65001
 }
 
+pub extern "win64" fn attach_console(_dw_process_id: u32) -> i32 {
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn alloc_console() -> i32 {
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn free_console() -> i32 {
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn get_console_window() -> usize {
+    0
+}
+
+pub extern "win64" fn set_console_ctrl_handler(_handler_routine: *const c_void, _add: i32) -> i32 {
+    super::error::set_last_error(0);
+    1
+}
+
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "win64" fn get_console_mode(handle: Handle, lp_mode: *mut u32) -> i32 {
     if lp_mode.is_null() {
@@ -78,6 +102,75 @@ pub extern "win64" fn get_console_mode(handle: Handle, lp_mode: *mut u32) -> i32
     unsafe {
         *lp_mode = 0x0001;
     }
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn set_console_mode(handle: Handle, _dw_mode: u32) -> i32 {
+    if !matches!(handle, PSEUDO_STDIN | PSEUDO_STDOUT | PSEUDO_STDERR) {
+        super::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+    super::error::set_last_error(0);
+    1
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn read_console_a(
+    console_input: Handle,
+    buffer: *mut c_void,
+    number_of_chars_to_read: u32,
+    number_of_chars_read: *mut u32,
+    _reserved: *mut c_void,
+) -> i32 {
+    if console_input != PSEUDO_STDIN || buffer.is_null() {
+        super::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+
+    // Avoid blocking host stdin in engine startup paths.
+    if !number_of_chars_read.is_null() {
+        unsafe {
+            *number_of_chars_read = 0;
+        }
+    }
+
+    if number_of_chars_to_read > 0 {
+        unsafe {
+            *(buffer.cast::<u8>()) = 0;
+        }
+    }
+
+    super::error::set_last_error(0);
+    1
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn read_console_w(
+    console_input: Handle,
+    buffer: *mut u16,
+    number_of_chars_to_read: u32,
+    number_of_chars_read: *mut u32,
+    _reserved: *mut c_void,
+) -> i32 {
+    if console_input != PSEUDO_STDIN || buffer.is_null() {
+        super::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+
+    // Avoid blocking host stdin in engine startup paths.
+    if !number_of_chars_read.is_null() {
+        unsafe {
+            *number_of_chars_read = 0;
+        }
+    }
+
+    if number_of_chars_to_read > 0 {
+        unsafe {
+            *buffer = 0;
+        }
+    }
+
     super::error::set_last_error(0);
     1
 }

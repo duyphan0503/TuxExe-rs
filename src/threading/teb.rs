@@ -1,6 +1,12 @@
 //! Thread and process environment state used by the Win32 runtime.
 
-use std::{cell::Cell, env, ffi::c_void, ptr, sync::OnceLock};
+use std::{
+    cell::Cell,
+    env,
+    ffi::c_void,
+    ptr,
+    sync::{Mutex, OnceLock},
+};
 
 use tracing::info;
 
@@ -9,8 +15,6 @@ use crate::{memory::heap, utils::handle::init_global_table};
 pub const TLS_MINIMUM_AVAILABLE: usize = 64;
 pub const TLS_EXPANSION_SLOTS: usize = 1024;
 pub const TLS_SLOT_COUNT: usize = TLS_MINIMUM_AVAILABLE + TLS_EXPANSION_SLOTS;
-
-const DEFAULT_STACK_WINDOW: usize = 8 * 1024 * 1024;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -115,6 +119,70 @@ fn process_environment_cell() -> &'static OnceLock<ProcessEnvironment> {
     &PROCESS_ENV
 }
 
+fn managed_teb_registry() -> &'static Mutex<Vec<usize>> {
+    static REGISTRY: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn register_managed_teb(teb_ptr: *mut Teb) {
+    if teb_ptr.is_null() {
+        return;
+    }
+    let mut registry = managed_teb_registry().lock().expect("managed TEB registry poisoned");
+    let encoded = teb_ptr as usize;
+    if !registry.iter().any(|entry| *entry == encoded) {
+        registry.push(encoded);
+    }
+}
+
+fn unregister_managed_teb(teb_ptr: *mut Teb) {
+    if teb_ptr.is_null() {
+        return;
+    }
+    let mut registry = managed_teb_registry().lock().expect("managed TEB registry poisoned");
+    let encoded = teb_ptr as usize;
+    registry.retain(|entry| *entry != encoded);
+}
+
+pub fn managed_teb_pointers() -> Vec<*mut Teb> {
+    managed_teb_registry()
+        .lock()
+        .expect("managed TEB registry poisoned")
+        .iter()
+        .copied()
+        .map(|ptr| ptr as *mut Teb)
+        .collect()
+}
+
+pub fn teb_tls_value(teb_ptr: *mut Teb, index: usize) -> *mut c_void {
+    if teb_ptr.is_null() || index >= TLS_SLOT_COUNT {
+        return ptr::null_mut();
+    }
+    unsafe {
+        let teb = &*teb_ptr;
+        if index < TLS_MINIMUM_AVAILABLE {
+            teb.tls_slots[index]
+        } else {
+            teb.tls_expansion_slots[index - TLS_MINIMUM_AVAILABLE]
+        }
+    }
+}
+
+pub fn set_teb_tls_value(teb_ptr: *mut Teb, index: usize, value: *mut c_void) -> bool {
+    if teb_ptr.is_null() || index >= TLS_SLOT_COUNT {
+        return false;
+    }
+    unsafe {
+        let teb = &mut *teb_ptr;
+        if index < TLS_MINIMUM_AVAILABLE {
+            teb.tls_slots[index] = value;
+        } else {
+            teb.tls_expansion_slots[index - TLS_MINIMUM_AVAILABLE] = value;
+        }
+    }
+    true
+}
+
 fn encode_wide(value: &str) -> Box<[u16]> {
     let mut wide: Vec<u16> = value.encode_utf16().collect();
     wide.push(0);
@@ -174,10 +242,33 @@ fn current_thread_id() -> usize {
 }
 
 fn stack_bounds() -> (*mut u8, *mut u8) {
-    let marker = 0_u8;
-    let stack_base = (&marker as *const u8 as usize + 4096) as *mut u8;
-    let stack_limit = (stack_base as usize).saturating_sub(DEFAULT_STACK_WINDOW) as *mut u8;
-    (stack_base, stack_limit)
+    let mut attr: libc::pthread_attr_t = unsafe { std::mem::zeroed() };
+    let mut stack_base: *mut libc::c_void = std::ptr::null_mut();
+    let mut stack_size: libc::size_t = 0;
+
+    unsafe {
+        libc::pthread_getattr_np(libc::pthread_self(), &mut attr);
+        libc::pthread_attr_getstack(&attr, &mut stack_base, &mut stack_size);
+        libc::pthread_attr_destroy(&mut attr);
+    }
+    
+    // In Linux, stack_base returned by pthread_attr_getstack is the *lowest* address (the limit).
+    // The top of the stack is stack_base + stack_size.
+    //
+    // WINDOWS COMPATIBILITY HACK:
+    // MSVC `_chkstk` routine will read `TEB.StackLimit` (gs:0x10) and then loop 
+    // `r11 = r11 - 0x1000; mov byte [r11], 0` to manually trigger guard page exceptions 
+    // to ask the Windows kernel to commit more stack memory.
+    // On Linux, this will just segfault because we don't have the Windows kernel
+    // trapping these exceptions to grow the stack.
+    // 
+    // The `_chkstk` loop does: `cmp r10, gs:0x10; jae exit_loop`.
+    // If we set `TEB.StackLimit` to 0, `target_rsp >= limit` 
+    // will always be true, bypassing the MSVC `_chkstk` completely!
+    let limit = 0 as *mut u8;
+    let base = (stack_base as usize + stack_size) as *mut u8;
+
+    (base, limit)
 }
 
 fn apply_gs_base(teb: *mut Teb) -> Result<(), String> {
@@ -248,6 +339,7 @@ pub fn setup_teb(image_base: usize) -> Result<(), String> {
 
     CURRENT_TEB.with(|slot| slot.set(teb_ptr));
     MANAGED_GUEST_THREAD.with(|slot| slot.set(true));
+    register_managed_teb(teb_ptr);
 
     info!(
         teb = format_args!("{:p}", teb_ptr),
@@ -270,6 +362,7 @@ pub fn attach_spawned_thread() -> Result<(), String> {
 
     CURRENT_TEB.with(|slot| slot.set(teb_ptr));
     MANAGED_GUEST_THREAD.with(|slot| slot.set(true));
+    register_managed_teb(teb_ptr);
     Ok(())
 }
 
@@ -277,6 +370,7 @@ pub fn destroy_current_teb() {
     CURRENT_TEB.with(|slot| {
         let ptr = slot.replace(ptr::null_mut());
         if !ptr.is_null() {
+            unregister_managed_teb(ptr);
             unsafe {
                 drop(Box::from_raw(ptr));
             }

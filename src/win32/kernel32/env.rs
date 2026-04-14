@@ -3,6 +3,15 @@
 use std::ffi::CStr;
 use std::ptr;
 
+fn lookup_env_var_case_insensitive(name: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(name) {
+        return Some(value);
+    }
+
+    let folded = name.to_ascii_uppercase();
+    std::env::vars().find_map(|(key, value)| (key.to_ascii_uppercase() == folded).then_some(value))
+}
+
 /// GetEnvironmentVariableA - Get environment variable (ANSI)
 #[no_mangle]
 pub extern "win64" fn GetEnvironmentVariableA(
@@ -26,11 +35,12 @@ pub extern "win64" fn GetEnvironmentVariableA(
         tracing::trace!("GetEnvironmentVariableA: name={}", name);
 
         // Get the environment variable
-        let value = match std::env::var(name) {
-            Ok(v) => v,
-            Err(_) => {
+        let value = match lookup_env_var_case_insensitive(name) {
+            Some(v) => v,
+            None => {
                 // Variable not found
                 crate::win32::kernel32::error::set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+                tracing::trace!("GetEnvironmentVariableA: {} -> <not found>", name);
                 return 0;
             }
         };
@@ -74,11 +84,12 @@ pub extern "win64" fn GetEnvironmentVariableW(
     tracing::trace!("GetEnvironmentVariableW: name={}", name);
 
     // Get the environment variable
-    let value = match std::env::var(&name) {
-        Ok(v) => v,
-        Err(_) => {
+    let value = match lookup_env_var_case_insensitive(&name) {
+        Some(v) => v,
+        None => {
             // Variable not found
             crate::win32::kernel32::error::set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+            tracing::trace!("GetEnvironmentVariableW: {} -> <not found>", name);
             return 0;
         }
     };
@@ -302,6 +313,18 @@ pub fn init_windows_env_vars() {
 
     if env::var("PROGRAMFILES(X86)").is_err() {
         env::set_var("PROGRAMFILES(X86)", format!("{}/Program Files (x86)", drive_c));
+    }
+
+    if env::var("ProgramFiles").is_err() {
+        env::set_var("ProgramFiles", format!("{}/Program Files", drive_c));
+    }
+
+    if env::var("ProgramFiles(x86)").is_err() {
+        env::set_var("ProgramFiles(x86)", format!("{}/Program Files (x86)", drive_c));
+    }
+
+    if env::var("ProgramData").is_err() {
+        env::set_var("ProgramData", format!("{}/ProgramData", drive_c));
     }
 
     if env::var("USERPROFILE").is_err() {

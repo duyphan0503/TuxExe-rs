@@ -22,14 +22,25 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetStdHandle", console::set_std_handle as usize);
     exports.insert("WriteConsoleA", console::write_console_a as usize);
     exports.insert("WriteConsoleW", console::write_console_w as usize);
+    exports.insert("ReadConsoleA", console::read_console_a as usize);
+    exports.insert("ReadConsoleW", console::read_console_w as usize);
     exports.insert("GetConsoleCP", console::get_console_cp as usize);
     exports.insert("GetConsoleMode", console::get_console_mode as usize);
+    exports.insert("SetConsoleMode", console::set_console_mode as usize);
+    exports.insert("AttachConsole", console::attach_console as usize);
+    exports.insert("AllocConsole", console::alloc_console as usize);
+    exports.insert("FreeConsole", console::free_console as usize);
+    exports.insert("GetConsoleWindow", console::get_console_window as usize);
+    exports.insert("SetConsoleCtrlHandler", console::set_console_ctrl_handler as usize);
 
     // File
     exports.insert("WriteFile", file::write_file as usize);
     exports.insert("ReadFile", file::read_file as usize);
+    exports.insert("GetOverlappedResult", file::get_overlapped_result as usize);
+    exports.insert("CancelIo", file::cancel_io as usize);
     exports.insert("CreateFileA", file::create_file_a as usize);
     exports.insert("CreateFileW", file::create_file_w as usize);
+    exports.insert("CreatePipe", file::create_pipe as usize);
     exports.insert("CreateDirectoryA", file::create_directory_a as usize);
     exports.insert("CreateDirectoryW", file::create_directory_w as usize);
     exports.insert("RemoveDirectoryA", file::remove_directory_a as usize);
@@ -52,9 +63,14 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetDiskFreeSpaceExW", file::get_disk_free_space_ex_w as usize);
     exports.insert("GetDiskFreeSpaceA", file::get_disk_free_space_a as usize);
     exports.insert("GetDiskFreeSpaceW", file::get_disk_free_space_w as usize);
+    exports.insert("GetDriveTypeA", file::get_drive_type_a as usize);
+    exports.insert("GetDriveTypeW", file::get_drive_type_w as usize);
     exports.insert("CloseHandle", file::close_handle as usize);
     exports.insert("GetFileType", file::get_file_type as usize);
+    exports.insert("SetHandleInformation", file::set_handle_information as usize);
+    exports.insert("GetHandleInformation", file::get_handle_information as usize);
     exports.insert("GetFileSizeEx", file::get_file_size_ex as usize);
+    exports.insert("GetFileSize", file::get_file_size as usize);
     exports.insert("SetFilePointer", file::set_file_pointer as usize);
     exports.insert("SetFilePointerEx", file::set_file_pointer_ex as usize);
     exports.insert("GetFileAttributesA", file::get_file_attributes_a as usize);
@@ -64,6 +80,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetFileAttributesW", file::set_file_attributes_w as usize);
     exports.insert("GetFileAttributesExA", file::get_file_attributes_ex_a as usize);
     exports.insert("GetFileAttributesExW", file::get_file_attributes_ex_w as usize);
+    exports.insert("GetFullPathNameA", file::get_full_path_name_a as usize);
+    exports.insert("GetFullPathNameW", file::get_full_path_name_w as usize);
+    exports.insert("GetFileInformationByHandle", file::get_file_information_by_handle as usize);
+    exports.insert("PeekNamedPipe", file::peek_named_pipe as usize);
     exports.insert("FlushFileBuffers", file::flush_file_buffers as usize);
     exports.insert("SetEndOfFile", file::set_end_of_file as usize);
     exports.insert("SetFileTime", file::set_file_time as usize);
@@ -103,7 +123,21 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetStartupInfoW", process::get_startup_info_w as usize);
     exports.insert("GetCurrentProcess", process::get_current_process as usize);
     exports.insert("GetCurrentProcessId", process::get_current_process_id as usize);
+    exports.insert("GetExitCodeProcess", process::get_exit_code_process as usize);
+    exports.insert("GetThreadTimes", process::get_thread_times as usize);
+    exports.insert("SetThreadAffinityMask", process::set_thread_affinity_mask as usize);
+    exports.insert("GetProcessAffinityMask", process::get_process_affinity_mask as usize);
+    exports.insert("OpenThread", process::open_thread as usize);
+    exports.insert("GetThreadPriority", process::get_thread_priority as usize);
+    exports.insert("SetThreadPriority", process::set_thread_priority as usize);
+    exports.insert("DuplicateHandle", process::duplicate_handle as usize);
+    exports.insert("FreeLibraryAndExitThread", process::free_library_and_exit_thread as usize);
     exports.insert("GetProcessId", process::get_process_id as usize);
+    exports.insert("ReadProcessMemory", process::read_process_memory as usize);
+    exports.insert("WriteProcessMemory", process::write_process_memory as usize);
+    exports.insert("GetErrorMode", process::get_error_mode as usize);
+    exports.insert("SetErrorMode", process::set_error_mode as usize);
+    exports.insert("SetThreadErrorMode", process::set_thread_error_mode as usize);
     exports.insert("TerminateProcess", process::terminate_process as usize);
     exports.insert("GetCurrentThreadId", process::get_current_thread_id as usize);
     exports.insert("GetSystemPowerStatus", process::get_system_power_status as usize);
@@ -114,6 +148,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("Process32NextW", process::process32_next_w as usize);
     exports.insert("Process32First", process::process32_first_a as usize);
     exports.insert("Process32Next", process::process32_next_a as usize);
+    exports.insert("Thread32First", process::thread32_first as usize);
+    exports.insert("Thread32Next", process::thread32_next as usize);
+    exports.insert("Module32FirstW", process::module32_first_w as usize);
+    exports.insert("Module32NextW", process::module32_next_w as usize);
     exports.insert("SetDllDirectoryW", process::set_dll_directory_w as usize);
     exports.insert("GetComputerNameW", process::get_computer_name_w as usize);
     exports.insert(
@@ -136,6 +174,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("IsProcessorFeaturePresent", process::is_processor_feature_present as usize);
     exports.insert("RtlCaptureContext", process::rtl_capture_context as usize);
     exports.insert("RtlLookupFunctionEntry", process::rtl_lookup_function_entry as usize);
+    exports.insert("RtlPcToFileHeader", process::rtl_pc_to_file_header as usize);
     exports.insert("RtlVirtualUnwind", process::rtl_virtual_unwind as usize);
     exports.insert("RtlUnwindEx", process::rtl_unwind_ex as usize);
     exports.insert("RtlUnwind", process::rtl_unwind as usize);
@@ -143,6 +182,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     // Error
     exports.insert("GetLastError", error::get_last_error as usize);
     exports.insert("SetLastError", error::set_last_error as usize);
+    exports.insert("FormatMessageA", error::format_message_a as usize);
+    exports.insert("FormatMessageW", error::format_message_w as usize);
     exports.insert("RaiseException", error::raise_exception as usize);
     exports.insert("SetUnhandledExceptionFilter", error::set_unhandled_exception_filter as usize);
     exports.insert("UnhandledExceptionFilter", error::unhandled_exception_filter as usize);
@@ -155,24 +196,43 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     );
     exports.insert("InitializeCriticalSectionEx", sync::InitializeCriticalSectionEx as usize);
     exports.insert("EnterCriticalSection", sync::EnterCriticalSection as usize);
+    exports.insert("TryEnterCriticalSection", sync::TryEnterCriticalSection as usize);
     exports.insert("LeaveCriticalSection", sync::LeaveCriticalSection as usize);
     exports.insert("DeleteCriticalSection", sync::DeleteCriticalSection as usize);
+    exports.insert("AcquireSRWLockExclusive", sync::AcquireSRWLockExclusive as usize);
+    exports.insert("ReleaseSRWLockExclusive", sync::ReleaseSRWLockExclusive as usize);
     exports.insert("WaitForSingleObject", sync::WaitForSingleObject as usize);
     exports.insert("WaitForMultipleObjects", sync::WaitForMultipleObjects as usize);
     exports.insert("WaitForSingleObjectEx", sync::WaitForSingleObjectEx as usize);
     exports.insert("WaitForMultipleObjectsEx", sync::WaitForMultipleObjectsEx as usize);
+    exports.insert("SignalObjectAndWait", sync::SignalObjectAndWait as usize);
     exports.insert("CreateMutexA", sync::CreateMutexA as usize);
     exports.insert("CreateMutexW", sync::CreateMutexW as usize);
     exports.insert("ReleaseMutex", sync::ReleaseMutex as usize);
     exports.insert("CreateEventA", sync::CreateEventA as usize);
     exports.insert("CreateEventW", sync::CreateEventW as usize);
     exports.insert("CreateEventExW", sync::CreateEventExW as usize);
+    exports.insert("OpenEventA", sync::OpenEventA as usize);
+    exports.insert("OpenEventW", sync::OpenEventW as usize);
+    exports.insert("CreateWaitableTimerA", sync::CreateWaitableTimerA as usize);
+    exports.insert("CreateWaitableTimerExW", sync::CreateWaitableTimerExW as usize);
+    exports.insert("SetWaitableTimer", sync::SetWaitableTimer as usize);
     exports.insert("SetEvent", sync::SetEvent as usize);
     exports.insert("ResetEvent", sync::ResetEvent as usize);
     exports.insert("CreateSemaphoreA", sync::CreateSemaphoreA as usize);
     exports.insert("CreateSemaphoreW", sync::CreateSemaphoreW as usize);
     exports.insert("CreateSemaphoreExW", sync::CreateSemaphoreExW as usize);
     exports.insert("ReleaseSemaphore", sync::ReleaseSemaphore as usize);
+    exports.insert("CreateTimerQueue", sync::CreateTimerQueue as usize);
+    exports.insert("CreateTimerQueueTimer", sync::CreateTimerQueueTimer as usize);
+    exports.insert("ChangeTimerQueueTimer", sync::ChangeTimerQueueTimer as usize);
+    exports.insert("DeleteTimerQueueTimer", sync::DeleteTimerQueueTimer as usize);
+    exports.insert("RegisterWaitForSingleObject", sync::RegisterWaitForSingleObject as usize);
+    exports.insert("UnregisterWait", sync::UnregisterWait as usize);
+    exports.insert("UnregisterWaitEx", sync::UnregisterWaitEx as usize);
+    exports.insert("CreateIoCompletionPort", sync::CreateIoCompletionPort as usize);
+    exports.insert("PostQueuedCompletionStatus", sync::PostQueuedCompletionStatus as usize);
+    exports.insert("GetQueuedCompletionStatus", sync::GetQueuedCompletionStatus as usize);
     exports.insert("InitializeSListHead", sync::InitializeSListHead as usize);
     exports.insert("InterlockedPushEntrySList", sync::InterlockedPushEntrySList as usize);
     exports.insert("InterlockedPopEntrySList", sync::InterlockedPopEntrySList as usize);
@@ -192,6 +252,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("HeapReAlloc", memory::HeapReAlloc as usize);
     exports.insert("HeapSize", memory::HeapSize as usize);
     exports.insert("HeapDestroy", memory::HeapDestroy as usize);
+    exports.insert("HeapQueryInformation", memory::HeapQueryInformation as usize);
+    exports.insert("HeapSetInformation", memory::HeapSetInformation as usize);
     exports.insert("GetProcessHeap", memory::GetProcessHeap as usize);
     exports.insert("GlobalAlloc", memory::GlobalAlloc as usize);
     exports.insert("GlobalFree", memory::GlobalFree as usize);
@@ -223,6 +285,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetStringTypeW", string::GetStringTypeW as usize);
     exports.insert("LCMapStringW", string::LCMapStringW as usize);
     exports.insert("CompareStringW", string::CompareStringW as usize);
+    exports.insert("GetDateFormatA", string::GetDateFormatA as usize);
+    exports.insert("GetDateFormatW", string::GetDateFormatW as usize);
+    exports.insert("GetTimeFormatA", string::GetTimeFormatA as usize);
+    exports.insert("GetTimeFormatW", string::GetTimeFormatW as usize);
     exports.insert("GetLocaleInfoW", string::GetLocaleInfoW as usize);
     exports.insert("EnumSystemLocalesA", string::EnumSystemLocalesA as usize);
     exports.insert("EnumSystemLocalesW", string::EnumSystemLocalesW as usize);
@@ -237,11 +303,22 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("TlsFree", thread::TlsFree as usize);
     exports.insert("TlsSetValue", thread::TlsSetValue as usize);
     exports.insert("TlsGetValue", thread::TlsGetValue as usize);
+    exports.insert("FlsAlloc", thread::FlsAlloc as usize);
+    exports.insert("FlsFree", thread::FlsFree as usize);
+    exports.insert("FlsSetValue", thread::FlsSetValue as usize);
+    exports.insert("FlsGetValue", thread::FlsGetValue as usize);
+    exports.insert("CreateFiber", thread::CreateFiber as usize);
+    exports.insert("DeleteFiber", thread::DeleteFiber as usize);
+    exports.insert("ConvertThreadToFiber", thread::ConvertThreadToFiber as usize);
+    exports.insert("ConvertFiberToThread", thread::ConvertFiberToThread as usize);
+    exports.insert("SwitchToFiber", thread::SwitchToFiber as usize);
     exports.insert("CreateThread", thread::CreateThread as usize);
     exports.insert("ExitThread", thread::ExitThread as usize);
     exports.insert("GetCurrentThread", thread::GetCurrentThread as usize);
     exports.insert("SuspendThread", thread::SuspendThread as usize);
     exports.insert("ResumeThread", thread::ResumeThread as usize);
+    exports.insert("GetThreadContext", thread::GetThreadContext as usize);
+    exports.insert("SetThreadContext", thread::SetThreadContext as usize);
 
     // Time
     exports.insert("Sleep", time::sleep as usize);
@@ -250,16 +327,38 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetTickCount", time::get_tick_count as usize);
     exports.insert("GetTickCount64", time::get_tick_count_64 as usize);
     exports.insert("GetSystemTimeAsFileTime", time::get_system_time_as_file_time as usize);
+    exports.insert("SystemTimeToFileTime", time::system_time_to_file_time as usize);
+    exports.insert("FileTimeToSystemTime", time::file_time_to_system_time as usize);
+    exports.insert(
+        "SystemTimeToTzSpecificLocalTime",
+        time::system_time_to_tz_specific_local_time as usize,
+    );
     exports.insert("QueryPerformanceCounter", time::query_performance_counter as usize);
     exports.insert("QueryPerformanceFrequency", time::query_performance_frequency as usize);
+    exports.insert("GetTimeZoneInformation", time::get_time_zone_information as usize);
 
     // System Information
     exports.insert("GetSystemInfo", system::GetSystemInfo as usize);
+    exports.insert("GetNativeSystemInfo", system::GetNativeSystemInfo as usize);
     exports.insert("GetVersionExA", system::GetVersionExA as usize);
     exports.insert("GetVersionExW", system::GetVersionExW as usize);
     exports.insert("GetVersion", system::GetVersion as usize);
     exports.insert("GetComputerNameA", system::GetComputerNameA as usize);
     exports.insert("GetComputerNameW", system::GetComputerNameW as usize);
+    exports.insert("GetWindowsDirectoryA", system::GetWindowsDirectoryA as usize);
+    exports.insert("GetWindowsDirectoryW", system::GetWindowsDirectoryW as usize);
+    exports.insert("GetSystemDirectoryA", system::GetSystemDirectoryA as usize);
+    exports.insert("GetSystemDirectoryW", system::GetSystemDirectoryW as usize);
+    exports.insert("VerSetConditionMask", system::VerSetConditionMask as usize);
+    exports.insert("VerifyVersionInfoW", system::VerifyVersionInfoW as usize);
+    exports.insert("GlobalMemoryStatusEx", system::GlobalMemoryStatusEx as usize);
+    exports
+        .insert("GetLogicalProcessorInformation", system::GetLogicalProcessorInformation as usize);
+    exports.insert(
+        "GetLogicalProcessorInformationEx",
+        system::GetLogicalProcessorInformationEx as usize,
+    );
+    exports.insert("GetNumaHighestNodeNumber", system::GetNumaHighestNodeNumber as usize);
 
     // Environment Variables
     exports.insert("GetEnvironmentVariableA", env::GetEnvironmentVariableA as usize);
@@ -268,6 +367,80 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetEnvironmentVariableW", env::SetEnvironmentVariableW as usize);
     exports.insert("ExpandEnvironmentStringsA", env::ExpandEnvironmentStringsA as usize);
     exports.insert("ExpandEnvironmentStringsW", env::ExpandEnvironmentStringsW as usize);
+
+    // Additional stubs for Unity initialization
+    exports.insert("InitOnceExecuteOnce", process::init_once_execute_once as usize);
+    exports.insert("GetCurrentProcessorNumber", process::get_current_processor_number as usize);
+    exports.insert(
+        "GetSystemTimePreciseAsFileTime",
+        process::get_system_time_precise_as_file_time as usize,
+    );
+    exports.insert("GetLocaleInfoEx", process::get_locale_info_ex as usize);
+    exports.insert("CompareStringEx", process::compare_string_ex as usize);
+    exports.insert("LCMapStringEx", process::lc_map_string_ex as usize);
+    exports.insert("AreFileApisANSI", process::are_file_apis_ansi as usize);
+    exports.insert("SetThreadDescription", process::set_thread_description as usize);
+    exports.insert(
+        "FlushProcessWriteBuffers",
+        process::flush_process_write_buffers as usize,
+    );
+    exports.insert(
+        "GetCurrentPackageId",
+        process::get_current_package_id as usize,
+    );
+    exports.insert("CreateSymbolicLinkW", process::create_symbolic_link_w as usize);
+    exports.insert(
+        "GetFileInformationByHandleEx",
+        process::get_file_information_by_handle_ex as usize,
+    );
+    exports.insert(
+        "SetFileInformationByHandle",
+        process::set_file_information_by_handle as usize,
+    );
+    exports.insert("CreateThreadpoolTimer", process::create_threadpool_timer as usize);
+    exports.insert("SetThreadpoolTimer", process::set_threadpool_timer as usize);
+    exports.insert(
+        "WaitForThreadpoolTimerCallbacks",
+        process::wait_for_threadpool_timer_callbacks as usize,
+    );
+    exports.insert("CloseThreadpoolTimer", process::close_threadpool_timer as usize);
+    exports.insert("CreateThreadpoolWait", process::create_threadpool_wait as usize);
+    exports.insert("SetThreadpoolWait", process::set_threadpool_wait as usize);
+    exports.insert("CloseThreadpoolWait", process::close_threadpool_wait as usize);
+    exports.insert("CreateThreadpoolWork", process::create_threadpool_work as usize);
+    exports.insert("SubmitThreadpoolWork", process::submit_threadpool_work as usize);
+    exports.insert("CloseThreadpoolWork", process::close_threadpool_work as usize);
+    exports.insert(
+        "FreeLibraryWhenCallbackReturns",
+        process::free_library_when_callback_returns as usize,
+    );
+    exports.insert("InitializeSRWLock", process::initialize_srw_lock as usize);
+    exports.insert(
+        "TryAcquireSRWLockExclusive",
+        process::try_acquire_srw_lock_exclusive as usize,
+    );
+    exports.insert(
+        "InitializeConditionVariable",
+        process::initialize_condition_variable as usize,
+    );
+    exports.insert(
+        "SleepConditionVariableCS",
+        process::sleep_condition_variable_cs as usize,
+    );
+    exports.insert(
+        "SleepConditionVariableSRW",
+        process::sleep_condition_variable_srw as usize,
+    );
+    exports.insert(
+        "WakeConditionVariable",
+        process::wake_condition_variable as usize,
+    );
+    exports.insert(
+        "WakeAllConditionVariable",
+        process::wake_all_condition_variable as usize,
+    );
+    exports.insert("Module32First", process::module32_first_w as usize);
+    exports.insert("Module32Next", process::module32_next_w as usize);
 
     exports
 }

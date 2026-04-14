@@ -439,9 +439,14 @@ A DirectX 11 demo app renders correctly via Vulkan.
 
 ### Deliverable
 
-A 32-bit Windows console app runs on 64-bit Linux.
+A 32-bit Windows console app can be loaded and audited on 64-bit Linux with native-only runtime guarantees (no Wine fallback). Full PE32 execution remains gated on WoW64 entry-transition support.
 
-Current runtime behavior: `tuxexe run` delegates x86 execution to an external backend by default (`TUXEXE_X86_BACKEND=wine`). Set `TUXEXE_X86_BACKEND=native` to force in-process experimental path.
+Current runtime behavior: `tuxexe run` is native-only. PE32 images no longer delegate to Wine and currently fail with a controlled error until WoW64 entry-transition support is implemented.
+
+Compatibility workflow for game bring-up:
+
+- `tuxexe audit <game.exe>` prints implemented vs missing imports by DLL.
+- Use audit output to prioritize startup-critical API gaps before gameplay-path APIs.
 
 ---
 
@@ -473,7 +478,7 @@ Current runtime behavior: `tuxexe run` delegates x86 execution to an external ba
 | 6     | HTTP client app works              | ✅     | Networking            |
 | 7     | Win32 GUI window appears           | 🟨     | Graphics pipeline     |
 | 8     | DirectX demo renders               | ✅     | DXVK integration      |
-| 9     | 32-bit exe runs on 64-bit          | ✅     | WoW64                 |
+| 9     | 32-bit exe runs on 64-bit          | 🟥     | WoW64                 |
 
 **The critical milestone is Phase 2**: once "Hello World" runs, everything else is incremental API coverage.
 

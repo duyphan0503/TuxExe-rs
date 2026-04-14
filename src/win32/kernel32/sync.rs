@@ -3,12 +3,43 @@
 #![allow(clippy::type_complexity)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::c_void,
-    sync::{Arc, Condvar, Mutex, OnceLock, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex, OnceLock, RwLock,
+    },
+    time::{Duration, Instant},
 };
 
-use crate::{nt_kernel::sync as nt_sync, utils::handle::Handle};
+use crate::{
+    nt_kernel::sync as nt_sync,
+    utils::handle::{global_table, Handle, HandleObject, INVALID_HANDLE_VALUE},
+};
+
+const ERROR_SUCCESS: u32 = 0;
+const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const CREATE_WAITABLE_TIMER_MANUAL_RESET: u32 = 0x0000_0001;
+
+#[repr(C)]
+#[derive(Debug)]
+struct TimerQueueHandleObject;
+
+type WaitOrTimerCallback = unsafe extern "system" fn(*mut c_void, i32);
+
+#[repr(C)]
+#[derive(Debug)]
+struct TimerQueueTimerHandleObject {
+    cancelled: AtomicBool,
+    callback: Option<WaitOrTimerCallback>,
+    parameter: usize,
+}
+
+#[derive(Debug)]
+struct WaitRegistrationHandleObject {
+    cancelled: AtomicBool,
+}
 
 #[derive(Debug, Default)]
 struct CriticalSectionState {
@@ -19,6 +50,17 @@ struct CriticalSectionState {
 fn critical_sections(
 ) -> &'static RwLock<HashMap<usize, Arc<(Mutex<CriticalSectionState>, Condvar)>>> {
     static TABLE: OnceLock<RwLock<HashMap<usize, Arc<(Mutex<CriticalSectionState>, Condvar)>>>> =
+        OnceLock::new();
+    TABLE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+#[derive(Debug, Default)]
+struct SrwLockState {
+    owner_tid: Option<u32>,
+}
+
+fn srw_locks() -> &'static RwLock<HashMap<usize, Arc<(Mutex<SrwLockState>, Condvar)>>> {
+    static TABLE: OnceLock<RwLock<HashMap<usize, Arc<(Mutex<SrwLockState>, Condvar)>>>> =
         OnceLock::new();
     TABLE.get_or_init(|| RwLock::new(HashMap::new()))
 }
@@ -50,6 +92,143 @@ fn current_thread_id() -> u32 {
     unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IoCompletionPacket {
+    bytes_transferred: u32,
+    completion_key: usize,
+    overlapped: usize,
+}
+
+#[derive(Debug, Default)]
+struct IoCompletionPortState {
+    queue: VecDeque<IoCompletionPacket>,
+}
+
+#[derive(Debug)]
+struct IoCompletionPortHandleObject {
+    state: Arc<(Mutex<IoCompletionPortState>, Condvar)>,
+}
+
+impl IoCompletionPortHandleObject {
+    fn new() -> Self {
+        Self { state: Arc::new((Mutex::new(IoCompletionPortState::default()), Condvar::new())) }
+    }
+
+    fn post(&self, packet: IoCompletionPacket) {
+        let (lock, condvar) = &*self.state;
+        let mut guard = lock.lock().expect("iocp state poisoned");
+        guard.queue.push_back(packet);
+        condvar.notify_one();
+    }
+
+    fn dequeue(&self, timeout_ms: u32) -> Option<IoCompletionPacket> {
+        let (lock, condvar) = &*self.state;
+        let mut guard = lock.lock().expect("iocp state poisoned");
+
+        if let Some(packet) = guard.queue.pop_front() {
+            return Some(packet);
+        }
+
+        if timeout_ms == nt_sync::INFINITE {
+            while guard.queue.is_empty() {
+                guard = condvar.wait(guard).expect("iocp state poisoned");
+            }
+            return guard.queue.pop_front();
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        while guard.queue.is_empty() {
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next, timeout) =
+                condvar.wait_timeout(guard, remaining).expect("iocp state poisoned");
+            guard = next;
+            if timeout.timed_out() && guard.queue.is_empty() {
+                return None;
+            }
+        }
+        guard.queue.pop_front()
+    }
+}
+
+impl HandleObject for IoCompletionPortHandleObject {
+    fn type_name(&self) -> &'static str {
+        "IoCompletionPortHandle"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl HandleObject for TimerQueueHandleObject {
+    fn type_name(&self) -> &'static str {
+        "TimerQueueHandle"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl HandleObject for TimerQueueTimerHandleObject {
+    fn type_name(&self) -> &'static str {
+        "TimerQueueTimerHandle"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl HandleObject for WaitRegistrationHandleObject {
+    fn type_name(&self) -> &'static str {
+        "WaitRegistrationHandle"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn spawn_timer_queue_worker(timer_handle: Handle, due_time_ms: u32, period_ms: u32) {
+    std::thread::spawn(move || {
+        if due_time_ms > 0 {
+            std::thread::sleep(Duration::from_millis(due_time_ms as u64));
+        }
+
+        loop {
+            let keep_running = global_table()
+                .with(timer_handle, |obj| {
+                    obj.as_any()
+                        .downcast_ref::<TimerQueueTimerHandleObject>()
+                        .map(|timer| {
+                            if timer.cancelled.load(Ordering::Acquire) {
+                                return false;
+                            }
+
+                            if let Some(callback) = timer.callback {
+                                unsafe {
+                                    callback(timer.parameter as *mut c_void, 1);
+                                }
+                            }
+                            true
+                        })
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+
+            if !keep_running || period_ms == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(period_ms as u64));
+        }
+    });
+}
+
 fn get_or_create_critical_section(ptr: *mut c_void) -> Arc<(Mutex<CriticalSectionState>, Condvar)> {
     let key = ptr as usize;
 
@@ -64,6 +243,18 @@ fn get_or_create_critical_section(ptr: *mut c_void) -> Arc<(Mutex<CriticalSectio
         .write()
         .expect("critical section table poisoned")
         .insert(key, Arc::clone(&entry));
+    entry
+}
+
+fn get_or_create_srw_lock(ptr: *mut c_void) -> Arc<(Mutex<SrwLockState>, Condvar)> {
+    let key = ptr as usize;
+
+    if let Some(entry) = srw_locks().read().expect("srw lock table poisoned").get(&key) {
+        return Arc::clone(entry);
+    }
+
+    let entry = Arc::new((Mutex::new(SrwLockState::default()), Condvar::new()));
+    srw_locks().write().expect("srw lock table poisoned").insert(key, Arc::clone(&entry));
     entry
 }
 
@@ -187,6 +378,27 @@ pub extern "win64" fn EnterCriticalSection(lpCriticalSection: *mut c_void) {
     guard.recursion_count = guard.recursion_count.saturating_add(1);
 }
 
+pub extern "win64" fn TryEnterCriticalSection(lpCriticalSection: *mut c_void) -> i32 {
+    if lpCriticalSection.is_null() {
+        return 0;
+    }
+
+    let entry = get_or_create_critical_section(lpCriticalSection);
+    let (lock, _) = &*entry;
+    let Ok(mut guard) = lock.try_lock() else {
+        return 0;
+    };
+
+    let current_tid = current_thread_id();
+    if matches!(guard.owner_tid, Some(owner) if owner != current_tid) {
+        return 0;
+    }
+
+    guard.owner_tid = Some(current_tid);
+    guard.recursion_count = guard.recursion_count.saturating_add(1);
+    1
+}
+
 pub extern "win64" fn LeaveCriticalSection(lpCriticalSection: *mut c_void) {
     if lpCriticalSection.is_null() {
         return;
@@ -218,6 +430,37 @@ pub extern "win64" fn DeleteCriticalSection(lpCriticalSection: *mut c_void) {
         .write()
         .expect("critical section table poisoned")
         .remove(&(lpCriticalSection as usize));
+}
+
+pub extern "win64" fn AcquireSRWLockExclusive(SRWLock: *mut c_void) {
+    if SRWLock.is_null() {
+        return;
+    }
+
+    let entry = get_or_create_srw_lock(SRWLock);
+    let (lock, condvar) = &*entry;
+    let mut guard = lock.lock().expect("srw lock state poisoned");
+    let current_tid = current_thread_id();
+
+    while matches!(guard.owner_tid, Some(owner) if owner != current_tid) {
+        guard = condvar.wait(guard).expect("srw lock state poisoned");
+    }
+
+    guard.owner_tid = Some(current_tid);
+}
+
+pub extern "win64" fn ReleaseSRWLockExclusive(SRWLock: *mut c_void) {
+    if SRWLock.is_null() {
+        return;
+    }
+
+    let entry = get_or_create_srw_lock(SRWLock);
+    let (lock, condvar) = &*entry;
+    let mut guard = lock.lock().expect("srw lock state poisoned");
+    if guard.owner_tid.is_some() {
+        guard.owner_tid = None;
+        condvar.notify_one();
+    }
 }
 
 pub extern "win64" fn WaitForSingleObject(hHandle: Handle, dwMilliseconds: u32) -> u32 {
@@ -255,6 +498,24 @@ pub extern "win64" fn WaitForMultipleObjectsEx(
     _bAlertable: i32,
 ) -> u32 {
     WaitForMultipleObjects(nCount, lpHandles, bWaitAll, dwMilliseconds)
+}
+
+pub extern "win64" fn SignalObjectAndWait(
+    hObjectToSignal: Handle,
+    hObjectToWaitOn: Handle,
+    dwMilliseconds: u32,
+    bAlertable: i32,
+) -> u32 {
+    let signaled = nt_sync::set_event(hObjectToSignal) == 1
+        || nt_sync::release_mutex(hObjectToSignal) == 1
+        || nt_sync::release_semaphore(hObjectToSignal, 1, std::ptr::null_mut()) == 1;
+
+    if !signaled {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_HANDLE);
+        return nt_sync::WAIT_FAILED;
+    }
+
+    WaitForSingleObjectEx(hObjectToWaitOn, dwMilliseconds, bAlertable)
 }
 
 pub extern "win64" fn CreateMutexA(
@@ -305,6 +566,96 @@ pub extern "win64" fn CreateEventExW(
     nt_sync::create_event(false, false)
 }
 
+pub extern "win64" fn OpenEventA(
+    _dwDesiredAccess: u32,
+    _bInheritHandle: i32,
+    _lpName: *const i8,
+) -> Handle {
+    // Named kernel object namespace is not implemented yet.
+    // Return a valid event handle so startup compatibility checks can proceed.
+    let handle = nt_sync::create_event(false, false);
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    handle
+}
+
+pub extern "win64" fn OpenEventW(
+    _dwDesiredAccess: u32,
+    _bInheritHandle: i32,
+    _lpName: *const u16,
+) -> Handle {
+    let handle = nt_sync::create_event(false, false);
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    handle
+}
+
+pub extern "win64" fn CreateWaitableTimerA(
+    _lpTimerAttributes: *const c_void,
+    bManualReset: i32,
+    _lpTimerName: *const i8,
+) -> Handle {
+    let handle = nt_sync::create_event(bManualReset != 0, false);
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    handle
+}
+
+pub extern "win64" fn CreateWaitableTimerExW(
+    _lpTimerAttributes: *const c_void,
+    _lpTimerName: *const u16,
+    dwFlags: u32,
+    _dwDesiredAccess: u32,
+) -> Handle {
+    let manual_reset = (dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) != 0;
+    let handle = nt_sync::create_event(manual_reset, false);
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    handle
+}
+
+pub extern "win64" fn SetWaitableTimer(
+    hTimer: Handle,
+    lpDueTime: *const i64,
+    lPeriod: i32,
+    _pfnCompletionRoutine: *const c_void,
+    _lpArgToCompletionRoutine: *const c_void,
+    _fResume: i32,
+) -> i32 {
+    if lpDueTime.is_null() {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let due_time = unsafe { *lpDueTime };
+    let initial_delay_ms = if due_time < 0 { ((-due_time) as u64) / 10_000 } else { 0 };
+
+    // Validate handle up front.
+    if nt_sync::set_event(hTimer) == 0 && nt_sync::reset_event(hTimer) == 0 {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    // Reset before arming to mimic unsignaled timer state.
+    let _ = nt_sync::reset_event(hTimer);
+
+    std::thread::spawn(move || {
+        if initial_delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(initial_delay_ms));
+        }
+        let _ = nt_sync::set_event(hTimer);
+
+        if lPeriod > 0 {
+            let period = Duration::from_millis(lPeriod as u64);
+            loop {
+                std::thread::sleep(period);
+                if nt_sync::set_event(hTimer) == 0 {
+                    break;
+                }
+            }
+        }
+    });
+
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    1
+}
+
 pub extern "win64" fn SetEvent(hEvent: Handle) -> i32 {
     nt_sync::set_event(hEvent)
 }
@@ -340,6 +691,255 @@ pub extern "win64" fn CreateSemaphoreExW(
     _dwDesiredAccess: u32,
 ) -> Handle {
     nt_sync::create_semaphore(lInitialCount, lMaximumCount)
+}
+
+pub extern "win64" fn CreateTimerQueue() -> Handle {
+    let handle = global_table().alloc(Box::new(TimerQueueHandleObject));
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    handle
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn CreateTimerQueueTimer(
+    phNewTimer: *mut Handle,
+    _TimerQueue: Handle,
+    Callback: *const c_void,
+    Parameter: *mut c_void,
+    DueTime: u32,
+    Period: u32,
+    _Flags: u32,
+) -> i32 {
+    if phNewTimer.is_null() {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let callback = if Callback.is_null() {
+        None
+    } else {
+        Some(unsafe { std::mem::transmute::<*const c_void, WaitOrTimerCallback>(Callback) })
+    };
+
+    let timer_handle = global_table().alloc(Box::new(TimerQueueTimerHandleObject {
+        cancelled: AtomicBool::new(false),
+        callback,
+        parameter: Parameter as usize,
+    }));
+
+    unsafe {
+        *phNewTimer = timer_handle;
+    }
+    spawn_timer_queue_worker(timer_handle, DueTime, Period);
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn ChangeTimerQueueTimer(
+    _TimerQueue: Handle,
+    Timer: Handle,
+    _DueTime: u32,
+    _Period: u32,
+) -> i32 {
+    let ok = global_table()
+        .with(Timer, |obj| obj.as_any().is::<TimerQueueTimerHandleObject>())
+        .unwrap_or(false);
+    if !ok {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn DeleteTimerQueueTimer(
+    _TimerQueue: Handle,
+    Timer: Handle,
+    _CompletionEvent: Handle,
+) -> i32 {
+    let ok = global_table()
+        .with(Timer, |obj| {
+            obj.as_any().downcast_ref::<TimerQueueTimerHandleObject>().map(|timer| {
+                timer.cancelled.store(true, Ordering::Release);
+                true
+            })
+        })
+        .flatten()
+        .unwrap_or(false);
+
+    if !ok {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    1
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn RegisterWaitForSingleObject(
+    phNewWaitObject: *mut Handle,
+    hObject: Handle,
+    Callback: *const c_void,
+    Context: *mut c_void,
+    dwMilliseconds: u32,
+    _dwFlags: u32,
+) -> i32 {
+    if phNewWaitObject.is_null() {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let callback = if Callback.is_null() {
+        None
+    } else {
+        Some(unsafe { std::mem::transmute::<*const c_void, WaitOrTimerCallback>(Callback) })
+    };
+
+    let wait_handle = global_table()
+        .alloc(Box::new(WaitRegistrationHandleObject { cancelled: AtomicBool::new(false) }));
+    unsafe {
+        *phNewWaitObject = wait_handle;
+    }
+
+    let context = Context as usize;
+    std::thread::spawn(move || {
+        let wait_result = WaitForSingleObject(hObject, dwMilliseconds);
+        let timed_out = (wait_result == nt_sync::WAIT_TIMEOUT) as i32;
+        let cancelled = global_table()
+            .with(wait_handle, |obj| {
+                obj.as_any()
+                    .downcast_ref::<WaitRegistrationHandleObject>()
+                    .map(|reg| reg.cancelled.load(Ordering::Acquire))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        if cancelled {
+            return;
+        }
+
+        if let Some(cb) = callback {
+            unsafe {
+                cb(context as *mut c_void, timed_out);
+            }
+        }
+    });
+
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn UnregisterWait(WaitHandle: Handle) -> i32 {
+    let ok = global_table()
+        .with(WaitHandle, |obj| {
+            obj.as_any().downcast_ref::<WaitRegistrationHandleObject>().map(|reg| {
+                reg.cancelled.store(true, Ordering::Release);
+                true
+            })
+        })
+        .flatten()
+        .unwrap_or(false);
+
+    if !ok {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn UnregisterWaitEx(WaitHandle: Handle, _CompletionEvent: Handle) -> i32 {
+    UnregisterWait(WaitHandle)
+}
+
+pub extern "win64" fn CreateIoCompletionPort(
+    _file_handle: Handle,
+    existing_completion_port: Handle,
+    _completion_key: usize,
+    _number_of_concurrent_threads: u32,
+) -> Handle {
+    if existing_completion_port != 0 && existing_completion_port != INVALID_HANDLE_VALUE {
+        crate::win32::kernel32::error::set_last_error(0);
+        return existing_completion_port;
+    }
+
+    let handle = global_table().alloc(Box::new(IoCompletionPortHandleObject::new()));
+    crate::win32::kernel32::error::set_last_error(0);
+    handle
+}
+
+pub extern "win64" fn PostQueuedCompletionStatus(
+    completion_port: Handle,
+    dw_number_of_bytes_transferred: u32,
+    dw_completion_key: usize,
+    lp_overlapped: *mut c_void,
+) -> i32 {
+    let ok = global_table().with(completion_port, |obj| {
+        obj.as_any()
+            .downcast_ref::<IoCompletionPortHandleObject>()
+            .map(|port| {
+                port.post(IoCompletionPacket {
+                    bytes_transferred: dw_number_of_bytes_transferred,
+                    completion_key: dw_completion_key,
+                    overlapped: lp_overlapped as usize,
+                });
+                true
+            })
+            .unwrap_or(false)
+    });
+
+    if ok == Some(true) {
+        crate::win32::kernel32::error::set_last_error(0);
+        1
+    } else {
+        crate::win32::kernel32::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        0
+    }
+}
+
+pub extern "win64" fn GetQueuedCompletionStatus(
+    completion_port: Handle,
+    lp_number_of_bytes_transferred: *mut u32,
+    lp_completion_key: *mut usize,
+    lp_overlapped: *mut *mut c_void,
+    dw_milliseconds: u32,
+) -> i32 {
+    let packet = global_table().with(completion_port, |obj| {
+        obj.as_any()
+            .downcast_ref::<IoCompletionPortHandleObject>()
+            .and_then(|port| port.dequeue(dw_milliseconds))
+    });
+
+    let Some(Some(packet)) = packet else {
+        if packet.is_none() {
+            crate::win32::kernel32::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        } else {
+            crate::win32::kernel32::error::set_last_error(nt_sync::WAIT_TIMEOUT);
+        }
+        if !lp_overlapped.is_null() {
+            unsafe {
+                *lp_overlapped = std::ptr::null_mut();
+            }
+        }
+        return 0;
+    };
+
+    if !lp_number_of_bytes_transferred.is_null() {
+        unsafe {
+            *lp_number_of_bytes_transferred = packet.bytes_transferred;
+        }
+    }
+    if !lp_completion_key.is_null() {
+        unsafe {
+            *lp_completion_key = packet.completion_key;
+        }
+    }
+    if !lp_overlapped.is_null() {
+        unsafe {
+            *lp_overlapped = packet.overlapped as *mut c_void;
+        }
+    }
+    crate::win32::kernel32::error::set_last_error(0);
+    1
 }
 
 pub extern "win64" fn ReleaseSemaphore(

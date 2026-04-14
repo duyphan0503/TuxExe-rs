@@ -2,7 +2,6 @@
 
 // use std::ffi::c_void;
 use crate::win32::kernel32::error::set_last_error;
-use tracing::trace;
 
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
@@ -28,6 +27,25 @@ const SAMPLE_LOCALE_W: [u16; 9] = [
     0,
 ];
 const SAMPLE_LOCALE_A: &[u8] = b"00000409\0";
+
+fn format_system_date_ascii(date: &super::time::SystemTime) -> String {
+    format!("{:02}/{:02}/{:04}", date.wMonth, date.wDay, date.wYear)
+}
+
+fn format_system_time_ascii(time: &super::time::SystemTime) -> String {
+    format!("{:02}:{:02}:{:02}", time.wHour, time.wMinute, time.wSecond)
+}
+
+fn get_effective_date(lp_date: *const super::time::SystemTime) -> super::time::SystemTime {
+    if lp_date.is_null() {
+        let mut local = super::time::SystemTime::default();
+        super::time::get_local_time(&mut local as *mut _);
+        local
+    } else {
+        // SAFETY: caller guarantees pointer validity when passing a non-null SYSTEMTIME.
+        unsafe { *lp_date }
+    }
+}
 
 #[repr(C)]
 pub struct CpInfo {
@@ -122,29 +140,127 @@ pub extern "win64" fn GetCPInfo(code_page: u32, cp_info: *mut CpInfo) -> i32 {
 }
 
 pub extern "win64" fn MultiByteToWideChar(
-    _code_page: u32,
+    code_page: u32,
     _flags: u32,
-    _mb_str: *const u8,
-    _mb_len: i32,
-    _wide_str: *mut u16,
-    _wide_len: i32,
+    mb_str: *const u8,
+    mb_len: i32,
+    wide_str: *mut u16,
+    wide_len: i32,
 ) -> i32 {
-    trace!("MultiByteToWideChar Stub");
-    0 // No bytes written
+    if mb_str.is_null() || wide_len < 0 || mb_len < -1 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let cp = if code_page == 0 { SYSTEM_ACP } else { code_page };
+    if cp != 65001 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let src_bytes: Vec<u8> = if mb_len == -1 {
+        let mut len = 0usize;
+        // SAFETY: caller provides NUL-terminated input when cbMultiByte == -1.
+        unsafe {
+            while *mb_str.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts(mb_str, len).to_vec()
+        }
+    } else {
+        // SAFETY: caller-provided length for source bytes.
+        unsafe { std::slice::from_raw_parts(mb_str, mb_len as usize).to_vec() }
+    };
+
+    let Ok(decoded) = std::str::from_utf8(&src_bytes) else {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    let wide: Vec<u16> = decoded.encode_utf16().collect();
+
+    if wide_str.is_null() || wide_len == 0 {
+        set_last_error(0);
+        return wide.len() as i32;
+    }
+
+    if (wide_len as usize) < wide.len() {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    // SAFETY: destination buffer size validated above.
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), wide_str, wide.len());
+    }
+    set_last_error(0);
+    wide.len() as i32
 }
 
 pub extern "win64" fn WideCharToMultiByte(
-    _code_page: u32,
+    code_page: u32,
     _flags: u32,
-    _wide_str: *const u16,
-    _wide_len: i32,
-    _mb_str: *mut u8,
-    _mb_len: i32,
+    wide_str: *const u16,
+    wide_len: i32,
+    mb_str: *mut u8,
+    mb_len: i32,
     _default_char: *const u8,
     _used_default: *mut i32,
 ) -> i32 {
-    trace!("WideCharToMultiByte Stub");
-    0 // No bytes written
+    tracing::trace!("WideCharToMultiByte cp={} wide_len={} mb_len={}", code_page, wide_len, mb_len);
+    if wide_str.is_null() || mb_len < 0 || wide_len < -1 {
+        tracing::trace!("WideCharToMultiByte: Invalid parameter (null or negative)");
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let cp = if code_page == 0 { SYSTEM_ACP } else { code_page };
+    if cp != 65001 {
+        tracing::trace!("WideCharToMultiByte: Unsupported codepage {}", cp);
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let wide_slice: Vec<u16> = if wide_len == -1 {
+        let mut len = 0usize;
+        // SAFETY: caller provides NUL-terminated wide string for cchWideChar == -1.
+        unsafe {
+            while *wide_str.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts(wide_str, len).to_vec()
+        }
+    } else {
+        // SAFETY: caller-provided length for source UTF-16 data.
+        unsafe { std::slice::from_raw_parts(wide_str, wide_len as usize).to_vec() }
+    };
+
+    let Ok(decoded) = String::from_utf16(&wide_slice) else {
+        tracing::trace!("WideCharToMultiByte: Invalid UTF-16");
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    let bytes = decoded.as_bytes();
+
+    if mb_str.is_null() || mb_len == 0 {
+        set_last_error(0);
+        let ret = bytes.len() as i32;
+        tracing::trace!("WideCharToMultiByte: Returning length {}", ret);
+        return ret;
+    }
+
+    if (mb_len as usize) < bytes.len() {
+        tracing::trace!("WideCharToMultiByte: Insufficient buffer");
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    // SAFETY: destination buffer size validated above.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), mb_str, bytes.len());
+    }
+    set_last_error(0);
+    tracing::trace!("WideCharToMultiByte: Success, returning {}", bytes.len());
+    bytes.len() as i32
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -392,12 +508,184 @@ pub extern "win64" fn GetUserDefaultLCID() -> u32 {
     0x0409 // en-US
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn GetDateFormatW(
+    _locale: u32,
+    _dw_flags: u32,
+    lp_date: *const super::time::SystemTime,
+    _lp_format: *const u16,
+    lp_date_str: *mut u16,
+    cch_date: i32,
+) -> i32 {
+    if cch_date < 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let date = get_effective_date(lp_date);
+    let formatted: Vec<u16> =
+        format_system_date_ascii(&date).encode_utf16().chain(std::iter::once(0)).collect();
+
+    if cch_date == 0 {
+        set_last_error(0);
+        return formatted.len() as i32;
+    }
+
+    if lp_date_str.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    if (cch_date as usize) < formatted.len() {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    // SAFETY: destination pointer is non-null and large enough per checks above.
+    unsafe {
+        std::ptr::copy_nonoverlapping(formatted.as_ptr(), lp_date_str, formatted.len());
+    }
+    set_last_error(0);
+    formatted.len() as i32
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn GetDateFormatA(
+    _locale: u32,
+    _dw_flags: u32,
+    lp_date: *const super::time::SystemTime,
+    _lp_format: *const i8,
+    lp_date_str: *mut i8,
+    cch_date: i32,
+) -> i32 {
+    if cch_date < 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let date = get_effective_date(lp_date);
+    let mut formatted = format_system_date_ascii(&date).into_bytes();
+    formatted.push(0);
+
+    if cch_date == 0 {
+        set_last_error(0);
+        return formatted.len() as i32;
+    }
+
+    if lp_date_str.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    if (cch_date as usize) < formatted.len() {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    // SAFETY: destination pointer is non-null and large enough per checks above.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            formatted.as_ptr().cast::<i8>(),
+            lp_date_str,
+            formatted.len(),
+        );
+    }
+    set_last_error(0);
+    formatted.len() as i32
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn GetTimeFormatW(
+    _locale: u32,
+    _dw_flags: u32,
+    lp_time: *const super::time::SystemTime,
+    _lp_format: *const u16,
+    lp_time_str: *mut u16,
+    cch_time: i32,
+) -> i32 {
+    if cch_time < 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let time = get_effective_date(lp_time);
+    let formatted: Vec<u16> =
+        format_system_time_ascii(&time).encode_utf16().chain(std::iter::once(0)).collect();
+
+    if cch_time == 0 {
+        set_last_error(0);
+        return formatted.len() as i32;
+    }
+
+    if lp_time_str.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    if (cch_time as usize) < formatted.len() {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    // SAFETY: destination pointer is non-null and large enough per checks above.
+    unsafe {
+        std::ptr::copy_nonoverlapping(formatted.as_ptr(), lp_time_str, formatted.len());
+    }
+    set_last_error(0);
+    formatted.len() as i32
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn GetTimeFormatA(
+    _locale: u32,
+    _dw_flags: u32,
+    lp_time: *const super::time::SystemTime,
+    _lp_format: *const i8,
+    lp_time_str: *mut i8,
+    cch_time: i32,
+) -> i32 {
+    if cch_time < 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let time = get_effective_date(lp_time);
+    let mut formatted = format_system_time_ascii(&time).into_bytes();
+    formatted.push(0);
+
+    if cch_time == 0 {
+        set_last_error(0);
+        return formatted.len() as i32;
+    }
+
+    if lp_time_str.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    if (cch_time as usize) < formatted.len() {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    // SAFETY: destination pointer is non-null and large enough per checks above.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            formatted.as_ptr().cast::<i8>(),
+            lp_time_str,
+            formatted.len(),
+        );
+    }
+    set_last_error(0);
+    formatted.len() as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::LCMapStringW;
     use super::{
-        CpInfo, EnumSystemLocalesA, EnumSystemLocalesW, GetACP, GetCPInfo, GetOEMCP,
-        GetStringTypeW, IsValidCodePage,
+        CpInfo, EnumSystemLocalesA, EnumSystemLocalesW, GetACP, GetCPInfo, GetDateFormatW,
+        GetOEMCP, GetStringTypeW, GetTimeFormatW, IsValidCodePage,
     };
     use std::ffi::CStr;
 
@@ -476,5 +764,59 @@ mod tests {
     #[test]
     fn enum_system_locales_a_invokes_callback() {
         assert_eq!(EnumSystemLocalesA(locale_cb_a as usize, 1), 1);
+    }
+
+    #[test]
+    fn get_date_format_w_formats_explicit_date() {
+        let date = super::super::time::SystemTime {
+            wYear: 2024,
+            wMonth: 7,
+            wDay: 9,
+            ..super::super::time::SystemTime::default()
+        };
+
+        let required =
+            GetDateFormatW(0, 0, &date as *const _, std::ptr::null(), std::ptr::null_mut(), 0);
+        assert_eq!(required, 11);
+
+        let mut buffer = vec![0u16; required as usize];
+        let written = GetDateFormatW(
+            0,
+            0,
+            &date as *const _,
+            std::ptr::null(),
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+        );
+        assert_eq!(written, required);
+        let rendered = String::from_utf16_lossy(&buffer[..(written as usize - 1)]);
+        assert_eq!(rendered, "07/09/2024");
+    }
+
+    #[test]
+    fn get_time_format_w_formats_explicit_time() {
+        let time = super::super::time::SystemTime {
+            wHour: 14,
+            wMinute: 5,
+            wSecond: 9,
+            ..super::super::time::SystemTime::default()
+        };
+
+        let required =
+            GetTimeFormatW(0, 0, &time as *const _, std::ptr::null(), std::ptr::null_mut(), 0);
+        assert_eq!(required, 9);
+
+        let mut buffer = vec![0u16; required as usize];
+        let written = GetTimeFormatW(
+            0,
+            0,
+            &time as *const _,
+            std::ptr::null(),
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+        );
+        assert_eq!(written, required);
+        let rendered = String::from_utf16_lossy(&buffer[..(written as usize - 1)]);
+        assert_eq!(rendered, "14:05:09");
     }
 }

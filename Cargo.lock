@@ -862,6 +862,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "x11",
 ]
 
 [[package]]
@@ -1151,6 +1152,16 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "x11"
+version = "2.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "502da5464ccd04011667b11c435cb992822c2c0dbde1770c988480d312a0db2e"
+dependencies = [
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]

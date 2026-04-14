@@ -49,6 +49,9 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"], optional = true }
 lazy_static = "1.5.0"
 
+# X11 / GL integration (required for Unity games)
+x11 = { version = "2.21", features = ["xlib", "xrender", "glx"] }
+
 [features]
 default = []
 async = ["tokio"]

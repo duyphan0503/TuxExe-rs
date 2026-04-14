@@ -94,6 +94,16 @@ impl MappedImage {
     pub fn write_ptr(&mut self, rva: usize, val: usize) -> Option<()> {
         self.write_u64(rva, val as u64)
     }
+
+    /// Write raw bytes to the mapped image at `rva`.
+    pub fn write_slice(&mut self, rva: usize, data: &[u8]) -> bool {
+        if let Some(slice) = self.slice_at_mut(rva, data.len()) {
+            slice.copy_from_slice(data);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Drop for MappedImage {

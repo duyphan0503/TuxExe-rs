@@ -360,7 +360,9 @@ pub fn resolve_imports(
         let ptr = match crate::dll_manager::load_library(&entry.dll) {
             Ok(handle) => match &entry.import {
                 ImportKind::ByName { name, .. } => crate::dll_manager::resolve_export(handle, name),
-                ImportKind::ByOrdinal(_) => None,
+                ImportKind::ByOrdinal(ord) => {
+                    crate::dll_manager::resolve_export_by_ordinal(handle, &entry.dll, *ord)
+                }
             },
             Err(error) => {
                 tracing::warn!(
@@ -397,10 +399,13 @@ pub fn resolve_imports(
                         func = %func_name,
                         delayed = entry.delayed,
                         iat_rva = format_args!("0x{:x}", entry.iat_rva),
-                        fallback = format_args!("0x{:x}", unresolved_import_stub as usize),
+                        fallback = format_args!(
+                            "0x{:x}",
+                            unresolved_import_stub as *const () as usize
+                        ),
                         "Unresolved import — using PE64 fallback stub"
                     );
-                    unresolved_import_stub as usize
+                    unresolved_import_stub as *const () as usize
                 } else {
                     tracing::warn!(
                         dll = %entry.dll,
@@ -442,10 +447,39 @@ pub fn resolve_imports(
         );
     }
 
+    // Diagnostic: verify no IAT entries are zero after resolution
+    if pe.is_pe64 {
+        let mut zero_count = 0usize;
+        let mut zero_rvas: Vec<usize> = Vec::new();
+        for entry in &import_table.entries {
+            let iat_addr = (mapped.base_addr() + entry.iat_rva) as *mut u64;
+            unsafe {
+                if *iat_addr == 0 {
+                    zero_count += 1;
+                    if zero_rvas.len() < 20 {
+                        zero_rvas.push(entry.iat_rva);
+                    }
+                }
+            }
+        }
+        if zero_count > 0 {
+            tracing::error!("Found {} ZERO IAT entries after import resolution!", zero_count);
+            for rva in &zero_rvas {
+                tracing::error!("  Zero IAT at RVA 0x{:x}", rva);
+            }
+        } else {
+            tracing::info!("All {} IAT entries are non-zero after resolution", import_table.entries.len());
+        }
+    }
+
     Ok(())
 }
 
 extern "win64" fn unresolved_import_stub() -> usize {
+    crate::runtime::telemetry::record("unresolved_import_stub");
+    tracing::error!("UNRESOLVED IMPORT STUB CALLED — returning 0 (NULL function pointer)!");
+    let bt = std::backtrace::Backtrace::force_capture();
+    tracing::error!("Backtrace: {}", bt);
     0
 }
 

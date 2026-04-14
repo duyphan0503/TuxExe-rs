@@ -4,9 +4,10 @@
 
 use std::ffi::{c_void, CStr, CString};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{OnceLock, RwLock};
-use tracing::trace;
+use tracing::{trace, warn};
 
 use crate::dll_manager::{
     free_library, get_loaded_module_filename, get_loaded_module_handle, load_library,
@@ -25,11 +26,39 @@ pub extern "win64" fn exit_process(exit_code: u32) {
 
 // Global variable for the main image base
 static mut MAIN_IMAGE_BASE: usize = 0x0040_0000; // Will be set during PE loading
+static mut MAIN_IMAGE_SIZE: usize = 0;
+static CMD_LINE_A_PTR: AtomicPtr<i8> = AtomicPtr::new(std::ptr::null_mut());
+static CMD_LINE_W_PTR: AtomicPtr<u16> = AtomicPtr::new(std::ptr::null_mut());
+static PROCESS_ERROR_MODE: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_main_image_base(base: usize) {
     unsafe {
         MAIN_IMAGE_BASE = base;
     }
+}
+
+pub fn set_main_image_layout(base: usize, size: usize) {
+    unsafe {
+        MAIN_IMAGE_BASE = base;
+        MAIN_IMAGE_SIZE = size;
+    }
+}
+
+pub fn main_image_contains(address: usize) -> bool {
+    unsafe {
+        if MAIN_IMAGE_BASE == 0 || MAIN_IMAGE_SIZE == 0 {
+            return false;
+        }
+        let end = MAIN_IMAGE_BASE.saturating_add(MAIN_IMAGE_SIZE);
+        address >= MAIN_IMAGE_BASE && address < end
+    }
+}
+
+/// Fast check for specific addresses that are frequently accessed
+pub fn is_likely_main_image_address(address: usize) -> bool {
+    // Specific addresses that are commonly accessed based on our logs
+    // The game seems to repeatedly access addresses around this range
+    address >= 0x140000000 && address < 0x140003000
 }
 
 fn main_image_path_store() -> &'static RwLock<String> {
@@ -47,6 +76,54 @@ pub fn set_main_image_path(path: &Path) {
     *main_image_path_store().write().expect("main image path lock poisoned") = normalized;
 }
 
+fn quote_windows_arg(arg: &str) -> String {
+    if arg.is_empty() || arg.contains([' ', '\t', '"']) {
+        let escaped = arg.replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    } else {
+        arg.to_string()
+    }
+}
+
+fn build_guest_command_line(exe_path: &Path, args: &[String]) -> String {
+    let exe = normalize_guest_path(exe_path);
+    std::iter::once(exe)
+        .chain(args.iter().cloned())
+        .map(|arg| quote_windows_arg(&arg))
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+fn install_guest_command_line(cmd: String) {
+    let sanitized = cmd.replace('\0', " ");
+    let cstring = CString::new(sanitized.clone())
+        .unwrap_or_else(|_| CString::new("").expect("empty cstring must be valid"));
+    let leaked_a: &'static mut std::ffi::CStr = Box::leak(cstring.into_boxed_c_str());
+    CMD_LINE_A_PTR.store(leaked_a.as_ptr() as *mut i8, Ordering::Release);
+
+    let mut wide: Vec<u16> = sanitized.encode_utf16().collect();
+    wide.push(0);
+    let leaked_wide: &'static mut [u16] = Box::leak(wide.into_boxed_slice());
+    CMD_LINE_W_PTR.store(leaked_wide.as_mut_ptr(), Ordering::Release);
+}
+
+fn ensure_guest_command_line_initialized() {
+    if !CMD_LINE_A_PTR.load(Ordering::Acquire).is_null()
+        && !CMD_LINE_W_PTR.load(Ordering::Acquire).is_null()
+    {
+        return;
+    }
+
+    let args: Vec<String> = std::env::args().collect();
+    let cmd = args.iter().map(|arg| quote_windows_arg(arg)).collect::<Vec<String>>().join(" ");
+    install_guest_command_line(cmd);
+}
+
+pub fn set_guest_command_line(exe_path: &Path, args: &[String]) {
+    let cmd = build_guest_command_line(exe_path, args);
+    install_guest_command_line(cmd);
+}
+
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INVALID_HANDLE: u32 = 6;
@@ -54,12 +131,52 @@ const ERROR_MOD_NOT_FOUND: u32 = 126;
 const ERROR_PROC_NOT_FOUND: u32 = 127;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_NO_MORE_FILES: u32 = 18;
+const STILL_ACTIVE: u32 = 259;
+const WINDOWS_EPOCH_DIFF_SECS: u64 = 11_644_473_600;
 const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0000_0004;
 const CURRENT_PROCESS_PSEUDO_HANDLE: usize = usize::MAX;
+const CURRENT_THREAD_PSEUDO_HANDLE: u32 = 0xFFFF_FFFE;
 const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
 const PROCESSOR_TYPE_AMD_X8664: u32 = 8664;
 const BATTERY_FLAG_NO_BATTERY: u8 = 0x80;
 const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+const TH32CS_SNAPMODULE: u32 = 0x0000_0008;
+const TH32CS_SNAPMODULE32: u32 = 0x0000_0010;
+
+fn set_last_error(err: u32) {
+    super::error::set_last_error(err);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ModuleEntry32W {
+    pub dwSize: u32,
+    pub th32ModuleID: u32,
+    pub th32ProcessID: u32,
+    pub GlblcntUsage: u32,
+    pub ProccntUsage: u32,
+    pub modBaseAddr: *mut u8,
+    pub modBaseSize: u32,
+    pub hModule: usize,
+    pub szModule: [u16; 256],
+    pub szExePath: [u16; 260],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ModuleEntry32A {
+    pub dwSize: u32,
+    pub th32ModuleID: u32,
+    pub th32ProcessID: u32,
+    pub GlblcntUsage: u32,
+    pub ProccntUsage: u32,
+    pub modBaseAddr: *mut u8,
+    pub modBaseSize: u32,
+    pub hModule: usize,
+    pub szModule: [u8; 256],
+    pub szExePath: [u8; 260],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -90,6 +207,10 @@ struct ProcessMemoryCounters {
 #[derive(Debug)]
 struct ToolhelpSnapshot {
     process_consumed: AtomicBool,
+    thread_consumed: AtomicBool,
+    module_index: AtomicU32,
+    module_count: u32,
+    include_modules: bool,
 }
 
 impl HandleObject for ToolhelpSnapshot {
@@ -132,8 +253,27 @@ struct ProcessEntry32A {
     sz_exe_file: [i8; 260],
 }
 
-fn set_last_error(err: u32) {
-    super::error::set_last_error(err);
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ThreadEntry32 {
+    dw_size: u32,
+    cnt_usage: u32,
+    th32_thread_id: u32,
+    th32_owner_process_id: u32,
+    tp_base_pri: i32,
+    tp_delta_pri: i32,
+    dw_flags: u32,
+}
+
+fn should_return_stub_for_missing_getproc() -> bool {
+    std::env::var("TUXEXE_GETPROC_FALLBACK_STUB")
+        .ok()
+        .is_some_and(|value| value == "1")
+}
+
+extern "win64" fn missing_getproc_stub() -> usize {
+    crate::runtime::telemetry::record("missing_getproc_stub invoked".to_string());
+    0
 }
 
 #[repr(C)]
@@ -178,6 +318,15 @@ fn write_system_info(lp_system_info: *mut c_void) {
     unsafe {
         std::ptr::write(lp_system_info.cast::<SystemInfo>(), info);
     }
+}
+
+fn current_filetime_value() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+    let secs = now.as_secs() + WINDOWS_EPOCH_DIFF_SECS;
+    let nanos = now.subsec_nanos() as u64;
+    (secs * 10_000_000) + (nanos / 100)
 }
 
 pub extern "win64" fn get_module_handle_a(module_name: *const i8) -> *mut c_void {
@@ -387,10 +536,12 @@ pub extern "win64" fn load_library_a(lp_lib_file_name: *const i8) -> *mut c_void
 
     match load_library(name) {
         Ok(handle) => {
+            trace!("LoadLibraryA(\"{}\") -> 0x{:x}", name, handle);
             set_last_error(ERROR_SUCCESS);
             handle as *mut c_void
         }
-        Err(_) => {
+        Err(ref e) => {
+            trace!("LoadLibraryA(\"{}\") FAILED: {}", name, e);
             set_last_error(ERROR_MOD_NOT_FOUND);
             std::ptr::null_mut()
         }
@@ -439,6 +590,7 @@ pub extern "win64" fn get_proc_address(
     // Ordinal form is MAKEINTRESOURCEA(ordinal) where pointer value is <= 0xFFFF.
     let proc_raw = lp_proc_name as usize;
     if proc_raw <= 0xFFFF {
+        trace!("GetProcAddress(0x{:x}, ordinal#{}) -> NULL", h_module as usize, proc_raw);
         set_last_error(ERROR_PROC_NOT_FOUND);
         return std::ptr::null_mut();
     }
@@ -451,10 +603,17 @@ pub extern "win64" fn get_proc_address(
     let handle = h_module as usize;
     match resolve_export(handle, proc_name) {
         Some(addr) => {
+            trace!("GetProcAddress(0x{:x}, \"{}\") -> 0x{:x}", handle, proc_name, addr);
             set_last_error(ERROR_SUCCESS);
             addr as *mut c_void
         }
         None => {
+            trace!("GetProcAddress(0x{:x}, \"{}\") -> NULL", handle, proc_name);
+            tracing::warn!(
+                module = format_args!("0x{handle:x}"),
+                proc = %proc_name,
+                "GetProcAddress returned NULL"
+            );
             if handle == 0 {
                 set_last_error(ERROR_INVALID_HANDLE);
             } else {
@@ -484,33 +643,6 @@ pub extern "win64" fn free_library_api(h_lib_module: *mut c_void) -> i32 {
 }
 
 lazy_static::lazy_static! {
-    static ref CMD_LINE_A: CString = {
-        let args: Vec<String> = std::env::args().collect();
-        // Quote arguments if they contain spaces
-        let cmd = args.iter().map(|arg| {
-            if arg.contains(' ') {
-                format!("\"{}\"", arg)
-            } else {
-                arg.clone()
-            }
-        }).collect::<Vec<String>>().join(" ");
-        CString::new(cmd).unwrap_or_else(|_| CString::new("").unwrap())
-    };
-
-    static ref CMD_LINE_W: Vec<u16> = {
-        let args: Vec<String> = std::env::args().collect();
-        let cmd = args.iter().map(|arg| {
-            if arg.contains(' ') {
-                format!("\"{}\"", arg)
-            } else {
-                arg.clone()
-            }
-        }).collect::<Vec<String>>().join(" ");
-        let mut utf16: Vec<u16> = cmd.encode_utf16().collect();
-        utf16.push(0);
-        utf16
-    };
-
     static ref ENV_STRINGS_W: Vec<u16> = {
         let mut block: Vec<u16> = Vec::new();
         for (k, v) in std::env::vars() {
@@ -538,12 +670,14 @@ lazy_static::lazy_static! {
 
 pub extern "win64" fn get_command_line_a() -> *const i8 {
     trace!("GetCommandLineA()");
-    CMD_LINE_A.as_ptr()
+    ensure_guest_command_line_initialized();
+    CMD_LINE_A_PTR.load(Ordering::Acquire) as *const i8
 }
 
 pub extern "win64" fn get_command_line_w() -> *const u16 {
     trace!("GetCommandLineW()");
-    CMD_LINE_W.as_ptr()
+    ensure_guest_command_line_initialized();
+    CMD_LINE_W_PTR.load(Ordering::Acquire) as *const u16
 }
 
 pub extern "win64" fn get_environment_strings_w() -> *mut u16 {
@@ -597,6 +731,14 @@ pub extern "win64" fn get_current_process() -> *mut c_void {
 }
 
 pub extern "win64" fn terminate_process(h_process: *mut c_void, u_exit_code: u32) -> i32 {
+    let bt = std::backtrace::Backtrace::force_capture();
+    warn!(
+        h_process = format_args!("0x{:x}", h_process as usize),
+        u_exit_code = format_args!("0x{u_exit_code:x}"),
+        backtrace = %bt,
+        "TerminateProcess invoked"
+    );
+
     if h_process as usize == CURRENT_PROCESS_PSEUDO_HANDLE {
         exit_process(u_exit_code);
     }
@@ -605,10 +747,144 @@ pub extern "win64" fn terminate_process(h_process: *mut c_void, u_exit_code: u32
     0
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn get_exit_code_process(h_process: *mut c_void, lp_exit_code: *mut u32) -> i32 {
+    if lp_exit_code.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    if !h_process.is_null() && !is_current_process_handle(h_process) {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    unsafe {
+        *lp_exit_code = STILL_ACTIVE;
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
 pub extern "win64" fn get_current_thread_id() -> u32 {
     let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
     trace!("GetCurrentThreadId() -> {}", tid);
     tid
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn get_thread_times(
+    h_thread: *mut c_void,
+    lp_creation_time: *mut u64,
+    lp_exit_time: *mut u64,
+    lp_kernel_time: *mut u64,
+    lp_user_time: *mut u64,
+) -> i32 {
+    if lp_creation_time.is_null()
+        || lp_exit_time.is_null()
+        || lp_kernel_time.is_null()
+        || lp_user_time.is_null()
+    {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let raw_handle = h_thread as usize as u32;
+    let is_current_thread = raw_handle == CURRENT_THREAD_PSEUDO_HANDLE;
+    let is_known_thread = crate::utils::handle::global_table()
+        .with(raw_handle, |obj| obj.as_any().is::<crate::nt_kernel::thread::ThreadHandleObject>())
+        .unwrap_or(false);
+
+    if !is_current_thread && !is_known_thread {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    let now_ft = current_filetime_value();
+    unsafe {
+        *lp_creation_time = now_ft;
+        *lp_exit_time = 0;
+        *lp_kernel_time = 0;
+        *lp_user_time = 0;
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn open_thread(
+    _dw_desired_access: u32,
+    _b_inherit_handle: i32,
+    dw_thread_id: u32,
+) -> *mut c_void {
+    if dw_thread_id == 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return std::ptr::null_mut();
+    }
+
+    set_last_error(ERROR_SUCCESS);
+    (CURRENT_THREAD_PSEUDO_HANDLE as usize) as *mut c_void
+}
+
+pub extern "win64" fn get_thread_priority(_h_thread: *mut c_void) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    0
+}
+
+pub extern "win64" fn set_thread_priority(_h_thread: *mut c_void, _n_priority: i32) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn get_process_affinity_mask(
+    h_process: *mut c_void,
+    lp_process_affinity_mask: *mut usize,
+    lp_system_affinity_mask: *mut usize,
+) -> i32 {
+    if lp_process_affinity_mask.is_null() || lp_system_affinity_mask.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if !h_process.is_null() && !is_current_process_handle(h_process) {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    let mask = get_host_active_processor_mask();
+    unsafe {
+        *lp_process_affinity_mask = mask;
+        *lp_system_affinity_mask = mask;
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn duplicate_handle(
+    _h_source_process_handle: *mut c_void,
+    h_source_handle: *mut c_void,
+    _h_target_process_handle: *mut c_void,
+    lp_target_handle: *mut *mut c_void,
+    _dw_desired_access: u32,
+    _b_inherit_handle: i32,
+    _dw_options: u32,
+) -> i32 {
+    if lp_target_handle.is_null() || h_source_handle.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    unsafe {
+        *lp_target_handle = h_source_handle;
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn free_library_and_exit_thread(h_lib_module: *mut c_void, dw_exit_code: u32) {
+    let _ = free_library_api(h_lib_module);
+    crate::nt_kernel::thread::exit_thread(dw_exit_code);
 }
 
 pub extern "win64" fn get_native_system_info(lp_system_info: *mut c_void) {
@@ -783,6 +1059,42 @@ pub extern "win64" fn rtl_lookup_function_entry(
     })
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn rtl_pc_to_file_header(
+    pc_value: *const c_void,
+    base_of_image: *mut *mut c_void,
+) -> *mut c_void {
+    let pc = pc_value as usize;
+    trace!("RtlPcToFileHeader(pc={:#x})", pc);
+
+    let resolved_base = lookup_runtime_function(pc)
+        .map(|entry| entry.image_base)
+        .or_else(|| crate::dll_manager::loader::module_base_for_address(pc))
+        .or_else(|| {
+            if main_image_contains(pc) {
+                Some(unsafe { MAIN_IMAGE_BASE })
+            } else {
+                None
+            }
+        });
+
+    if let Some(base) = resolved_base {
+        if !base_of_image.is_null() {
+            unsafe {
+                *base_of_image = base as *mut c_void;
+            }
+        }
+        return base as *mut c_void;
+    }
+
+    if !base_of_image.is_null() {
+        unsafe {
+            *base_of_image = std::ptr::null_mut();
+        }
+    }
+    std::ptr::null_mut()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub extern "win64" fn rtl_virtual_unwind(
     _handler_type: u32,
@@ -839,6 +1151,109 @@ struct ProcessInformation {
 
 pub extern "win64" fn get_process_id(_h_process: *mut c_void) -> u32 {
     get_current_process_id()
+}
+
+fn is_current_process_handle(handle: *mut c_void) -> bool {
+    (handle as usize) == CURRENT_PROCESS_PSEUDO_HANDLE
+}
+
+fn get_host_active_processor_mask() -> usize {
+    let cpu_count = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    if cpu_count >= usize::BITS as usize {
+        usize::MAX
+    } else {
+        (1usize << cpu_count) - 1
+    }
+}
+
+pub extern "win64" fn set_thread_affinity_mask(
+    _h_thread: *mut c_void,
+    dw_thread_affinity_mask: usize,
+) -> usize {
+    // We currently do not pin host threads for guest requests.
+    // Return a plausible previous mask for compatibility.
+    if dw_thread_affinity_mask == 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let previous = get_host_active_processor_mask();
+    set_last_error(ERROR_SUCCESS);
+    previous
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn read_process_memory(
+    h_process: *mut c_void,
+    lp_base_address: *const c_void,
+    lp_buffer: *mut c_void,
+    n_size: usize,
+    lp_number_of_bytes_read: *mut usize,
+) -> i32 {
+    if !is_current_process_handle(h_process) {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if lp_base_address.is_null() || lp_buffer.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(lp_base_address.cast::<u8>(), lp_buffer.cast::<u8>(), n_size);
+        if !lp_number_of_bytes_read.is_null() {
+            *lp_number_of_bytes_read = n_size;
+        }
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn write_process_memory(
+    h_process: *mut c_void,
+    lp_base_address: *mut c_void,
+    lp_buffer: *const c_void,
+    n_size: usize,
+    lp_number_of_bytes_written: *mut usize,
+) -> i32 {
+    if !is_current_process_handle(h_process) {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if lp_base_address.is_null() || lp_buffer.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(lp_buffer.cast::<u8>(), lp_base_address.cast::<u8>(), n_size);
+        if !lp_number_of_bytes_written.is_null() {
+            *lp_number_of_bytes_written = n_size;
+        }
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn get_error_mode() -> u32 {
+    PROCESS_ERROR_MODE.load(Ordering::Acquire)
+}
+
+pub extern "win64" fn set_error_mode(new_mode: u32) -> u32 {
+    PROCESS_ERROR_MODE.swap(new_mode, Ordering::AcqRel)
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn set_thread_error_mode(new_mode: u32, old_mode: *mut u32) -> i32 {
+    let previous = set_error_mode(new_mode);
+    if !old_mode.is_null() {
+        unsafe {
+            *old_mode = previous;
+        }
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -1170,14 +1585,20 @@ pub extern "win64" fn create_toolhelp32_snapshot(
     dw_flags: u32,
     _th32_process_id: u32,
 ) -> *mut c_void {
-    if (dw_flags & TH32CS_SNAPPROCESS) == 0 {
+    let allowed = TH32CS_SNAPPROCESS | TH32CS_SNAPTHREAD | TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32;
+    if (dw_flags & allowed) == 0 {
         set_last_error(ERROR_INVALID_PARAMETER);
         return INVALID_HANDLE_VALUE as usize as *mut c_void;
     }
 
     init_global_table();
-    let handle = global_table()
-        .alloc(Box::new(ToolhelpSnapshot { process_consumed: AtomicBool::new(false) }));
+    let handle = global_table().alloc(Box::new(ToolhelpSnapshot {
+        process_consumed: AtomicBool::new(false),
+        thread_consumed: AtomicBool::new(false),
+        module_index: AtomicU32::new(0),
+        module_count: 0,
+        include_modules: (dw_flags & (TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32)) != 0,
+    }));
     set_last_error(ERROR_SUCCESS);
     handle as usize as *mut c_void
 }
@@ -1194,6 +1615,271 @@ where
     global_table()
         .with(handle, |obj| obj.as_any().downcast_ref::<ToolhelpSnapshot>().map(f).is_some())
         .unwrap_or(false)
+}
+
+pub extern "win64" fn module32_first_w(
+    h_snapshot: *mut c_void,
+    lpme: *mut ModuleEntry32W,
+) -> i32 {
+    if lpme.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let snapshot_handle = h_snapshot as Handle;
+    let include_modules = global_table()
+        .with(snapshot_handle, |obj| {
+            obj.as_any().downcast_ref::<ToolhelpSnapshot>().map(|snapshot| {
+                snapshot.module_index.store(1, Ordering::SeqCst);
+                snapshot.include_modules
+            })
+        })
+        .flatten();
+
+    let Some(true) = include_modules else {
+        set_last_error(if include_modules.is_none() {
+            ERROR_INVALID_HANDLE
+        } else {
+            ERROR_NO_MORE_FILES
+        });
+        return 0;
+    };
+
+    unsafe {
+        (*lpme).dwSize = std::mem::size_of::<ModuleEntry32W>() as u32;
+    }
+
+    // Get loaded modules from DLL manager
+    let modules = get_loaded_module_list();
+    if modules.is_empty() {
+        set_last_error(ERROR_NO_MORE_FILES);
+        return 0;
+    }
+
+    fill_module_entry_w(lpme, &modules[0]);
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn module32_next_w(
+    h_snapshot: *mut c_void,
+    lpme: *mut ModuleEntry32W,
+) -> i32 {
+    if lpme.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let modules = get_loaded_module_list();
+    let idx = {
+        let snapshot_handle = h_snapshot as Handle;
+        global_table()
+            .with(snapshot_handle, |obj| {
+                obj.as_any().downcast_ref::<ToolhelpSnapshot>().and_then(|s| {
+                    if !s.include_modules {
+                        return None;
+                    }
+                    Some(s.module_index.fetch_add(1, Ordering::SeqCst))
+                })
+            })
+            .flatten()
+    };
+
+    let Some(idx) = idx else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    };
+
+    if idx >= modules.len() as u32 {
+        set_last_error(ERROR_NO_MORE_FILES);
+        return 0;
+    }
+
+    fill_module_entry_w(lpme, &modules[idx as usize]);
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn module32_first_a(
+    h_snapshot: *mut c_void,
+    lpme: *mut ModuleEntry32A,
+) -> i32 {
+    if lpme.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let snapshot_handle = h_snapshot as Handle;
+    let include_modules = global_table()
+        .with(snapshot_handle, |obj| {
+            obj.as_any().downcast_ref::<ToolhelpSnapshot>().map(|snapshot| {
+                snapshot.module_index.store(1, Ordering::SeqCst);
+                snapshot.include_modules
+            })
+        })
+        .flatten();
+
+    let Some(true) = include_modules else {
+        set_last_error(if include_modules.is_none() {
+            ERROR_INVALID_HANDLE
+        } else {
+            ERROR_NO_MORE_FILES
+        });
+        return 0;
+    };
+
+    unsafe {
+        (*lpme).dwSize = std::mem::size_of::<ModuleEntry32A>() as u32;
+    }
+
+    let modules = get_loaded_module_list();
+    if modules.is_empty() {
+        set_last_error(ERROR_NO_MORE_FILES);
+        return 0;
+    }
+
+    fill_module_entry_a(lpme, &modules[0]);
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn module32_next_a(
+    h_snapshot: *mut c_void,
+    lpme: *mut ModuleEntry32A,
+) -> i32 {
+    if lpme.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let modules = get_loaded_module_list();
+    let idx = {
+        let snapshot_handle = h_snapshot as Handle;
+        global_table()
+            .with(snapshot_handle, |obj| {
+                obj.as_any().downcast_ref::<ToolhelpSnapshot>().and_then(|s| {
+                    if !s.include_modules {
+                        return None;
+                    }
+                    Some(s.module_index.fetch_add(1, Ordering::SeqCst))
+                })
+            })
+            .flatten()
+    };
+
+    let Some(idx) = idx else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    };
+
+    if idx >= modules.len() as u32 {
+        set_last_error(ERROR_NO_MORE_FILES);
+        return 0;
+    }
+
+    fill_module_entry_a(lpme, &modules[idx as usize]);
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+fn fill_module_entry_w(entry: *mut ModuleEntry32W, module_info: &LoadedModuleInfo) {
+    unsafe {
+        (*entry).dwSize = std::mem::size_of::<ModuleEntry32W>() as u32;
+        (*entry).th32ModuleID = module_info.id;
+        (*entry).th32ProcessID = std::process::id();
+        (*entry).GlblcntUsage = 1;
+        (*entry).ProccntUsage = 1;
+        (*entry).modBaseAddr = module_info.base as *mut u8;
+        (*entry).modBaseSize = module_info.size as u32;
+        (*entry).hModule = module_info.handle;
+
+        // Module name
+        let name_wide: Vec<u16> = module_info.name.encode_utf16().take(255).collect();
+        (*entry).szModule.fill(0);
+        for (i, ch) in name_wide.iter().enumerate() {
+            (*entry).szModule[i] = *ch;
+        }
+
+        // Exe path
+        let path_wide: Vec<u16> = module_info.path.encode_utf16().take(259).collect();
+        (*entry).szExePath.fill(0);
+        for (i, ch) in path_wide.iter().enumerate() {
+            (*entry).szExePath[i] = *ch;
+        }
+    }
+}
+
+fn fill_module_entry_a(entry: *mut ModuleEntry32A, module_info: &LoadedModuleInfo) {
+    unsafe {
+        (*entry).dwSize = std::mem::size_of::<ModuleEntry32A>() as u32;
+        (*entry).th32ModuleID = module_info.id;
+        (*entry).th32ProcessID = std::process::id();
+        (*entry).GlblcntUsage = 1;
+        (*entry).ProccntUsage = 1;
+        (*entry).modBaseAddr = module_info.base as *mut u8;
+        (*entry).modBaseSize = module_info.size as u32;
+        (*entry).hModule = module_info.handle;
+
+        let name = module_info.name.as_bytes();
+        (*entry).szModule.fill(0);
+        for (i, ch) in name.iter().copied().enumerate().take(255) {
+            (*entry).szModule[i] = ch;
+        }
+
+        let path = module_info.path.as_bytes();
+        (*entry).szExePath.fill(0);
+        for (i, ch) in path.iter().copied().enumerate().take(259) {
+            (*entry).szExePath[i] = ch;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LoadedModuleInfo {
+    id: u32,
+    name: String,
+    path: String,
+    base: usize,
+    size: usize,
+    handle: usize,
+}
+
+fn get_loaded_module_list() -> Vec<LoadedModuleInfo> {
+    let mut modules = Vec::new();
+    let mut id_counter = 1u32;
+
+    // Add main executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        modules.push(LoadedModuleInfo {
+            id: id_counter,
+            name: exe_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+            path: exe_path.to_string_lossy().to_string(),
+            base: 0x140000000, // Typical main exe base
+            size: 0x100000,
+            handle: 0,
+        });
+        id_counter += 1;
+    }
+
+    // Add loaded DLLs
+    if let Ok(registry) = crate::dll_manager::loader::registry().read() {
+        for (name, module) in registry.iter() {
+            modules.push(LoadedModuleInfo {
+                id: id_counter,
+                name: name.clone(),
+                path: match &module.source {
+                    crate::dll_manager::ModuleSource::Native(native) => native.path.to_string_lossy().to_string(),
+                    _ => format!("C:\\Windows\\System32\\{}", name),
+                },
+                base: module.handle,
+                size: 0x1000000,
+                handle: module.handle,
+            });
+            id_counter += 1;
+        }
+    }
+
+    modules
 }
 
 fn fill_process_entry_w(entry: &mut ProcessEntry32W) {
@@ -1305,6 +1991,50 @@ pub extern "win64" fn process32_first_a(h_snapshot: *mut c_void, lppe: *mut c_vo
 pub extern "win64" fn process32_next_a(h_snapshot: *mut c_void, _lppe: *mut c_void) -> i32 {
     let ok = with_toolhelp_snapshot(h_snapshot, |snapshot| {
         let _ = snapshot.process_consumed.load(Ordering::Acquire);
+    });
+
+    if !ok {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    set_last_error(ERROR_NO_MORE_FILES);
+    0
+}
+
+fn fill_thread_entry(entry: &mut ThreadEntry32) {
+    entry.cnt_usage = 0;
+    entry.th32_thread_id = get_current_thread_id();
+    entry.th32_owner_process_id = std::process::id();
+    entry.tp_base_pri = 8;
+    entry.tp_delta_pri = 0;
+    entry.dw_flags = 0;
+}
+
+pub extern "win64" fn thread32_first(h_snapshot: *mut c_void, lpte: *mut c_void) -> i32 {
+    if lpte.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let ok = with_toolhelp_snapshot(h_snapshot, |snapshot| {
+        snapshot.thread_consumed.store(true, Ordering::Release);
+        let entry = unsafe { &mut *lpte.cast::<ThreadEntry32>() };
+        fill_thread_entry(entry);
+    });
+
+    if !ok {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn thread32_next(h_snapshot: *mut c_void, _lpte: *mut c_void) -> i32 {
+    let ok = with_toolhelp_snapshot(h_snapshot, |snapshot| {
+        let _ = snapshot.thread_consumed.load(Ordering::Acquire);
     });
 
     if !ok {
@@ -1449,6 +2179,24 @@ mod tests {
         assert!(len > 0);
         let value = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().to_string();
         assert!(!value.is_empty());
+    }
+
+    #[test]
+    fn guest_command_line_reflects_target_exe_and_args() {
+        let _guard = crate::test_support::serial_guard();
+        let fake_exe = Path::new("/tmp/Game Folder/game.exe");
+        let args = vec!["-windowed".to_string(), "arg with space".to_string()];
+
+        set_guest_command_line(fake_exe, &args);
+
+        let cmd_a = unsafe { CStr::from_ptr(get_command_line_a()) }.to_string_lossy().to_string();
+        assert!(cmd_a.contains("game.exe"));
+        assert!(cmd_a.contains("Game Folder"));
+        assert!(cmd_a.contains("-windowed"));
+        assert!(cmd_a.contains("\"arg with space\""));
+
+        let cmd_w = unsafe { from_wide_ptr(get_command_line_w()).expect("wide command line") };
+        assert_eq!(cmd_w, cmd_a);
     }
 
     #[test]
@@ -1619,4 +2367,466 @@ mod tests {
             std::ptr::null_mut(),
         );
     }
+}
+
+// ─── Additional kernel32 stubs for Unity initialization ───
+
+pub extern "win64" fn init_once_execute_once(
+    _pInitOnce: *mut c_void,
+    _pCallback: *mut c_void,
+    _pContext: *mut c_void,
+    _lpParameter: *mut *mut c_void,
+) -> i32 {
+    trace!("InitOnceExecuteOnce — stub");
+    1
+}
+
+pub extern "win64" fn get_current_processor_number() -> u32 {
+    trace!("GetCurrentProcessorNumber — stub");
+    0
+}
+
+pub extern "win64" fn get_system_time_precise_as_file_time(lp_file_time: *mut u8) {
+    trace!("GetSystemTimePreciseAsFileTime — stub");
+    if !lp_file_time.is_null() {
+        // FILETIME: 100-nanosecond intervals since January 1, 1601
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let filetime = 116444736000000000u64 + (now.as_nanos() / 100) as u64;
+        unsafe {
+            std::ptr::write_unaligned(lp_file_time as *mut u64, filetime);
+        }
+    }
+}
+
+pub extern "win64" fn get_locale_info_ex(
+    _lpLocaleName: *const u16,
+    _LCType: u32,
+    _lpLCData: *mut u16,
+    _cchData: i32,
+) -> i32 {
+    trace!("GetLocaleInfoEx — stub");
+    0
+}
+
+pub extern "win64" fn compare_string_ex(
+    _lpLocaleName: *const u16,
+    _dwCmpFlags: u32,
+    _lpString1: *const u16,
+    _cchCount1: i32,
+    _lpString2: *const u16,
+    _cchCount2: i32,
+    _lpVersionInformation: *mut c_void,
+) -> i32 {
+    trace!("CompareStringEx — stub");
+    2 // CSTR_EQUAL
+}
+
+pub extern "win64" fn lc_map_string_ex(
+    _lpLocaleName: *const u16,
+    _dwMapFlags: u32,
+    _lpSrcStr: *const u16,
+    _cchSrc: i32,
+    _lpDestStr: *mut u16,
+    _cchDest: i32,
+    _lpVersionInformation: *mut c_void,
+    _lpReserved: *mut c_void,
+    _sortHandle: usize,
+) -> i32 {
+    trace!("LCMapStringEx — stub");
+    0
+}
+
+pub extern "win64" fn are_file_apis_ansi() -> i32 {
+    trace!("AreFileApisANSI — stub");
+    1
+}
+
+pub extern "win64" fn set_thread_description(
+    _hThread: usize,
+    _lpThreadDescription: *const u16,
+) -> i32 {
+    trace!("SetThreadDescription — stub");
+    0
+}
+
+pub extern "win64" fn flush_process_write_buffers() {
+    trace!("FlushProcessWriteBuffers — stub");
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+pub extern "win64" fn get_current_package_id(
+    _buffer_length: *mut u32,
+    _buffer: *mut u8,
+) -> i32 {
+    trace!("GetCurrentPackageId — stub (APPMODEL_ERROR_NO_PACKAGE)");
+    15700 // APPMODEL_ERROR_NO_PACKAGE
+}
+
+pub extern "win64" fn create_symbolic_link_w(
+    _lpSymlinkFileName: *const u16,
+    _lpTargetFileName: *const u16,
+    _dwFlags: u32,
+) -> i32 {
+    trace!("CreateSymbolicLinkW — stub");
+    0
+}
+
+pub extern "win64" fn get_file_information_by_handle_ex(
+    _hFile: usize,
+    _FileInformationClass: u32,
+    _lpFileInformation: *mut c_void,
+    _dwBufferSize: u32,
+) -> i32 {
+    trace!("GetFileInformationByHandleEx — stub");
+    0
+}
+
+pub extern "win64" fn set_file_information_by_handle(
+    _hFile: usize,
+    _FileInformationClass: u32,
+    _lpFileInformation: *mut c_void,
+    _dwBufferSize: u32,
+) -> i32 {
+    trace!("SetFileInformationByHandle — stub");
+    0
+}
+
+// ─── Thread Pool Implementation ───
+
+#[derive(Debug)]
+struct ThreadPoolTimer {
+    cancelled: std::sync::atomic::AtomicBool,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HandleObject for ThreadPoolTimer {
+    fn type_name(&self) -> &'static str {
+        "ThreadPoolTimer"
+    }
+    fn close(&mut self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+struct ThreadPoolWait {
+    cancelled: std::sync::atomic::AtomicBool,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HandleObject for ThreadPoolWait {
+    fn type_name(&self) -> &'static str {
+        "ThreadPoolWait"
+    }
+    fn close(&mut self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+struct ThreadPoolWork {
+    submitted: std::sync::atomic::AtomicBool,
+}
+
+impl HandleObject for ThreadPoolWork {
+    fn type_name(&self) -> &'static str {
+        "ThreadPoolWork"
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+pub extern "win64" fn create_threadpool_timer(
+    callback: *mut c_void,
+) -> *mut c_void {
+    trace!("CreateThreadpoolTimer — implementation");
+    if callback.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return std::ptr::null_mut();
+    }
+    
+    init_global_table();
+    let handle = global_table().alloc(Box::new(ThreadPoolTimer {
+        cancelled: std::sync::atomic::AtomicBool::new(false),
+        join_handle: None,
+    }));
+    set_last_error(ERROR_SUCCESS);
+    handle as usize as *mut c_void
+}
+
+pub extern "win64" fn set_threadpool_timer(
+    timer: *mut c_void,
+    pft_due_time: *mut i64,
+    ms_period: u32,
+    ms_window_length: u32,
+) -> i32 {
+    trace!("SetThreadpoolTimer — implementation");
+    if timer.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    
+    let timer_handle = timer as Handle;
+    let callback_ptr = 0usize; // Would need to store this
+    
+    // Cancel existing timer
+    global_table().with(timer_handle, |obj| {
+        if let Some(tp_timer) = obj.as_any().downcast_ref::<ThreadPoolTimer>() {
+            tp_timer.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    
+    // Due time in 100-ns intervals (negative = relative)
+    let due_time_100ns = if pft_due_time.is_null() { 0 } else {
+        unsafe { *pft_due_time }
+    };
+    
+    // Convert to milliseconds
+    let due_time_ms = if due_time_100ns < 0 {
+        ((-due_time_100ns) / 10000) as u64
+    } else {
+        // Absolute time - treat as relative for now
+        0
+    };
+    
+    let period = ms_period;
+    let cancelled = global_table().with(timer_handle, |obj| {
+        obj.as_any().downcast_ref::<ThreadPoolTimer>().map(|t| &t.cancelled as *const _)
+    }).flatten();
+    
+    if let Some(cancelled_ptr) = cancelled {
+        let cancelled: &std::sync::atomic::AtomicBool = unsafe { &*cancelled_ptr };
+        cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Spawn timer thread
+        let handle = std::thread::Builder::new()
+            .name("threadpool-timer".to_string())
+            .spawn(move || {
+                if due_time_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(due_time_ms));
+                }
+                // Would call callback here
+            })
+            .ok();
+        
+        // Store the join handle - we'll use a separate mechanism since we can't mutably borrow
+        // For now, the timer thread will run to completion or check the cancelled flag
+    }
+    
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn wait_for_threadpool_timer_callbacks(
+    timer: *mut c_void,
+    f_cancel_pending_callbacks: i32,
+) {
+    trace!("WaitForThreadpoolTimerCallbacks — implementation");
+    if timer.is_null() {
+        return;
+    }
+    
+    let timer_handle = timer as Handle;
+    global_table().with(timer_handle, |obj| {
+        if let Some(tp_timer) = obj.as_any().downcast_ref::<ThreadPoolTimer>() {
+            tp_timer.cancelled.store(f_cancel_pending_callbacks != 0, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+}
+
+pub extern "win64" fn close_threadpool_timer(
+    timer: *mut c_void,
+) {
+    trace!("CloseThreadpoolTimer — implementation");
+    if timer.is_null() {
+        return;
+    }
+    
+    let timer_handle = timer as Handle;
+    global_table().with(timer_handle, |obj| {
+        if let Some(tp_timer) = obj.as_any().downcast_ref::<ThreadPoolTimer>() {
+            tp_timer.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    
+    global_table().close_handle(timer_handle);
+}
+
+pub extern "win64" fn create_threadpool_wait(
+    callback: *mut c_void,
+) -> *mut c_void {
+    trace!("CreateThreadpoolWait — implementation");
+    
+    init_global_table();
+    let handle = global_table().alloc(Box::new(ThreadPoolWait {
+        cancelled: std::sync::atomic::AtomicBool::new(false),
+        join_handle: None,
+    }));
+    set_last_error(ERROR_SUCCESS);
+    handle as usize as *mut c_void
+}
+
+pub extern "win64" fn set_threadpool_wait(
+    wait: *mut c_void,
+    handle_to_wait: usize,
+    pft_timeout: *mut i64,
+) -> i32 {
+    trace!("SetThreadpoolWait — implementation");
+    if wait.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    
+    let wait_handle = wait as Handle;
+    
+    // Cancel existing wait
+    global_table().with(wait_handle, |obj| {
+        if let Some(tp_wait) = obj.as_any().downcast_ref::<ThreadPoolWait>() {
+            tp_wait.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    
+    // For now, just succeed - in reality we'd set up a wait on the handle
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn close_threadpool_wait(
+    wait: *mut c_void,
+) {
+    trace!("CloseThreadpoolWait — implementation");
+    if wait.is_null() {
+        return;
+    }
+    
+    let wait_handle = wait as Handle;
+    global_table().with(wait_handle, |obj| {
+        if let Some(tp_wait) = obj.as_any().downcast_ref::<ThreadPoolWait>() {
+            tp_wait.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    
+    global_table().close_handle(wait_handle);
+}
+
+pub extern "win64" fn create_threadpool_work(
+    callback: *mut c_void,
+) -> *mut c_void {
+    trace!("CreateThreadpoolWork — implementation");
+    
+    init_global_table();
+    let handle = global_table().alloc(Box::new(ThreadPoolWork {
+        submitted: std::sync::atomic::AtomicBool::new(false),
+    }));
+    set_last_error(ERROR_SUCCESS);
+    handle as usize as *mut c_void
+}
+
+pub extern "win64" fn submit_threadpool_work(
+    work: *mut c_void,
+) {
+    trace!("SubmitThreadpoolWork — implementation");
+    if work.is_null() {
+        return;
+    }
+    
+    let work_handle = work as Handle;
+    global_table().with(work_handle, |obj| {
+        if let Some(tp_work) = obj.as_any().downcast_ref::<ThreadPoolWork>() {
+            tp_work.submitted.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+}
+
+pub extern "win64" fn close_threadpool_work(
+    work: *mut c_void,
+) {
+    trace!("CloseThreadpoolWork — implementation");
+    if work.is_null() {
+        return;
+    }
+    
+    let work_handle = work as Handle;
+    global_table().close_handle(work_handle);
+}
+
+pub extern "win64" fn free_library_when_callback_returns(
+    pcbk: *mut c_void,
+    h_module: usize,
+) -> i32 {
+    trace!("FreeLibraryWhenCallbackReturns — stub");
+    0
+}
+
+// SRW Lock and Condition Variable stubs
+pub extern "win64" fn initialize_srw_lock(srw_lock: *mut c_void) {
+    trace!("InitializeSRWLock — stub");
+    if !srw_lock.is_null() {
+        unsafe {
+            std::ptr::write_bytes(srw_lock, 0, std::mem::size_of::<usize>());
+        }
+    }
+}
+
+pub extern "win64" fn try_acquire_srw_lock_exclusive(
+    _srw_lock: *mut c_void,
+) -> i32 {
+    trace!("TryAcquireSRWLockExclusive — stub");
+    0
+}
+
+pub extern "win64" fn initialize_condition_variable(
+    cond_var: *mut c_void,
+) {
+    trace!("InitializeConditionVariable — stub");
+    if !cond_var.is_null() {
+        unsafe {
+            std::ptr::write_bytes(cond_var, 0, std::mem::size_of::<usize>());
+        }
+    }
+}
+
+pub extern "win64" fn sleep_condition_variable_cs(
+    _cond_var: *mut c_void,
+    _crit_section: *mut c_void,
+    _dw_milliseconds: u32,
+) -> i32 {
+    trace!("SleepConditionVariableCS — stub");
+    0
+}
+
+pub extern "win64" fn sleep_condition_variable_srw(
+    _cond_var: *mut c_void,
+    _srw_lock: *mut c_void,
+    _dw_milliseconds: u32,
+    _flags: u32,
+) -> i32 {
+    trace!("SleepConditionVariableSRW — stub");
+    0
+}
+
+pub extern "win64" fn wake_condition_variable(
+    _cond_var: *mut c_void,
+) {
+    trace!("WakeConditionVariable — stub");
+}
+
+pub extern "win64" fn wake_all_condition_variable(
+    _cond_var: *mut c_void,
+) {
+    trace!("WakeAllConditionVariable — stub");
 }

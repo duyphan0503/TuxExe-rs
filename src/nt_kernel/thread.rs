@@ -39,16 +39,24 @@ struct ThreadControl {
 #[derive(Debug)]
 pub struct ThreadHandleObject {
     control: Arc<(Mutex<ThreadControl>, Condvar)>,
-    join_handle: Mutex<Option<JoinHandle<()>>>,
+    join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl ThreadHandleObject {
     fn new(control: Arc<(Mutex<ThreadControl>, Condvar)>, join_handle: JoinHandle<()>) -> Self {
-        Self { control, join_handle: Mutex::new(Some(join_handle)) }
+        Self { control, join_handle: Arc::new(Mutex::new(Some(join_handle))) }
     }
 
     pub fn wait(&self, timeout_ms: u32) -> u32 {
-        let (lock, condvar) = &*self.control;
+        Self::wait_with_handles(self.control.clone(), self.join_handle.clone(), timeout_ms)
+    }
+
+    fn wait_with_handles(
+        control: Arc<(Mutex<ThreadControl>, Condvar)>,
+        join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+        timeout_ms: u32,
+    ) -> u32 {
+        let (lock, condvar) = &*control;
         let mut guard = lock.lock().expect("thread control poisoned");
 
         let completed = if timeout_ms == INFINITE {
@@ -80,11 +88,20 @@ impl ThreadHandleObject {
             return WAIT_TIMEOUT;
         }
 
-        if let Some(join) = self.join_handle.lock().expect("thread join handle poisoned").take() {
+        if let Some(join) = join_handle.lock().expect("thread join handle poisoned").take() {
             let _ = join.join();
         }
 
         WAIT_OBJECT_0
+    }
+
+    fn clone_wait_handles(
+        &self,
+    ) -> (
+        Arc<(Mutex<ThreadControl>, Condvar)>,
+        Arc<Mutex<Option<JoinHandle<()>>>>,
+    ) {
+        (self.control.clone(), self.join_handle.clone())
     }
 
     pub fn os_thread_id(&self) -> u32 {
@@ -193,6 +210,7 @@ pub fn create_thread(
         if let Err(error) = teb::attach_spawned_thread() {
             warn!(%error, "Failed to attach TEB for guest thread");
         }
+        tls::initialize_static_tls_for_current_thread();
 
         wait_for_start(&control_clone);
         tls::invoke_thread_attach_callbacks();
@@ -249,15 +267,20 @@ fn wait_for_thread_id(handle: Handle) -> u32 {
 }
 
 pub fn wait_for_thread(handle: Handle, timeout_ms: u32) -> u32 {
-    global_table()
+    let waiter = global_table()
         .with(handle, |object| {
             object
                 .as_any()
                 .downcast_ref::<ThreadHandleObject>()
-                .map(|thread| thread.wait(timeout_ms))
+                .map(ThreadHandleObject::clone_wait_handles)
         })
-        .flatten()
-        .unwrap_or(WAIT_FAILED)
+        .flatten();
+
+    let Some((control, join_handle)) = waiter else {
+        return WAIT_FAILED;
+    };
+
+    ThreadHandleObject::wait_with_handles(control, join_handle, timeout_ms)
 }
 
 pub fn suspend_thread(handle: Handle) -> u32 {

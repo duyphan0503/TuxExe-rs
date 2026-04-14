@@ -3,7 +3,9 @@
 
 //! Minimal C runtime implementation (msvcrt.dll exports).
 
+use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::trace;
 
 pub extern "win64" fn puts(s: *const c_char) -> i32 {
@@ -231,6 +233,10 @@ pub extern "win64" fn __iob_func() -> *mut c_void {
 }
 
 static mut INITENV: *mut c_char = std::ptr::null_mut();
+static INVALID_PARAMETER_CALLS: AtomicUsize = AtomicUsize::new(0);
+static INVALID_PARAMETER_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+type InvalidParameterHandler = extern "win64" fn(*const u16, *const u16, *const u16, u32, usize);
 
 pub extern "win64" fn __C_specific_handler(
     _dispatcher_context: usize,
@@ -241,7 +247,62 @@ pub extern "win64" fn __C_specific_handler(
     0
 }
 
-use std::collections::HashMap;
+
+pub extern "win64" fn _invalid_parameter(
+    expression: *const u16,
+    function_name: *const u16,
+    file_name: *const u16,
+    line_number: u32,
+    reserved: usize,
+) {
+    let call_idx = INVALID_PARAMETER_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let decoded_expression = unsafe { crate::utils::wide_string::from_wide_ptr(expression) }
+        .ok()
+        .unwrap_or_default();
+    let decoded_function_name = unsafe { crate::utils::wide_string::from_wide_ptr(function_name) }
+        .ok()
+        .unwrap_or_default();
+    let decoded_file_name = unsafe { crate::utils::wide_string::from_wide_ptr(file_name) }
+        .ok()
+        .unwrap_or_default();
+
+    crate::runtime::telemetry::record(format!(
+        "invalid_parameter#{call_idx}: fn='{decoded_function_name}' file='{decoded_file_name}' line={line_number} expr='{decoded_expression}'"
+    ));
+
+    tracing::warn!(
+        call_idx,
+        line_number,
+        function = %decoded_function_name,
+        file = %decoded_file_name,
+        expression = %decoded_expression,
+        "MSVCRT _invalid_parameter invoked"
+    );
+
+    let handler_ptr = INVALID_PARAMETER_HANDLER.load(Ordering::Acquire);
+    if handler_ptr != 0 {
+        let handler: InvalidParameterHandler = unsafe { std::mem::transmute(handler_ptr) };
+        handler(expression, function_name, file_name, line_number, reserved);
+    }
+}
+
+pub extern "win64" fn _invalid_parameter_noinfo() {
+    _invalid_parameter(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0);
+}
+
+pub extern "win64" fn _invalid_parameter_noinfo_noreturn() -> ! {
+    _invalid_parameter_noinfo();
+    abort()
+}
+
+pub extern "win64" fn _set_invalid_parameter_handler(handler: usize) -> usize {
+    INVALID_PARAMETER_HANDLER.swap(handler, Ordering::AcqRel)
+}
+
+pub extern "win64" fn _get_invalid_parameter_handler() -> usize {
+    INVALID_PARAMETER_HANDLER.load(Ordering::Acquire)
+}
+
 
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
@@ -276,6 +337,14 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("__iob_func", __iob_func as usize);
     exports.insert("_iob", (&raw mut IOB) as usize);
     exports.insert("__C_specific_handler", __C_specific_handler as usize);
+    exports.insert("_invalid_parameter", _invalid_parameter as usize);
+    exports.insert("_invalid_parameter_noinfo", _invalid_parameter_noinfo as usize);
+    exports.insert(
+        "_invalid_parameter_noinfo_noreturn",
+        _invalid_parameter_noinfo_noreturn as usize,
+    );
+    exports.insert("_set_invalid_parameter_handler", _set_invalid_parameter_handler as usize);
+    exports.insert("_get_invalid_parameter_handler", _get_invalid_parameter_handler as usize);
     exports.insert("fflush", fflush as usize);
     exports.insert("atoi", atoi as usize);
     exports.insert("setlocale", setlocale as usize);
