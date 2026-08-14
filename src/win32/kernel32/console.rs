@@ -62,6 +62,57 @@ pub extern "win64" fn get_console_cp() -> u32 {
     65001
 }
 
+pub extern "win64" fn get_console_output_cp() -> u32 {
+    // The host terminal uses the same UTF-8 encoding for console output.
+    65001
+}
+
+pub extern "win64" fn get_number_of_console_input_events(
+    console_input: Handle,
+    event_count: *mut u32,
+) -> i32 {
+    if console_input != PSEUDO_STDIN || event_count.is_null() {
+        super::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+    // TuxExe currently exposes a non-interactive host-console input queue.
+    unsafe { *event_count = 0 };
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn read_console_input_w(
+    console_input: Handle,
+    _input_records: *mut u8,
+    _record_count: u32,
+    records_read: *mut u32,
+) -> i32 {
+    if console_input != PSEUDO_STDIN || records_read.is_null() {
+        super::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+    unsafe { *records_read = 0 };
+    // This is a non-blocking, empty headless queue. Callers should first use
+    // GetNumberOfConsoleInputEvents, which reports zero.
+    super::error::set_last_error(232); // ERROR_NO_DATA
+    0
+}
+
+pub extern "win64" fn peek_console_input_a(
+    console_input: Handle,
+    _input_records: *mut u8,
+    _record_count: u32,
+    records_read: *mut u32,
+) -> i32 {
+    if console_input != PSEUDO_STDIN || records_read.is_null() {
+        super::error::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+    unsafe { *records_read = 0 };
+    super::error::set_last_error(0);
+    1
+}
+
 pub extern "win64" fn attach_console(_dw_process_id: u32) -> i32 {
     super::error::set_last_error(0);
     1
@@ -231,6 +282,32 @@ pub extern "win64" fn write_console_w(
     } else {
         0
     }
+}
+
+pub extern "win64" fn set_console_title_a(_lp_console_title: *const std::ffi::c_char) -> i32 {
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn set_console_title_w(_lp_console_title: *const u16) -> i32 {
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn get_console_title_a(lp_console_title: *mut std::ffi::c_char, n_size: u32) -> u32 {
+    if !lp_console_title.is_null() && n_size > 0 {
+        unsafe { *lp_console_title = 0; }
+    }
+    super::error::set_last_error(0);
+    0
+}
+
+pub extern "win64" fn get_console_title_w(lp_console_title: *mut u16, n_size: u32) -> u32 {
+    if !lp_console_title.is_null() && n_size > 0 {
+        unsafe { *lp_console_title = 0; }
+    }
+    super::error::set_last_error(0);
+    0
 }
 
 #[cfg(test)]

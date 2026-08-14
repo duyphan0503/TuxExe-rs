@@ -3,12 +3,14 @@
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::trace;
 
 use crate::{nt_kernel::thread as nt_thread, threading::tls, utils::handle::Handle};
 
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+static THREAD_CONTEXT_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C)]
 struct FiberContext {
@@ -20,10 +22,24 @@ struct FiberContext {
 
 thread_local! {
     static CURRENT_FIBER: Cell<*mut FiberContext> = const { Cell::new(ptr::null_mut()) };
+    static STACK_GUARANTEE: Cell<u32> = const { Cell::new(0) };
 }
 
 fn set_last_error(err: u32) {
     super::error::set_last_error(err);
+}
+
+pub extern "win64" fn SetThreadStackGuarantee(stack_size_in_bytes: *mut u32) -> i32 {
+    if stack_size_in_bytes.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let requested = unsafe { *stack_size_in_bytes };
+    // Guest stacks are pre-reserved by runtime::guest_stack. Record the
+    // accepted guarantee per guest thread without overcommitting host pages.
+    STACK_GUARANTEE.with(|guarantee| guarantee.set(requested));
+    set_last_error(ERROR_SUCCESS);
+    1
 }
 
 pub extern "win64" fn TlsAlloc() -> u32 {
@@ -39,15 +55,11 @@ pub extern "win64" fn TlsFree(dwTlsIndex: u32) -> i32 {
 }
 
 pub extern "win64" fn TlsSetValue(dwTlsIndex: u32, lpTlsValue: *mut c_void) -> i32 {
-    let result = tls::tls_set_value(dwTlsIndex, lpTlsValue) as i32;
-    trace!("TlsSetValue({}, {:p}) -> {}", dwTlsIndex, lpTlsValue, result);
-    result
+    tls::tls_set_value(dwTlsIndex, lpTlsValue) as i32
 }
 
 pub extern "win64" fn TlsGetValue(dwTlsIndex: u32) -> *mut c_void {
-    let result = tls::tls_get_value(dwTlsIndex);
-    trace!("TlsGetValue({}) -> {:p}", dwTlsIndex, result);
-    result
+    tls::tls_get_value(dwTlsIndex)
 }
 
 pub extern "win64" fn FlsAlloc(_lp_callback: *const c_void) -> u32 {
@@ -105,8 +117,40 @@ pub extern "win64" fn ResumeThread(hThread: Handle) -> u32 {
 }
 
 pub extern "win64" fn GetThreadContext(_hThread: Handle, lpContext: *mut c_void) -> i32 {
+    if std::env::var_os("TUXEXE_TRACE_THREAD_CONTEXT").is_some()
+        && THREAD_CONTEXT_TRACE_COUNT.fetch_add(1, Ordering::Relaxed) < 32
+    {
+        tracing::info!(handle = _hThread, context = ?lpContext, "GetThreadContext requested");
+    }
     if lpContext.is_null() {
         return 0;
+    }
+    let ctx = lpContext.cast::<crate::win32::kernel32::error::WinContext>();
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::asm!(
+            "mov qword ptr [{ctx} + 0x78], rax",
+            "mov qword ptr [{ctx} + 0x80], rcx",
+            "mov qword ptr [{ctx} + 0x88], rdx",
+            "mov qword ptr [{ctx} + 0x90], rbx",
+            "mov qword ptr [{ctx} + 0x98], rsp",
+            "mov qword ptr [{ctx} + 0xa0], rbp",
+            "mov qword ptr [{ctx} + 0xa8], rsi",
+            "mov qword ptr [{ctx} + 0xb0], rdi",
+            "mov qword ptr [{ctx} + 0xb8], r8",
+            "mov qword ptr [{ctx} + 0xc0], r9",
+            "mov qword ptr [{ctx} + 0xc8], r10",
+            "mov qword ptr [{ctx} + 0xd0], r11",
+            "mov qword ptr [{ctx} + 0xd8], r12",
+            "mov qword ptr [{ctx} + 0xe0], r13",
+            "mov qword ptr [{ctx} + 0xe8], r14",
+            "mov qword ptr [{ctx} + 0xf0], r15",
+            "lea rax, [rip]",
+            "mov qword ptr [{ctx} + 0xf8], rax",
+            ctx = in(reg) ctx,
+            out("rax") _,
+            options(nostack)
+        );
     }
     1
 }

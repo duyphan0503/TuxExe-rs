@@ -2,18 +2,22 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
 
-use tuxexe_rs::dll_manager::resolve_reimplemented_export;
+use tuxexe_rs::dll_manager::{resolve_export_status, ExportStatus};
 use tuxexe_rs::exceptions::signals::install_signal_handlers;
 use tuxexe_rs::exceptions::unwind::register_runtime_function_table;
 use tuxexe_rs::pe_loader::imports::{enumerate_delay_imports, enumerate_imports, ImportKind};
 use tuxexe_rs::pe_loader::mapper::map_pe;
 use tuxexe_rs::pe_loader::parser::{Machine, ParsedPe};
 use tuxexe_rs::pe_loader::relocations::apply_relocations;
-use tuxexe_rs::threading::tls::{invoke_process_attach_callbacks, register_tls_callbacks};
+use tuxexe_rs::threading::tls::{
+    invoke_tls_callbacks_for, register_tls_callbacks, DLL_PROCESS_ATTACH,
+};
 use tuxexe_rs::utils::handle::init_global_table;
-use tuxexe_rs::win32::kernel32::process::{set_main_image_base, set_main_image_path};
+use tuxexe_rs::win32::kernel32::process::{
+    set_guest_command_line, set_main_image_base, set_main_image_path,
+};
 
 /// TuxExe-rs — run Windows PE executables on Linux.
 #[derive(Parser, Debug)]
@@ -61,7 +65,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialise tracing with the requested level.
-    let level_filter = cli.log_level.parse::<tracing::Level>().unwrap_or(tracing::Level::INFO);
+    let level_filter = match cli.log_level.to_lowercase().as_str() {
+        "error" => tracing::level_filters::LevelFilter::ERROR,
+        "warn" => tracing::level_filters::LevelFilter::WARN,
+        "info" => tracing::level_filters::LevelFilter::INFO,
+        "debug" => tracing::level_filters::LevelFilter::DEBUG,
+        "trace" => tracing::level_filters::LevelFilter::TRACE,
+        _ => tracing::level_filters::LevelFilter::INFO,
+    };
 
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(level_filter)
@@ -75,26 +86,35 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Run { exe, args } => {
-            info!(exe = %exe.display(), ?args, "Preparing to execute PE");
+            std::thread::Builder::new()
+                .name("tuxexe-runner".to_string())
+                .stack_size(32 * 1024 * 1024)
+                .spawn(move || -> anyhow::Result<()> {
+                    info!(exe = %exe.display(), ?args, "Preparing to execute PE");
 
-            tuxexe_rs::dll_manager::search::set_executable_directory(
-                exe.parent().map(PathBuf::from),
-            );
+                    tuxexe_rs::dll_manager::search::set_executable_directory(
+                        exe.parent().map(PathBuf::from),
+                    );
+                    if let Some(parent) = exe.parent() {
+                        let _ = std::env::set_current_dir(parent);
+                    }
 
-            if tuxexe_rs::wow64::enforce_native_x86_backend().is_some() {
-                info!(exe = %exe.display(), "Executed x86 binary via native-only compatibility path");
-                return Ok(());
-            }
+                    if let Some(warning) = tuxexe_rs::wow64::enforce_native_x86_backend() {
+                        warn!("{warning}");
+                        eprintln!("warning: {warning}");
+                    }
 
             // Initialize Windows environment variables
             tuxexe_rs::win32::kernel32::env::init_windows_env_vars();
 
             init_global_table();
 
+            set_main_image_path(&exe);
+            set_guest_command_line(&exe, &args);
+
             // Phase 1: Load, map, relocate, enumerate imports.
             let mut pe = run_pe_loader(&exe)?;
             set_main_image_base(pe.mapped.base_addr());
-            set_main_image_path(&exe);
             if pe.parsed.machine == Machine::X86 {
                 tuxexe_rs::wow64::setup_wow64_context(pe.mapped.base_addr(), pe.mapped.size())
                     .map_err(|error| anyhow::anyhow!("Failed to setup WoW64 context: {error}"))?;
@@ -102,6 +122,16 @@ fn main() -> Result<()> {
                 register_runtime_function_table(&pe.parsed, &pe.mapped)
                     .map_err(|error| anyhow::anyhow!("Failed to register unwind table: {error}"))?;
             }
+
+            // Establish the main guest TEB/PEB before resolving dependencies.
+            // UnityPlayer.dll has static TLS; letting its loader initialize a
+            // placeholder TEB first creates a PEB with ImageBaseAddress == 0,
+            // which corrupts early Unity startup state.
+            if pe.parsed.machine != Machine::X86 {
+                tuxexe_rs::threading::teb::setup_teb(pe.mapped.base_addr())
+                    .map_err(|error| anyhow::anyhow!("Failed to setup TEB: {error}"))?;
+            }
+
             install_signal_handlers()
                 .map_err(|error| anyhow::anyhow!("Failed to install signal handlers: {error}"))?;
 
@@ -124,7 +154,23 @@ fn main() -> Result<()> {
             tuxexe_rs::threading::tls::initialize_static_tls(&pe.parsed, &mut pe.mapped)
                 .map_err(|error| anyhow::anyhow!("Failed to initialize static TLS: {error}"))?;
 
-            // Execute
+            // PE32 has a separate WoW64 execution contract. Never cast an x86
+            // entry point to the host x64 ABI: doing so corrupts the host
+            // stack/register state and turns an unsupported path into a
+            // process crash.
+            if pe.parsed.machine == Machine::X86 {
+                return tuxexe_rs::wow64::entry::execute_pe32_entry(
+                    &pe.parsed,
+                    pe.mapped.base_addr(),
+                )
+                .map_err(|error| anyhow::anyhow!(error));
+            }
+
+            invoke_tls_callbacks_for(&pe.parsed, &pe.mapped, DLL_PROCESS_ATTACH).map_err(
+                |error| anyhow::anyhow!("Failed to invoke main-image TLS callbacks: {error}"),
+            )?;
+
+            // Execute PE64.
             let entry_point_rva = pe.parsed.entry_point_rva as usize;
             if entry_point_rva == 0 {
                 anyhow::bail!("PE has no entry point or it's statically linked as a DLL.");
@@ -133,17 +179,15 @@ fn main() -> Result<()> {
             let entry_point_addr = pe.mapped.base_addr() + entry_point_rva;
             info!(va = format_args!("0x{:x}", entry_point_addr), "Jumping to entry point");
 
-            tuxexe_rs::threading::teb::setup_teb(pe.mapped.base_addr())
-                .map_err(|e| anyhow::anyhow!("Failed to setup TEB: {}", e))?;
-
-            invoke_process_attach_callbacks();
-
-            unsafe {
-                let entry_fn: extern "win64" fn() = std::mem::transmute(entry_point_addr);
-                entry_fn();
-            }
+            tuxexe_rs::runtime::guest_stack::invoke(entry_point_addr)
+                .map_err(|error| anyhow::anyhow!("Failed to execute PE64 entry: {error}"))?;
 
             info!("Execution finished successfully");
+            Ok(())
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to spawn runner thread: {e}"))?
+        .join()
+        .map_err(|_| anyhow::anyhow!("Runner thread panicked"))??;
             Ok(())
         }
 
@@ -211,7 +255,7 @@ fn run_compat_audit(path: &std::path::Path) -> Result<()> {
     let delay_imports = enumerate_delay_imports(&pe.parsed, &pe.mapped)
         .with_context(|| "Failed to enumerate delay imports")?;
 
-    let mut by_dll: BTreeMap<String, BTreeMap<String, bool>> = BTreeMap::new();
+    let mut by_dll: BTreeMap<String, BTreeMap<String, ExportStatus>> = BTreeMap::new();
 
     let mut ingest = |dll: &str, import: &ImportKind| {
         let symbol = match import {
@@ -219,13 +263,17 @@ fn run_compat_audit(path: &std::path::Path) -> Result<()> {
             ImportKind::ByOrdinal(ord) => format!("#{ord}"),
         };
 
-        let implemented = resolve_reimplemented_export(dll, &symbol) != 0;
+        let status = resolve_export_status(dll, &symbol);
         by_dll
             .entry(dll.to_ascii_lowercase())
             .or_default()
             .entry(symbol)
-            .and_modify(|existing| *existing = *existing || implemented)
-            .or_insert(implemented);
+            .and_modify(|existing| {
+                if *existing == ExportStatus::Unsupported {
+                    *existing = status;
+                }
+            })
+            .or_insert(status);
     };
 
     for entry in &pe.imports.entries {
@@ -239,18 +287,25 @@ fn run_compat_audit(path: &std::path::Path) -> Result<()> {
     let mut total = 0usize;
     for symbols in by_dll.values() {
         total += symbols.len();
-        implemented_total += symbols.values().filter(|ok| **ok).count();
+        implemented_total +=
+            symbols.values().filter(|status| **status == ExportStatus::Implemented).count();
     }
-    let missing_total = total.saturating_sub(implemented_total);
-    let percent = if total == 0 {
-        100.0
-    } else {
-        (implemented_total as f64 / total as f64) * 100.0
-    };
+    let stub_total = by_dll
+        .values()
+        .flat_map(|symbols| symbols.values())
+        .filter(|status| **status == ExportStatus::CompatibilityStub)
+        .count();
+    let unsupported_total = by_dll
+        .values()
+        .flat_map(|symbols| symbols.values())
+        .filter(|status| **status == ExportStatus::Unsupported)
+        .count();
+    let percent =
+        if total == 0 { 100.0 } else { (implemented_total as f64 / total as f64) * 100.0 };
 
     println!("Compatibility Audit: {}", path.display());
     println!(
-        "Summary: implemented {implemented_total}/{total} ({percent:.1}%), missing {missing_total}"
+        "Summary: implemented {implemented_total}/{total} ({percent:.1}%), compatibility stubs {stub_total}, unsupported {unsupported_total}"
     );
     println!(
         "(normal imports: {}, delay imports: {})",
@@ -260,15 +315,20 @@ fn run_compat_audit(path: &std::path::Path) -> Result<()> {
     println!("By DLL:");
 
     for (dll, symbols) in &by_dll {
-        let dll_total = symbols.len();
-        let dll_impl = symbols.values().filter(|ok| **ok).count();
-        let dll_missing = dll_total.saturating_sub(dll_impl);
-        println!("  {dll}: {dll_impl}/{dll_total} implemented, {dll_missing} missing");
+        let dll_impl =
+            symbols.values().filter(|status| **status == ExportStatus::Implemented).count();
+        let dll_stubs =
+            symbols.values().filter(|status| **status == ExportStatus::CompatibilityStub).count();
+        let dll_missing =
+            symbols.values().filter(|status| **status == ExportStatus::Unsupported).count();
+        println!("  {dll}: {dll_impl} implemented, {dll_stubs} compatibility stubs, {dll_missing} unsupported");
 
         if dll_missing > 0 {
             let missing = symbols
                 .iter()
-                .filter_map(|(name, ok)| (!*ok).then_some(name.as_str()))
+                .filter_map(|(name, status)| {
+                    (*status == ExportStatus::Unsupported).then_some(name.as_str())
+                })
                 .take(12)
                 .collect::<Vec<_>>();
             println!("    missing(sample): {}", missing.join(", "));
@@ -277,7 +337,7 @@ fn run_compat_audit(path: &std::path::Path) -> Result<()> {
 
     let missing_dlls = by_dll
         .iter()
-        .filter(|(_, symbols)| symbols.values().any(|ok| !ok))
+        .filter(|(_, symbols)| symbols.values().any(|status| *status == ExportStatus::Unsupported))
         .map(|(dll, _)| dll.clone())
         .collect::<BTreeSet<_>>();
 

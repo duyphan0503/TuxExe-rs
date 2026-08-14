@@ -14,6 +14,11 @@ use tracing::{trace, warn};
 use crate::nt_kernel::sync as nt_sync;
 use crate::utils::handle::{global_table, init_global_table, Handle, INVALID_HANDLE_VALUE};
 
+unsafe extern "C" {
+    #[link_name = "inet_pton"]
+    fn host_inet_pton(af: c_int, src: *const c_char, dst: *mut c_void) -> c_int;
+}
+
 const INVALID_SOCKET: usize = usize::MAX;
 const SOCKET_ERROR: i32 = -1;
 const OVERLAPPED_WAIT_TIMEOUT_MS: i32 = 30_000;
@@ -62,6 +67,7 @@ const WSAECONNREFUSED: i32 = 10061;
 const WSAEHOSTUNREACH: i32 = 10065;
 const WSAEPROVIDERFAILEDINIT: i32 = 10106;
 const WSAEOPNOTSUPP: i32 = 10045;
+const WINDOWS_AF_INET6: i32 = 23;
 
 #[repr(C)]
 pub struct WsaData {
@@ -504,6 +510,35 @@ pub extern "win64" fn socket(af: i32, kind: i32, protocol: i32) -> usize {
         set_wsa_last_error(0);
         fd as usize
     }
+}
+
+/// Windows uses AF_INET6 = 23 whereas Linux uses AF_INET6 = 10. Translate
+/// the family and delegate parsing to libc so native dependencies such as
+/// Mono can resolve numeric IPv4/IPv6 endpoints during startup.
+pub extern "win64" fn inet_pton(af: i32, src: *const c_char, dst: *mut c_void) -> i32 {
+    if src.is_null() || dst.is_null() {
+        set_wsa_last_error(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    let native_af = match af {
+        x if x == libc::AF_INET => libc::AF_INET,
+        WINDOWS_AF_INET6 => libc::AF_INET6,
+        _ => {
+            set_wsa_last_error(WSAEAFNOSUPPORT);
+            return SOCKET_ERROR;
+        }
+    };
+
+    let result = unsafe { host_inet_pton(native_af, src, dst) };
+    if result < 0 {
+        set_wsa_error_from_errno();
+    } else if result == 0 {
+        set_wsa_last_error(WSAEINVAL);
+    } else {
+        set_wsa_last_error(0);
+    }
+    result
 }
 
 pub extern "win64" fn closesocket(s: usize) -> i32 {
@@ -1302,7 +1337,15 @@ wsa_ordinal_alias!(ordinal_115);
 wsa_ordinal_alias!(ordinal_116);
 wsa_ordinal_alias!(ordinal_151);
 
-pub extern "win64" fn WSAConnect(_s: usize, _name: *const libc::sockaddr, _namelen: i32, _lpCallerData: *const c_void, _lpCalleeData: *mut c_void, _lpSQOS: *const c_void, _lpGQOS: *const c_void) -> i32 {
+pub extern "win64" fn WSAConnect(
+    _s: usize,
+    _name: *const libc::sockaddr,
+    _namelen: i32,
+    _lpCallerData: *const c_void,
+    _lpCalleeData: *mut c_void,
+    _lpSQOS: *const c_void,
+    _lpGQOS: *const c_void,
+) -> i32 {
     set_wsa_last_error(0);
     0
 }
@@ -1312,41 +1355,61 @@ pub extern "win64" fn WSARecvDisconnect(_s: usize, _lpOutboundDisconnectData: *m
     0
 }
 
-pub extern "win64" fn WSADuplicateSocketW(_s: usize, _dwProcessId: u32, _lpProtocolInfo: *mut c_void) -> i32 {
+pub extern "win64" fn WSADuplicateSocketW(
+    _s: usize,
+    _dwProcessId: u32,
+    _lpProtocolInfo: *mut c_void,
+) -> i32 {
     set_wsa_last_error(WSAEPROVIDERFAILEDINIT);
     SOCKET_ERROR
 }
 
 pub extern "win64" fn WSASocketW(
-    _af: i32, _type: i32, _protocol: i32,
-    _lpProtocolInfo: *const c_void, _g: u32, _dwFlags: u32,
+    _af: i32,
+    _type: i32,
+    _protocol: i32,
+    _lpProtocolInfo: *const c_void,
+    _g: u32,
+    _dwFlags: u32,
 ) -> usize {
     set_wsa_last_error(WSAEAFNOSUPPORT);
     INVALID_SOCKET
 }
 
 pub extern "win64" fn WSASocketA(
-    _af: i32, _type: i32, _protocol: i32,
-    _lpProtocolInfo: *const c_void, _g: u32, _dwFlags: u32,
+    _af: i32,
+    _type: i32,
+    _protocol: i32,
+    _lpProtocolInfo: *const c_void,
+    _g: u32,
+    _dwFlags: u32,
 ) -> usize {
     set_wsa_last_error(WSAEAFNOSUPPORT);
     INVALID_SOCKET
 }
 
 pub extern "win64" fn WSARecvFrom(
-    _s: usize, _lpBuffers: *mut WsaBuf, _dwBufferCount: u32,
-    _lpNumberOfBytesRecvd: *mut u32, _lpFlags: *mut u32,
-    _lpFrom: *mut c_void, _lpFromLen: *mut u32,
-    _lpOverlapped: *mut WsaOverlapped, _lpCompletionRoutine: Option<WsaOverlappedCompletionRoutine>,
+    _s: usize,
+    _lpBuffers: *mut WsaBuf,
+    _dwBufferCount: u32,
+    _lpNumberOfBytesRecvd: *mut u32,
+    _lpFlags: *mut u32,
+    _lpFrom: *mut c_void,
+    _lpFromLen: *mut u32,
+    _lpOverlapped: *mut WsaOverlapped,
+    _lpCompletionRoutine: Option<WsaOverlappedCompletionRoutine>,
 ) -> i32 {
     set_wsa_last_error(WSAEOPNOTSUPP);
     SOCKET_ERROR
 }
 
 pub extern "win64" fn getnameinfo(
-    _sa: *const libc::sockaddr, _salen: libc::socklen_t,
-    _host: *mut c_char, _hostlen: libc::socklen_t,
-    _serv: *mut c_char, _servlen: libc::socklen_t,
+    _sa: *const libc::sockaddr,
+    _salen: libc::socklen_t,
+    _host: *mut c_char,
+    _hostlen: libc::socklen_t,
+    _serv: *mut c_char,
+    _servlen: libc::socklen_t,
     _flags: i32,
 ) -> i32 {
     set_wsa_last_error(WSANO_DATA);
@@ -1354,7 +1417,9 @@ pub extern "win64" fn getnameinfo(
 }
 
 pub extern "win64" fn WSAEnumNetworkEvents(
-    _s: usize, _hEventObject: Handle, _lpNetworkEvents: *mut c_void,
+    _s: usize,
+    _hEventObject: Handle,
+    _lpNetworkEvents: *mut c_void,
 ) -> i32 {
     set_wsa_last_error(WSAEINVAL);
     SOCKET_ERROR
@@ -1366,21 +1431,33 @@ pub extern "win64" fn WSASendDisconnect(_s: usize, _lpOutboundDisconnectData: *m
 }
 
 pub extern "win64" fn WSAIoctl(
-    _s: usize, _dwIoControlCode: u32, _lpvInBuffer: *const c_void, _cbInBuffer: u32,
-    _lpvOutBuffer: *mut c_void, _cbOutBuffer: u32, _lpcbBytesReturned: *mut u32,
-    _lpOverlapped: *mut WsaOverlapped, _lpCompletionRoutine: Option<WsaOverlappedCompletionRoutine>,
+    _s: usize,
+    dwIoControlCode: u32,
+    _lpvInBuffer: *const c_void,
+    _cbInBuffer: u32,
+    _lpvOutBuffer: *mut c_void,
+    _cbOutBuffer: u32,
+    lpcbBytesReturned: *mut u32,
+    _lpOverlapped: *mut WsaOverlapped,
+    _lpCompletionRoutine: Option<WsaOverlappedCompletionRoutine>,
 ) -> i32 {
-    set_wsa_last_error(WSAEOPNOTSUPP);
-    SOCKET_ERROR
+    tracing::info!(dwIoControlCode = format_args!("0x{dwIoControlCode:x}"), "WSAIoctl called");
+    if !lpcbBytesReturned.is_null() {
+        unsafe {
+            *lpcbBytesReturned = 0;
+        }
+    }
+    set_wsa_last_error(0);
+    0
 }
 
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
 
-    exports.insert("#1", ordinal_1 as usize);
-    exports.insert("#2", ordinal_2 as usize);
-    exports.insert("#3", ordinal_3 as usize);
-    exports.insert("#4", ordinal_4 as usize);
+    exports.insert("#1", accept as usize);
+    exports.insert("#2", bind as usize);
+    exports.insert("#3", closesocket as usize);
+    exports.insert("#4", connect as usize);
     exports.insert("#5", ordinal_5 as usize);
     exports.insert("#6", ordinal_6 as usize);
     exports.insert("#7", ordinal_7 as usize);
@@ -1390,15 +1467,15 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("#11", ordinal_11 as usize);
     exports.insert("#13", ordinal_13 as usize);
     exports.insert("#14", ordinal_14 as usize);
-    exports.insert("#15", ordinal_15 as usize);
+    exports.insert("#15", recv as usize);
     exports.insert("#16", ordinal_16 as usize);
-    exports.insert("#17", ordinal_17 as usize);
-    exports.insert("#18", ordinal_18 as usize);
+    exports.insert("#17", select as usize);
+    exports.insert("#18", send as usize);
     exports.insert("#19", ordinal_19 as usize);
     exports.insert("#20", ordinal_20 as usize);
     exports.insert("#21", ordinal_21 as usize);
-    exports.insert("#22", ordinal_22 as usize);
-    exports.insert("#23", ordinal_23 as usize);
+    exports.insert("#22", socket as usize);
+    exports.insert("#23", WSASocketW as usize);
     exports.insert("#51", ordinal_51 as usize);
     exports.insert("#52", ordinal_52 as usize);
     exports.insert("#53", ordinal_53 as usize);
@@ -1407,8 +1484,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("#108", ordinal_108 as usize);
     exports.insert("#111", ordinal_111 as usize);
     exports.insert("#112", ordinal_112 as usize);
-    exports.insert("#115", ordinal_115 as usize);
-    exports.insert("#116", ordinal_116 as usize);
+    exports.insert("#115", WSAStartup as usize);
+    exports.insert("#116", WSACleanup as usize);
     exports.insert("#151", ordinal_151 as usize);
 
     exports.insert("WSAStartup", WSAStartup as usize);
@@ -1425,6 +1502,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("WSARecv", WSARecv as usize);
     exports.insert("WSAGetOverlappedResult", WSAGetOverlappedResult as usize);
     exports.insert("socket", socket as usize);
+    exports.insert("inet_pton", inet_pton as usize);
     exports.insert("closesocket", closesocket as usize);
     exports.insert("connect", connect as usize);
     exports.insert("bind", bind as usize);
@@ -1529,6 +1607,20 @@ mod tests {
         } else {
             assert_eq!(closesocket(s), 0);
         }
+    }
+
+    #[test]
+    fn inet_pton_parses_ipv4_and_windows_ipv6_families() {
+        let _guard = crate::test_support::serial_guard();
+        let ipv4 = CStr::from_bytes_with_nul(b"127.0.0.1\0").expect("IPv4 C string");
+        let mut ipv4_out = [0u8; 4];
+        assert_eq!(inet_pton(libc::AF_INET, ipv4.as_ptr(), ipv4_out.as_mut_ptr().cast()), 1);
+        assert_eq!(ipv4_out, [127, 0, 0, 1]);
+
+        let ipv6 = CStr::from_bytes_with_nul(b"::1\0").expect("IPv6 C string");
+        let mut ipv6_out = [0u8; 16];
+        assert_eq!(inet_pton(WINDOWS_AF_INET6, ipv6.as_ptr(), ipv6_out.as_mut_ptr().cast()), 1);
+        assert_eq!(ipv6_out[15], 1);
     }
 
     #[test]

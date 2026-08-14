@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use tracing::trace;
 
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
+
 extern "win64" fn ShellExecuteW(
     _hwnd: usize,
     _lpOperation: *const u16,
@@ -18,25 +20,158 @@ extern "win64" fn ShellExecuteW(
     32 // SE_ERR_DLLNOTFOUND placeholder
 }
 
+#[repr(C)]
+struct ShellExecuteInfoW {
+    cb_size: u32,
+    f_mask: u32,
+    hwnd: usize,
+    lp_verb: *const u16,
+    lp_file: *const u16,
+    lp_parameters: *const u16,
+    lp_directory: *const u16,
+    n_show: i32,
+    h_inst_app: usize,
+    lp_id_list: *mut u8,
+    lp_class: *const u16,
+    hkey_class: usize,
+    dw_hot_key: u32,
+    h_icon_or_monitor: usize,
+    h_process: usize,
+}
+
+/// Native-only policy deliberately does not delegate shell verbs to host
+/// applications. Report the standard unsupported-operation failure instead
+/// of spawning Wine, xdg-open, or an arbitrary process.
+extern "win64" fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32 {
+    if info.is_null()
+        || unsafe { (*info).cb_size } < std::mem::size_of::<ShellExecuteInfoW>() as u32
+    {
+        crate::win32::kernel32::error::set_last_error(87);
+        return 0;
+    }
+    unsafe {
+        (*info).h_process = 0;
+        (*info).h_inst_app = 0;
+    }
+    crate::win32::kernel32::error::set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
+    0
+}
+
+fn csidl_to_win_path(csidl: i32) -> &'static str {
+    match csidl & 0xFF {
+        0x001a => r"C:\users\User\AppData\Roaming", // CSIDL_APPDATA
+        0x001c => r"C:\users\User\AppData\Local",   // CSIDL_LOCAL_APPDATA
+        0x0023 => r"C:\ProgramData",                // CSIDL_COMMON_APPDATA
+        0x0005 => r"C:\users\User\Documents",      // CSIDL_MYDOCUMENTS / CSIDL_PERSONAL
+        0x0028 => r"C:\users\User",                // CSIDL_PROFILE
+        0x0024 => r"C:\Windows",                   // CSIDL_WINDOWS
+        0x0025 => r"C:\Windows\System32",          // CSIDL_SYSTEM
+        0x0026 => r"C:\Program Files",             // CSIDL_PROGRAM_FILES
+        _ => r"C:\users\User\AppData\LocalLow",
+    }
+}
+
+fn ensure_host_dir_for_csidl(csidl: i32) {
+    if let Ok(home) = std::env::var("HOME") {
+        let sub = match csidl & 0xFF {
+            0x001a => ".tuxexe/drive_c/users/User/AppData/Roaming",
+            0x001c => ".tuxexe/drive_c/users/User/AppData/Local",
+            0x0023 => ".tuxexe/drive_c/ProgramData",
+            0x0005 => ".tuxexe/drive_c/users/User/Documents",
+            0x0028 => ".tuxexe/drive_c/users/User",
+            0x0024 => ".tuxexe/drive_c/Windows",
+            0x0025 => ".tuxexe/drive_c/Windows/System32",
+            0x0026 => ".tuxexe/drive_c/Program Files",
+            _ => ".tuxexe/drive_c/users/User/AppData/LocalLow",
+        };
+        let _ = std::fs::create_dir_all(format!("{home}/{sub}"));
+    }
+}
+
 extern "win64" fn SHGetFolderPathW(
     _hwnd: usize,
-    _csidl: i32,
+    csidl: i32,
     _hToken: usize,
     _dwFlags: u32,
-    _pszPath: *mut u16,
+    pszPath: *mut u16,
 ) -> i32 {
-    trace!("SHGetFolderPathW — stub");
-    -2147467263 // E_NOTIMPL
+    trace!("SHGetFolderPathW csidl={} — implementing", csidl);
+    if pszPath.is_null() {
+        return -2147024809; // E_INVALIDARG
+    }
+    ensure_host_dir_for_csidl(csidl);
+    let path_str = csidl_to_win_path(csidl);
+    let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), pszPath, wide.len());
+    }
+    0 // S_OK
+}
+
+extern "win64" fn SHGetFolderPathA(
+    _hwnd: usize,
+    csidl: i32,
+    _hToken: usize,
+    _dwFlags: u32,
+    pszPath: *mut std::ffi::c_char,
+) -> i32 {
+    trace!("SHGetFolderPathA csidl={} — implementing", csidl);
+    if pszPath.is_null() {
+        return -2147024809; // E_INVALIDARG
+    }
+    ensure_host_dir_for_csidl(csidl);
+    let path_str = csidl_to_win_path(csidl);
+    let bytes: Vec<u8> = path_str.bytes().chain(std::iter::once(0)).collect();
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const std::ffi::c_char, pszPath, bytes.len());
+    }
+    0 // S_OK
+}
+
+extern "win64" fn SHGetSpecialFolderPathW(
+    hwnd: usize,
+    pszPath: *mut u16,
+    csidl: i32,
+    fCreate: i32,
+) -> i32 {
+    let _ = fCreate;
+    let res = SHGetFolderPathW(hwnd, csidl, 0, 0, pszPath);
+    if res == 0 { 1 } else { 0 }
+}
+
+extern "win64" fn SHGetSpecialFolderPathA(
+    hwnd: usize,
+    pszPath: *mut std::ffi::c_char,
+    csidl: i32,
+    fCreate: i32,
+) -> i32 {
+    let _ = fCreate;
+    let res = SHGetFolderPathA(hwnd, csidl, 0, 0, pszPath);
+    if res == 0 { 1 } else { 0 }
 }
 
 extern "win64" fn SHGetKnownFolderPath(
     _rfid: *const u8,
     _dwFlags: u32,
     _hToken: usize,
-    _ppszPath: *mut *mut u16,
+    ppszPath: *mut *mut u16,
 ) -> i32 {
-    trace!("SHGetKnownFolderPath — stub");
-    -2147467263
+    trace!("SHGetKnownFolderPath — implementing");
+    if ppszPath.is_null() {
+        return -2147024809; // E_INVALIDARG
+    }
+    ensure_host_dir_for_csidl(0);
+    let path_str = r"C:\users\User\AppData\LocalLow";
+    let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+    let ptr = unsafe { libc::malloc(wide.len() * 2) as *mut u16 };
+    if ptr.is_null() {
+        return -2147024882; // E_OUTOFMEMORY
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+        *ppszPath = ptr;
+    }
+    0 // S_OK
 }
 
 extern "win64" fn CommandLineToArgvW(lpCmdLine: *const u16, pNumArgs: *mut i32) -> *mut *mut u16 {
@@ -169,7 +304,11 @@ extern "win64" fn SHFileOperationW(lpFileOp: *const SHFILEOPSTRUCTW) -> i32 {
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
     exports.insert("ShellExecuteW", ShellExecuteW as usize);
+    exports.insert("ShellExecuteExW", ShellExecuteExW as usize);
     exports.insert("SHGetFolderPathW", SHGetFolderPathW as usize);
+    exports.insert("SHGetFolderPathA", SHGetFolderPathA as usize);
+    exports.insert("SHGetSpecialFolderPathW", SHGetSpecialFolderPathW as usize);
+    exports.insert("SHGetSpecialFolderPathA", SHGetSpecialFolderPathA as usize);
     exports.insert("SHGetKnownFolderPath", SHGetKnownFolderPath as usize);
     exports.insert("CommandLineToArgvW", CommandLineToArgvW as usize);
     exports.insert("SHBrowseForFolderW", SHBrowseForFolderW as usize);

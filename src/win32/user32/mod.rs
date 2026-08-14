@@ -32,6 +32,42 @@ pub struct Msg {
 
 pub type WindowProc = unsafe extern "win64" fn(usize, u32, usize, isize) -> isize;
 
+const S_OK: i32 = 0;
+const DEFAULT_DPI: u32 = 96;
+
+/// Wine's `shcore.dll` resolves this undocumented USER32 entry dynamically
+/// when implementing `GetDpiForMonitor`.  Returning no export leaves its
+/// cached callback NULL and causes an indirect call to address zero during
+/// Unity window creation.
+pub extern "win64" fn GetDpiForMonitorInternal(
+    _monitor: usize,
+    _dpi_type: u32,
+    dpi_x: *mut u32,
+    dpi_y: *mut u32,
+) -> i32 {
+    unsafe {
+        if !dpi_x.is_null() {
+            *dpi_x = DEFAULT_DPI;
+        }
+        if !dpi_y.is_null() {
+            *dpi_y = DEFAULT_DPI;
+        }
+    }
+    S_OK
+}
+
+/// Companion internal entry resolved by Wine `shcore.dll` for process DPI
+/// awareness. TuxExe currently exposes one system-DPI-aware virtual display.
+pub extern "win64" fn SetProcessDpiAwarenessInternal(_awareness: u32) -> i32 {
+    S_OK
+}
+
+/// The runtime's message queue is initialized before guest entry. For the
+/// in-process/headless target this is immediately idle, matching WAIT_OBJECT_0.
+pub extern "win64" fn WaitForInputIdle(_process: usize, _milliseconds: u32) -> u32 {
+    0
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct WndClassA {
@@ -79,13 +115,21 @@ pub(crate) struct WindowRecord {
     pub native_window_id: u64,
     /// Win32 HWND of the parent window, 0 = top-level / no parent.
     pub parent_hwnd: usize,
+    pub creator_thread_id: u32,
 }
 
 pub const WM_CREATE: u32 = 0x0001;
 pub const WM_DESTROY: u32 = 0x0002;
-pub const WM_SHOWWINDOW: u32 = 0x0018;
-pub const WM_QUIT: u32 = 0x0012;
+pub const WM_ACTIVATE: u32 = 0x0006;
+pub const WM_SETFOCUS: u32 = 0x0007;
+pub const WM_KILLFOCUS: u32 = 0x0008;
 pub const WM_PAINT: u32 = 0x000F;
+pub const WM_QUIT: u32 = 0x0012;
+pub const WM_ERASEBKGND: u32 = 0x0014;
+pub const WM_SHOWWINDOW: u32 = 0x0018;
+pub const WM_ACTIVATEAPP: u32 = 0x001C;
+pub const WM_SETCURSOR: u32 = 0x0020;
+pub const WM_NCHITTEST: u32 = 0x0084;
 pub const WM_KEYDOWN: u32 = 0x0100;
 pub const WM_KEYUP: u32 = 0x0101;
 pub const WM_CHAR: u32 = 0x0102;
@@ -97,12 +141,18 @@ pub const WM_RBUTTONUP: u32 = 0x0205;
 pub const WM_MBUTTONDOWN: u32 = 0x0207;
 pub const WM_MBUTTONUP: u32 = 0x0208;
 
+pub const WA_INACTIVE: usize = 0;
+pub const WA_ACTIVE: usize = 1;
+pub const WA_CLICKACTIVE: usize = 2;
+
+pub const HTCLIENT: isize = 1;
+
 fn class_registry() -> &'static RwLock<HashMap<String, RegisteredClass>> {
     static REGISTRY: OnceLock<RwLock<HashMap<String, RegisteredClass>>> = OnceLock::new();
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn window_registry() -> &'static RwLock<HashMap<usize, WindowRecord>> {
+pub(crate) fn window_registry() -> &'static RwLock<HashMap<usize, WindowRecord>> {
     static WINDOWS: OnceLock<RwLock<HashMap<usize, WindowRecord>>> = OnceLock::new();
     WINDOWS.get_or_init(|| RwLock::new(HashMap::new()))
 }
@@ -117,9 +167,10 @@ fn next_atom() -> u16 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+static NEXT_WINDOW_HANDLE: AtomicUsize = AtomicUsize::new(0x10_000);
+
 fn next_hwnd() -> usize {
-    static NEXT: AtomicUsize = AtomicUsize::new(0x10_000);
-    NEXT.fetch_add(1, Ordering::Relaxed)
+    NEXT_WINDOW_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
 
 pub(crate) fn register_class(name: &str, wnd_proc: Option<WindowProc>) -> u16 {
@@ -158,6 +209,41 @@ pub(crate) fn create_window_with_parent(
     parent_hwnd: usize,
 ) -> usize {
     let hwnd = next_hwnd();
+    create_window_with_parent_and_handle(
+        hwnd,
+        wnd_proc,
+        _title,
+        x,
+        y,
+        width,
+        height,
+        parent_hwnd,
+        0,
+    );
+    hwnd
+}
+
+/// Registers a Win32 window using a handle allocated by a native backend.
+///
+/// The X11 backend allocates the HWND it returns to the guest.  Keeping that
+/// exact value in the USER32 registry is essential: subsequent Win32 calls
+/// such as GetDC and ShowWindow use the guest HWND, rather than the X11 ID.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_window_with_parent_and_handle(
+    hwnd: usize,
+    wnd_proc: Option<WindowProc>,
+    _title: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    parent_hwnd: usize,
+    native_window_id: u64,
+) {
+    // The native X11 and USER32 handle generators are independent. Advance
+    // USER32's allocator so a later fallback window cannot overwrite this
+    // native-window record.
+    NEXT_WINDOW_HANDLE.fetch_max(hwnd.saturating_add(1), Ordering::Relaxed);
     let record = WindowRecord {
         wnd_proc,
         x,
@@ -165,16 +251,77 @@ pub(crate) fn create_window_with_parent(
         width,
         height,
         visible: false,
-        native_window_id: 0,
+        native_window_id,
         parent_hwnd,
+        creator_thread_id: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
     };
 
     window_registry().write().expect("window registry poisoned").insert(hwnd, record);
-    hwnd
+}
+
+pub extern "win64" fn GetWindowThreadProcessId(hwnd: usize, process_id: *mut u32) -> u32 {
+    let window = window_registry().read().expect("window registry poisoned");
+    let Some(record) = window.get(&hwnd) else {
+        if !process_id.is_null() {
+            unsafe { *process_id = 0 };
+        }
+        return 0;
+    };
+    if !process_id.is_null() {
+        unsafe { *process_id = std::process::id() };
+    }
+    record.creator_thread_id
 }
 
 pub(crate) fn window_parent(hwnd: usize) -> Option<usize> {
     window_registry().read().expect("window registry poisoned").get(&hwnd).map(|w| w.parent_hwnd)
+}
+
+pub extern "win64" fn GetWindow(hwnd: usize, command: u32) -> usize {
+    const GW_HWNDFIRST: u32 = 0;
+    const GW_HWNDLAST: u32 = 1;
+    const GW_HWNDNEXT: u32 = 2;
+    const GW_HWNDPREV: u32 = 3;
+    const GW_OWNER: u32 = 4;
+    const GW_CHILD: u32 = 5;
+
+    let windows = window_registry().read().expect("window registry poisoned");
+    let Some(record) = windows.get(&hwnd) else {
+        return 0;
+    };
+    if command == GW_OWNER {
+        return record.parent_hwnd;
+    }
+    if command == GW_CHILD {
+        return windows
+            .iter()
+            .filter(|(_, candidate)| candidate.parent_hwnd == hwnd)
+            .map(|(handle, _)| *handle)
+            .min()
+            .unwrap_or(0);
+    }
+    let mut siblings: Vec<usize> = windows
+        .iter()
+        .filter(|(_, candidate)| candidate.parent_hwnd == record.parent_hwnd)
+        .map(|(handle, _)| *handle)
+        .collect();
+    siblings.sort_unstable();
+    match command {
+        GW_HWNDFIRST => siblings.first().copied().unwrap_or(0),
+        GW_HWNDLAST => siblings.last().copied().unwrap_or(0),
+        GW_HWNDNEXT | GW_HWNDPREV => siblings
+            .iter()
+            .position(|handle| *handle == hwnd)
+            .and_then(|index| {
+                if command == GW_HWNDNEXT {
+                    siblings.get(index + 1).copied()
+                } else {
+                    index.checked_sub(1).and_then(|index| siblings.get(index).copied())
+                }
+            })
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 pub(crate) fn window_rect(hwnd: usize) -> Option<(i32, i32, i32, i32)> {
@@ -246,8 +393,14 @@ pub(crate) fn ensure_native_window_id(hwnd: usize) -> Option<u64> {
     let window = windows.get_mut(&hwnd)?;
 
     if window.native_window_id == 0 {
-        // Keep IDs deterministic to simplify test assertions and event replay.
-        window.native_window_id = 0x20_0000_u64 + hwnd as u64;
+        if let Some(x11_win) = crate::platform::x11::hwnd_to_x11_window(hwnd)
+            .or_else(crate::platform::x11::get_first_x11_window)
+        {
+            window.native_window_id = x11_win;
+        } else {
+            // Keep IDs deterministic to simplify test assertions and event replay.
+            window.native_window_id = 0x20_0000_u64 + hwnd as u64;
+        }
     }
 
     Some(window.native_window_id)
@@ -297,6 +450,15 @@ pub(crate) fn now_ms() -> u32 {
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
 
+    exports.insert("WaitForInputIdle", WaitForInputIdle as usize);
+    exports.insert("GetDpiForMonitorInternal", GetDpiForMonitorInternal as usize);
+    exports.insert(
+        "SetProcessDpiAwarenessInternal",
+        SetProcessDpiAwarenessInternal as usize,
+    );
+    exports.insert("GetWindow", GetWindow as usize);
+    exports.insert("GetWindowThreadProcessId", GetWindowThreadProcessId as usize);
+
     exports.insert("RegisterClassA", window::RegisterClassA as usize);
     exports.insert("RegisterClassW", window::RegisterClassW as usize);
     exports.insert("RegisterClassExA", window::RegisterClassExA as usize);
@@ -319,6 +481,12 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetWindowPlacement", window::SetWindowPlacement as usize);
     exports.insert("AdjustWindowRect", window::AdjustWindowRect as usize);
     exports.insert("AdjustWindowRectEx", window::AdjustWindowRectEx as usize);
+    exports.insert(
+        "AdjustWindowRectExForDpi",
+        window::AdjustWindowRectExForDpi as usize,
+    );
+    exports.insert("EnableNonClientDpiScaling", window::EnableNonClientDpiScaling as usize);
+    exports.insert("GetDpiForWindow", window::GetDpiForWindow as usize);
     exports.insert("SetWindowLongA", window::SetWindowLongA as usize);
     exports.insert("SetWindowLongW", window::SetWindowLongW as usize);
     exports.insert("GetWindowLongA", window::GetWindowLongA as usize);
@@ -362,6 +530,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetUserObjectInformationW", window::GetUserObjectInformationW as usize);
     exports.insert("SystemParametersInfoA", window::SystemParametersInfoA as usize);
     exports.insert("SystemParametersInfoW", window::SystemParametersInfoW as usize);
+    exports.insert(
+        "SystemParametersInfoForDpi",
+        window::SystemParametersInfoForDpi as usize,
+    );
     exports.insert("PtInRect", window::PtInRect as usize);
     exports.insert("OffsetRect", window::OffsetRect as usize);
     exports.insert("CopyRect", window::CopyRect as usize);
@@ -370,6 +542,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetCursorPos", window::GetCursorPos as usize);
     exports.insert("SetCursorPos", window::SetCursorPos as usize);
     exports.insert("GetSystemMetrics", window::GetSystemMetrics as usize);
+    exports.insert("GetSystemMetricsForDpi", window::GetSystemMetricsForDpi as usize);
     exports.insert("SetCapture", window::SetCapture as usize);
     exports.insert("GetCapture", window::GetCapture as usize);
     exports.insert("ReleaseCapture", window::ReleaseCapture as usize);
@@ -383,6 +556,12 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetMonitorInfoW", window::GetMonitorInfoW as usize);
     exports.insert("MonitorFromRect", window::MonitorFromRect as usize);
     exports.insert("MonitorFromWindow", window::MonitorFromWindow as usize);
+    exports.insert("MonitorFromPoint", window::MonitorFromPoint as usize);
+    exports.insert("SetRect", window::SetRect as usize);
+    exports.insert("ChangeDisplaySettingsA", window::ChangeDisplaySettingsA as usize);
+    exports.insert("ChangeDisplaySettingsW", window::ChangeDisplaySettingsW as usize);
+    exports.insert("ChangeDisplaySettingsExA", window::ChangeDisplaySettingsExA as usize);
+    exports.insert("ChangeDisplaySettingsExW", window::ChangeDisplaySettingsExW as usize);
     exports.insert("DefWindowProcA", window::DefWindowProcA as usize);
     exports.insert("DefWindowProcW", window::DefWindowProcW as usize);
     exports.insert("GetParent", window::GetParent as usize);
@@ -397,6 +576,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetFocus", window::GetFocus as usize);
     exports.insert("SetFocus", window::SetFocus as usize);
     exports.insert("GetActiveWindow", window::GetActiveWindow as usize);
+    exports.insert("SetActiveWindow", window::SetActiveWindow as usize);
     exports.insert("IsIconic", window::IsIconic as usize);
     exports.insert("IsWindowVisible", window::IsWindowVisible as usize);
     exports.insert("UnregisterClassA", window::UnregisterClassA as usize);
@@ -404,6 +584,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("KillTimer", window::KillTimer as usize);
     exports.insert("SetTimer", window::SetTimer as usize);
     exports.insert("MsgWaitForMultipleObjects", window::MsgWaitForMultipleObjects as usize);
+    exports.insert("MsgWaitForMultipleObjectsEx", window::MsgWaitForMultipleObjectsEx as usize);
     exports.insert("GetCaretBlinkTime", window::GetCaretBlinkTime as usize);
     exports.insert("GetDoubleClickTime", window::GetDoubleClickTime as usize);
     exports.insert("IsWindow", window::IsWindow as usize);
@@ -461,6 +642,14 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("EndDialog", dialogs::EndDialog as usize);
     exports.insert("DialogBoxParamA", dialogs::DialogBoxParamA as usize);
     exports.insert("DialogBoxParamW", dialogs::DialogBoxParamW as usize);
+
+    // Touch & Pointer
+    exports.insert("RegisterTouchWindow", window::RegisterTouchWindow as usize);
+    exports.insert("UnregisterTouchWindow", window::UnregisterTouchWindow as usize);
+    exports.insert("IsTouchWindow", window::IsTouchWindow as usize);
+    exports.insert("GetPointerType", window::GetPointerType as usize);
+    exports.insert("GetPointerTouchInfo", window::GetPointerTouchInfo as usize);
+    exports.insert("GetPointerTouchInfoHistory", window::GetPointerTouchInfoHistory as usize);
 
     exports
 }

@@ -55,6 +55,19 @@ fn configured_executable_directory() -> Option<PathBuf> {
     executable_directory_cell().read().expect("executable directory lock poisoned").clone()
 }
 
+fn user_dll_directory_cell() -> &'static RwLock<Option<PathBuf>> {
+    static USER_DLL_DIR: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+    USER_DLL_DIR.get_or_init(|| RwLock::new(None))
+}
+
+pub fn set_user_dll_directory(dir: Option<PathBuf>) {
+    *user_dll_directory_cell().write().expect("user dll directory lock poisoned") = dir;
+}
+
+fn user_dll_directory() -> Option<PathBuf> {
+    user_dll_directory_cell().read().expect("user dll directory lock poisoned").clone()
+}
+
 fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
     if !roots.iter().any(|existing| existing == &root) {
         roots.push(root);
@@ -65,7 +78,20 @@ fn default_search_roots(mode: DllSearchMode) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     if let Some(exe_dir) = configured_executable_directory() {
-        push_unique_root(&mut roots, exe_dir);
+        push_unique_root(&mut roots, exe_dir.clone());
+        if let Ok(entries) = std::fs::read_dir(&exe_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.ends_with("_Data")) {
+                    push_unique_root(&mut roots, path.join("Plugins").join("x86_64"));
+                    push_unique_root(&mut roots, path.join("Plugins"));
+                }
+            }
+        }
+    }
+
+    if let Some(user_dir) = user_dll_directory() {
+        push_unique_root(&mut roots, user_dir);
     }
 
     if let Ok(cwd) = std::env::current_dir() {
@@ -87,6 +113,10 @@ fn default_search_roots(mode: DllSearchMode) -> Vec<PathBuf> {
         push_unique_root(&mut roots, base);
     }
 
+    push_unique_root(&mut roots, PathBuf::from("/usr/lib/x86_64-linux-gnu/wine/x86_64-windows"));
+    push_unique_root(&mut roots, PathBuf::from("/usr/lib/wine/x86_64-windows"));
+    push_unique_root(&mut roots, PathBuf::from("/usr/lib64/wine/x86_64-windows"));
+
     roots
 }
 
@@ -98,7 +128,14 @@ pub fn resolve_dll_path(module_name: &str) -> Option<PathBuf> {
     }
 
     let candidate = Path::new(trimmed);
-    if candidate.is_absolute() || trimmed.contains('/') || trimmed.contains('\\') {
+    if candidate.is_absolute() || trimmed.contains(':') || trimmed.contains('/') || trimmed.contains('\\') {
+        let drives = crate::filesystem::drives::DriveMap::default();
+        let special = crate::filesystem::path::SpecialFolders::from_host_env();
+        if let Ok(host_path) = crate::filesystem::path::windows_to_host(trimmed, &drives, &special) {
+            if host_path.exists() {
+                return Some(host_path);
+            }
+        }
         let normalized = PathBuf::from(trimmed.replace('\\', "/"));
         return normalized.exists().then_some(normalized);
     }

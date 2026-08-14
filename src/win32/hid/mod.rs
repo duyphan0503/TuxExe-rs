@@ -130,6 +130,97 @@ extern "win64" fn HidP_SetUsages(
     0
 }
 
+extern "win64" fn HidD_GetFeature(
+    _HidDeviceObject: usize,
+    _ReportBuffer: *mut u8,
+    _ReportBufferLength: u32,
+) -> i32 {
+    trace!("HidD_GetFeature — stub");
+    0
+}
+
+extern "win64" fn HidD_SetOutputReport(
+    _HidDeviceObject: usize,
+    _ReportBuffer: *mut u8,
+    _ReportBufferLength: u32,
+) -> i32 {
+    trace!("HidD_SetOutputReport — stub");
+    0
+}
+
+extern "win64" fn HidP_GetLinkCollectionNodes(
+    _LinkCollectionNodes: *mut u8,
+    LinkCollectionNodesLength: *mut u32,
+    _PreparsedData: usize,
+) -> i32 {
+    trace!("HidP_GetLinkCollectionNodes — stub");
+    if !LinkCollectionNodesLength.is_null() {
+        unsafe { *LinkCollectionNodesLength = 0; }
+    }
+    0
+}
+
+extern "win64" fn HidP_GetSpecificValueCaps(
+    _ReportType: u16,
+    _UsagePage: u16,
+    _LinkCollection: u16,
+    _Usage: u16,
+    _ValueCaps: *mut u8,
+    ValueCapsLength: *mut u16,
+    _PreparsedData: usize,
+) -> i32 {
+    trace!("HidP_GetSpecificValueCaps — stub");
+    if !ValueCapsLength.is_null() {
+        unsafe { *ValueCapsLength = 0; }
+    }
+    0
+}
+
+extern "win64" fn HidP_GetUsageValue(
+    _ReportType: u16,
+    _UsagePage: u16,
+    _LinkCollection: u16,
+    _Usage: u16,
+    UsageValue: *mut u32,
+    _PreparsedData: usize,
+    _Report: *mut u8,
+    _ReportLength: u32,
+) -> i32 {
+    trace!("HidP_GetUsageValue — stub");
+    if !UsageValue.is_null() {
+        unsafe { *UsageValue = 0; }
+    }
+    0
+}
+
+extern "win64" fn HidP_GetUsages(
+    _ReportType: u16,
+    _UsagePage: u16,
+    _LinkCollection: u16,
+    _UsageList: *mut u16,
+    UsageLength: *mut u32,
+    _PreparsedData: usize,
+    _Report: *mut u8,
+    _ReportLength: u32,
+) -> i32 {
+    trace!("HidP_GetUsages — stub");
+    if !UsageLength.is_null() {
+        unsafe { *UsageLength = 0; }
+    }
+    0
+}
+
+extern "win64" fn HidP_InitializeReportForID(
+    _ReportType: u16,
+    _ReportID: u8,
+    _PreparsedData: usize,
+    _Report: *mut u8,
+    _ReportLength: u32,
+) -> i32 {
+    trace!("HidP_InitializeReportForID — stub");
+    0
+}
+
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
     exports.insert("HidD_GetHidGuid", HidD_GetHidGuid as usize);
@@ -139,9 +230,16 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("HidD_GetProductString", HidD_GetProductString as usize);
     exports.insert("HidD_GetManufacturerString", HidD_GetManufacturerString as usize);
     exports.insert("HidD_GetSerialNumberString", HidD_GetSerialNumberString as usize);
+    exports.insert("HidD_GetFeature", HidD_GetFeature as usize);
+    exports.insert("HidD_SetOutputReport", HidD_SetOutputReport as usize);
     exports.insert("HidP_GetCaps", HidP_GetCaps as usize);
     exports.insert("HidP_GetButtonCaps", HidP_GetButtonCaps as usize);
     exports.insert("HidP_GetValueCaps", HidP_GetValueCaps as usize);
+    exports.insert("HidP_GetSpecificValueCaps", HidP_GetSpecificValueCaps as usize);
+    exports.insert("HidP_GetLinkCollectionNodes", HidP_GetLinkCollectionNodes as usize);
+    exports.insert("HidP_GetUsageValue", HidP_GetUsageValue as usize);
+    exports.insert("HidP_GetUsages", HidP_GetUsages as usize);
+    exports.insert("HidP_InitializeReportForID", HidP_InitializeReportForID as usize);
     exports.insert("HidP_GetData", HidP_GetData as usize);
     exports.insert("HidP_MaxDataListLength", HidP_MaxDataListLength as usize);
     exports.insert("HidP_SetUsageValue", HidP_SetUsageValue as usize);

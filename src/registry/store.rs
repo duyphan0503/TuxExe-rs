@@ -30,13 +30,43 @@ pub struct RegistryStore {
 
 impl RegistryStore {
     pub fn new(db_path: PathBuf) -> Result<Self, RegistryError> {
-        let store = Self { db_path };
-        store.init_schema()?;
-        Ok(store)
+        let candidates = vec![
+            db_path.clone(),
+            std::env::temp_dir().join("tuxexe_registry.db"),
+            PathBuf::from("/tmp/tuxexe_registry.db"),
+            PathBuf::from("file:tuxexe_reg?mode=memory&cache=shared"),
+        ];
+
+        let mut last_err = None;
+        for path in candidates {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let store = Self { db_path: path };
+            match store.init_schema() {
+                Ok(()) => return Ok(store),
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| RegistryError::Sqlite(rusqlite::Error::InvalidPath(db_path))))
     }
 
     fn connect(&self) -> Result<Connection, RegistryError> {
-        Connection::open(&self.db_path).map_err(RegistryError::from)
+        let path_str = self.db_path.to_string_lossy();
+        if path_str.starts_with("file:") {
+            Connection::open_with_flags(
+                &self.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            )
+            .map_err(RegistryError::from)
+        } else {
+            Connection::open(&self.db_path).map_err(RegistryError::from)
+        }
     }
 
     fn init_schema(&self) -> Result<(), RegistryError> {
@@ -131,6 +161,39 @@ impl RegistryStore {
             params![path, format!("{path}\\%")],
         )?;
         Ok(affected)
+    }
+
+    /// RegDeleteValueA/W-like value deletion.
+    pub fn delete_value(&self, path: &str, name: Option<&str>) -> Result<usize, RegistryError> {
+        let path = normalize_path(path);
+        let name = normalize_name(name);
+        let conn = self.connect()?;
+        let affected = conn.execute(
+            "DELETE FROM reg WHERE path = ?1 AND name = ?2",
+            params![path, name],
+        )?;
+        Ok(affected)
+    }
+
+    /// RegDeleteTreeA/W-like recursive key + subkey + values deletion.
+    pub fn delete_tree(&self, path: &str) -> Result<usize, RegistryError> {
+        self.delete_key(path)
+    }
+
+    /// RegEnumValueA/W-like value listing for a specific key.
+    pub fn enum_values(&self, path: &str) -> Result<Vec<(String, RegistryValue)>, RegistryError> {
+        let path = normalize_path(path);
+        let conn = self.connect()?;
+        let mut stmt = conn.prepare("SELECT name, type, data FROM reg WHERE path = ?1 ORDER BY name ASC")?;
+        let mut rows = stmt.query(params![path])?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let reg_type = row.get::<_, i64>(1)? as u32;
+            let data: Vec<u8> = row.get(2)?;
+            results.push((name, RegistryValue { reg_type, data }));
+        }
+        Ok(results)
     }
 }
 

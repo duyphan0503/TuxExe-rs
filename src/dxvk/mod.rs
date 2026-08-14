@@ -2,6 +2,7 @@
 
 pub mod bridge;
 pub mod build;
+pub mod runtime;
 pub mod shim;
 
 #[cfg(test)]
@@ -11,8 +12,8 @@ mod tests {
     #[test]
     fn required_outputs_include_core_dxvk_libraries() {
         let outputs = required_output_libraries();
-        assert!(outputs.contains(&"d3d11.dll.so"));
-        assert!(outputs.contains(&"dxgi.dll.so"));
+        assert!(outputs.contains(&"libdxvk_d3d11.so.0"));
+        assert!(outputs.contains(&"libdxvk_dxgi.so.0"));
     }
 
     #[test]

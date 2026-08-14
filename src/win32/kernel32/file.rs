@@ -4,9 +4,10 @@
 
 use crate::nt_kernel::file::{
     nt_create_file, nt_query_directory_file, nt_query_information_by_path,
-    nt_query_information_file, nt_read_file, nt_set_file_pointer_ex, nt_set_information_file,
-    nt_write_file, CreateDisposition, FileHandle, SetFileInformation, STATUS_INVALID_HANDLE,
-    STATUS_INVALID_PARAMETER, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND,
+    nt_query_information_file, nt_read_file, nt_read_file_at, nt_set_file_pointer_ex,
+    nt_set_information_file, nt_write_file, CreateDisposition, FileHandle, SetFileInformation,
+    STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER, STATUS_OBJECT_NAME_COLLISION,
+    STATUS_OBJECT_NAME_NOT_FOUND,
 };
 use crate::nt_kernel::sync as nt_sync;
 use crate::utils::{
@@ -37,6 +38,9 @@ pub const ERROR_FILE_EXISTS: u32 = 80;
 pub const ERROR_IO_INCOMPLETE: u32 = 996;
 pub const ERROR_IO_PENDING: u32 = 997;
 pub const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+pub const ERROR_MORE_DATA: u32 = 234;
+pub const ERROR_LOCK_VIOLATION: u32 = 33;
+pub const ERROR_NOT_FOUND: u32 = 1168;
 pub const GET_FILEEX_INFO_STANDARD: u32 = 0;
 
 const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
@@ -45,6 +49,25 @@ pub const FILE_TYPE_UNKNOWN: u32 = 0;
 pub const FILE_TYPE_DISK: u32 = 1;
 pub const FILE_TYPE_CHAR: u32 = 2;
 pub const INVALID_SET_FILE_POINTER: u32 = 0xFFFF_FFFF;
+
+pub extern "win64" fn DeviceIoControl(
+    _h_device: usize,
+    _dw_io_control_code: u32,
+    _lp_in_buffer: *const c_void,
+    _n_in_buffer_size: u32,
+    _lp_out_buffer: *mut c_void,
+    _n_out_buffer_size: u32,
+    lp_bytes_returned: *mut u32,
+    _lp_overlapped: *const c_void,
+) -> i32 {
+    if !lp_bytes_returned.is_null() {
+        unsafe {
+            *lp_bytes_returned = 0;
+        }
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
 
 const DRIVE_UNKNOWN: u32 = 0;
 const DRIVE_NO_ROOT_DIR: u32 = 1;
@@ -68,7 +91,13 @@ fn next_temp_unique() -> u32 {
 }
 
 fn normalize_host_path(path: &str) -> String {
-    path.replace('\\', "/")
+    let (drives, special) = (
+        crate::filesystem::drives::DriveMap::default(),
+        crate::filesystem::path::SpecialFolders::from_host_env(),
+    );
+    crate::filesystem::path::windows_to_host(path, &drives, &special)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.replace('\\', "/"))
 }
 
 fn is_windows_absolute_path(path: &str) -> bool {
@@ -130,6 +159,60 @@ fn disk_space_for_path(path: Option<&str>) -> Result<(u64, u64, u64, u64), u32> 
     Ok((block_size, total_bytes, free_bytes_avail, free_bytes_total))
 }
 
+fn change_file_lock(handle: Handle, offset: u64, length: u64, lock_type: libc::c_short) -> i32 {
+    let fd = global_table()
+        .with(handle, |object| object.as_any().downcast_ref::<FileHandle>().map(|file| file.fd))
+        .flatten();
+    let Some(fd) = fd else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    };
+    let Ok(offset) = libc::off_t::try_from(offset) else {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    let Ok(length) = libc::off_t::try_from(length) else {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = lock_type;
+    lock.l_whence = libc::SEEK_SET as libc::c_short;
+    lock.l_start = offset;
+    lock.l_len = length;
+    if unsafe { libc::fcntl(fd, libc::F_SETLK, &lock) } == 0 {
+        set_last_error(ERROR_SUCCESS);
+        1
+    } else {
+        set_last_error(ERROR_LOCK_VIOLATION);
+        0
+    }
+}
+
+pub extern "win64" fn lock_file(
+    handle: Handle,
+    offset_low: u32,
+    offset_high: u32,
+    length_low: u32,
+    length_high: u32,
+) -> i32 {
+    let offset = ((offset_high as u64) << 32) | offset_low as u64;
+    let length = ((length_high as u64) << 32) | length_low as u64;
+    change_file_lock(handle, offset, length, libc::F_WRLCK as libc::c_short)
+}
+
+pub extern "win64" fn unlock_file(
+    handle: Handle,
+    offset_low: u32,
+    offset_high: u32,
+    length_low: u32,
+    length_high: u32,
+) -> i32 {
+    let offset = ((offset_high as u64) << 32) | offset_low as u64;
+    let length = ((length_high as u64) << 32) | length_low as u64;
+    change_file_lock(handle, offset, length, libc::F_UNLCK as libc::c_short)
+}
+
 fn classify_drive(path: Option<&str>) -> u32 {
     let Some(raw) = path.map(str::trim).filter(|p| !p.is_empty()) else {
         return DRIVE_FIXED;
@@ -146,6 +229,92 @@ fn classify_drive(path: Option<&str>) -> u32 {
     }
 
     DRIVE_NO_ROOT_DIR
+}
+
+fn write_optional_wide(buffer: *mut u16, capacity: u32, value: &str) -> Result<(), u32> {
+    if buffer.is_null() {
+        return if capacity == 0 { Ok(()) } else { Err(ERROR_INVALID_PARAMETER) };
+    }
+    let wide: Vec<u16> = value.encode_utf16().collect();
+    if capacity == 0 || wide.len() + 1 > capacity as usize {
+        return Err(ERROR_MORE_DATA);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), buffer, wide.len());
+        *buffer.add(wide.len()) = 0;
+    }
+    Ok(())
+}
+
+pub extern "win64" fn get_logical_drives() -> u32 {
+    1 << 2 // C:
+}
+
+pub extern "win64" fn get_logical_drive_strings_w(buffer_length: u32, buffer: *mut u16) -> u32 {
+    // Windows uses a sequence of NUL-terminated roots followed by an extra
+    // NUL. TuxExe currently exposes its virtual C: root.
+    const DRIVES: [u16; 5] = [b'C' as u16, b':' as u16, b'\\' as u16, 0, 0];
+    if buffer_length == 0 || buffer.is_null() {
+        return DRIVES.len() as u32;
+    }
+    if (buffer_length as usize) < DRIVES.len() {
+        return DRIVES.len() as u32;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(DRIVES.as_ptr(), buffer, DRIVES.len()) };
+    // Return excludes only the final multi-string terminator.
+    (DRIVES.len() - 1) as u32
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn get_volume_information_w(
+    root_path_name: *const u16,
+    volume_name_buffer: *mut u16,
+    volume_name_size: u32,
+    volume_serial_number: *mut u32,
+    maximum_component_length: *mut u32,
+    file_system_flags: *mut u32,
+    file_system_name_buffer: *mut u16,
+    file_system_name_size: u32,
+) -> i32 {
+    let root = if root_path_name.is_null() {
+        ".".to_string()
+    } else {
+        match unsafe { from_wide_ptr(root_path_name) } {
+            Ok(path) if is_windows_absolute_path(&path) => ".".to_string(),
+            Ok(path) => normalize_host_path(&path),
+            Err(_) => {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+        }
+    };
+    let Ok(root_c) = std::ffi::CString::new(root) else {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(root_c.as_ptr(), &mut metadata) } != 0 {
+        set_last_error(ERROR_PATH_NOT_FOUND);
+        return 0;
+    }
+    if write_optional_wide(volume_name_buffer, volume_name_size, "TuxExe").is_err()
+        || write_optional_wide(file_system_name_buffer, file_system_name_size, "TuxExeFS").is_err()
+    {
+        set_last_error(ERROR_MORE_DATA);
+        return 0;
+    }
+    if !volume_serial_number.is_null() {
+        unsafe { *volume_serial_number = (metadata.st_dev as u64 ^ metadata.st_ino as u64) as u32 };
+    }
+    if !maximum_component_length.is_null() {
+        unsafe { *maximum_component_length = 255 };
+    }
+    if !file_system_flags.is_null() {
+        // FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK.
+        unsafe { *file_system_flags = 0x0000_0002 | 0x0000_0004 };
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
 }
 
 #[derive(Debug)]
@@ -212,7 +381,7 @@ fn status_to_win_error(status: u32) -> u32 {
         0 => ERROR_SUCCESS,
         STATUS_OBJECT_NAME_NOT_FOUND => ERROR_FILE_NOT_FOUND,
         0xC000_003A => ERROR_PATH_NOT_FOUND,
-        0xC000_0022 => ERROR_ACCESS_DENIED,
+        0xC000_0022 | 0xC000_00BA => ERROR_ACCESS_DENIED,
         STATUS_INVALID_HANDLE => ERROR_INVALID_HANDLE,
         STATUS_INVALID_PARAMETER => ERROR_INVALID_PARAMETER,
         STATUS_OBJECT_NAME_COLLISION => ERROR_ALREADY_EXISTS,
@@ -308,11 +477,39 @@ pub extern "win64" fn read_file(
     handle: Handle,
     buffer: *mut c_void,
     number_of_bytes_to_read: u32,
-    number_of_bytes_read: Option<&mut u32>,
-    _overlapped: *mut c_void,
+    number_of_bytes_read: *mut u32,
+    overlapped: *mut c_void,
 ) -> i32 {
-    trace!("ReadFile(handle={}, len={})", handle, number_of_bytes_to_read);
-    let status = nt_read_file(handle, buffer, number_of_bytes_to_read, number_of_bytes_read);
+    let mut completed = 0u32;
+    let status = if overlapped.is_null() {
+        nt_read_file(handle, buffer, number_of_bytes_to_read, Some(&mut completed))
+    } else {
+        // Windows uses Offset/OffsetHigh as an absolute 64-bit position for
+        // overlapped file I/O.  This runtime completes file reads immediately,
+        // but must still publish completion data before returning.
+        let overlapped = unsafe { &mut *overlapped.cast::<Overlapped>() };
+        let offset = u64::from(overlapped.offset) | (u64::from(overlapped.offset_high) << 32);
+        let status = nt_read_file_at(
+            handle,
+            buffer,
+            number_of_bytes_to_read,
+            offset,
+            Some(&mut completed),
+        );
+        overlapped.internal = status as usize;
+        overlapped.internal_high = completed as usize;
+        if overlapped.h_event != 0 {
+            // The low bit merely suppresses completion-port notification; it
+            // is not part of the event HANDLE itself.
+            nt_sync::set_event(overlapped.h_event & !1usize);
+        }
+        status
+    };
+    if !number_of_bytes_read.is_null() {
+        unsafe {
+            *number_of_bytes_read = completed;
+        }
+    }
     if status == 0 {
         set_last_error(ERROR_SUCCESS);
         1
@@ -396,6 +593,19 @@ pub extern "win64" fn cancel_io(handle: Handle) -> i32 {
     1
 }
 
+pub extern "win64" fn cancel_io_ex(handle: Handle, _overlapped: *mut c_void) -> i32 {
+    let valid_handle = matches!(handle, PSEUDO_STDIN | PSEUDO_STDOUT | PSEUDO_STDERR)
+        || (handle != INVALID_HANDLE_VALUE && global_table().is_valid(handle));
+    if !valid_handle {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    // File I/O currently completes synchronously before returning to guest
+    // code, so no OVERLAPPED request can remain cancellable.
+    set_last_error(ERROR_NOT_FOUND);
+    0
+}
+
 pub extern "win64" fn create_file_a(
     lp_file_name: *const i8,
     dw_desired_access: u32,
@@ -415,6 +625,10 @@ pub extern "win64" fn create_file_a(
         return INVALID_HANDLE_VALUE;
     };
     let (read, write) = access_flags(dw_desired_access);
+    // Asset streaming can legitimately open the same Unity resource thousands
+    // of times.  Keep this at debug so diagnostic output does not itself
+    // become the game's I/O bottleneck.
+    tracing::debug!(path = %path, "CreateFileA");
 
     match nt_create_file(&path, read, write, disposition) {
         Ok(handle) => {
@@ -505,7 +719,7 @@ pub extern "win64" fn create_directory_a(
         return 0;
     };
 
-    let host_path = path.replace('\\', "/");
+    let host_path = normalize_host_path(&path);
     match std::fs::create_dir(&host_path) {
         Ok(_) => {
             set_last_error(ERROR_SUCCESS);
@@ -516,6 +730,10 @@ pub extern "win64" fn create_directory_a(
             0
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::create_dir_all(&host_path).is_ok() {
+                set_last_error(ERROR_SUCCESS);
+                return 1;
+            }
             set_last_error(ERROR_PATH_NOT_FOUND);
             0
         }
@@ -582,7 +800,8 @@ pub extern "win64" fn delete_file_a(lp_file_name: *const i8) -> i32 {
         return 0;
     };
 
-    match std::fs::remove_file(&path) {
+    let host_path = normalize_host_path(&path);
+    match std::fs::remove_file(&host_path) {
         Ok(_) => {
             set_last_error(ERROR_SUCCESS);
             1
@@ -1389,6 +1608,10 @@ pub extern "win64" fn get_drive_type_a(lp_root_path_name: *const i8) -> u32 {
 }
 
 pub extern "win64" fn close_handle(handle: Handle) -> i32 {
+    if handle == crate::nt_kernel::sync::DXVK_FRAME_LATENCY_HANDLE {
+        set_last_error(ERROR_SUCCESS);
+        return 1;
+    }
     init_global_table();
     if global_table().close_handle(handle) {
         set_last_error(ERROR_SUCCESS);
@@ -1544,12 +1767,12 @@ pub extern "win64" fn set_file_pointer(
     lp_distance_to_move_high: *mut i32,
     dw_move_method: u32,
 ) -> u32 {
-    let high = if lp_distance_to_move_high.is_null() {
-        0i64
+    let distance = if lp_distance_to_move_high.is_null() {
+        l_distance_to_move as i64
     } else {
-        unsafe { *lp_distance_to_move_high as i64 }
+        let high = unsafe { *lp_distance_to_move_high as i64 };
+        ((high << 32) | (l_distance_to_move as u32 as i64)) as i64
     };
-    let distance = ((high << 32) | (l_distance_to_move as u32 as i64)) as i64;
 
     match nt_set_file_pointer_ex(handle, distance, dw_move_method) {
         Ok(new_pos) => {
@@ -1641,6 +1864,7 @@ pub extern "win64" fn get_file_attributes_a(lp_file_name: *const i8) -> u32 {
         set_last_error(ERROR_INVALID_PARAMETER);
         return FILE_ATTRIBUTE_INVALID;
     };
+    tracing::info!(path = %path, "GetFileAttributesA");
 
     match nt_query_information_by_path(&path) {
         Ok(info) => {
@@ -1957,6 +2181,61 @@ mod tests {
     }
 
     #[test]
+    fn overlapped_read_uses_its_offset_without_moving_file_pointer() {
+        let _guard = serial_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let p = temp.path().join("k32_overlapped.bin");
+        std::fs::write(&p, b"abcdef").expect("seed");
+        let c = std::ffi::CString::new(p.to_string_lossy().to_string()).expect("cstring");
+        let handle = create_file_a(c.as_ptr(), 0x8000_0000, 0, std::ptr::null_mut(), 3, 0, 0);
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+
+        let mut ordinary = [0u8; 1];
+        let mut bytes = 0u32;
+        assert_eq!(
+            read_file(
+                handle,
+                ordinary.as_mut_ptr().cast(),
+                1,
+                &mut bytes as *mut u32,
+                std::ptr::null_mut(),
+            ),
+            1
+        );
+        assert_eq!(ordinary, *b"a");
+
+        let mut overlapped = Overlapped { offset: 4, ..Default::default() };
+        let mut positioned = [0u8; 2];
+        assert_eq!(
+            read_file(
+                handle,
+                positioned.as_mut_ptr().cast(),
+                2,
+                &mut bytes as *mut u32,
+                (&raw mut overlapped).cast(),
+            ),
+            1
+        );
+        assert_eq!(positioned, *b"ef");
+        assert_eq!(overlapped.internal, 0);
+        assert_eq!(overlapped.internal_high, 2);
+
+        let mut after = [0u8; 1];
+        assert_eq!(
+            read_file(
+                handle,
+                after.as_mut_ptr().cast(),
+                1,
+                &mut bytes as *mut u32,
+                std::ptr::null_mut(),
+            ),
+            1
+        );
+        assert_eq!(after, *b"b");
+        assert_eq!(close_handle(handle), 1);
+    }
+
+    #[test]
     fn get_file_attributes_for_file_and_dir() {
         let _guard = serial_guard();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2052,7 +2331,7 @@ mod tests {
                 read_handle,
                 buffer.as_mut_ptr().cast::<c_void>(),
                 payload.len() as u32,
-                Some(&mut read),
+                &mut read as *mut u32,
                 std::ptr::null_mut(),
             ),
             1

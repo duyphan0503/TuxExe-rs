@@ -4,10 +4,57 @@ pub mod loader;
 pub mod search;
 
 use crate::win32::{
-    advapi32, bcrypt, crypt32, dbghelp, dwmapi, gdi32, hid, imm32, kernel32, msvcrt, ole32, oleaut32,
-    opengl32, setupapi, shell32, shlwapi, unityplayer, user32, version, winhttp, winmm, ws2_32,
+    advapi32, bcrypt, crypt32, d3d11, dbghelp, dwmapi, dxgi, gdi32, hid, imm32,
+    kernel32, msvcrt, ole32, oleaut32, opengl32, setupapi, shell32, shlwapi, unityplayer, user32,
+    version, winhttp, winmm, ws2_32,
 };
 use tracing::trace;
+
+/// Compatibility level of a native export exposed to a guest PE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportStatus {
+    Implemented,
+    CompatibilityStub,
+    Unsupported,
+}
+
+/// Known bring-up-only exports. These functions are deliberately exposed so
+/// applications can progress through startup, but they do not provide the
+/// complete Windows behavior of their API.
+fn is_compatibility_stub(dll_name: &str, func_name: &str) -> bool {
+    let dll = dll_name.trim().to_ascii_lowercase().trim_end_matches(".dll").to_string();
+    let func = func_name.trim().to_ascii_lowercase();
+
+    if matches!(dll.as_str(), "dwmapi" | "hid" | "imm32" | "setupapi" | "winmm") {
+        return true;
+    }
+
+    matches!(
+        (dll.as_str(), func.as_str()),
+        ("dbghelp", "syminitialize")
+            | ("dbghelp", "symcleanup")
+            | ("dbghelp", "symgetoptions")
+            | ("dbghelp", "symsetoptions")
+            | ("dbghelp", "stackwalk64")
+            | ("dbghelp", "minidumpwritedump")
+            | ("shell32", "shellexecutew")
+            | ("shell32", "shellexecuteexw")
+            | ("shell32", "shgetfolderpathw")
+            | ("shell32", "shgetknownfolderpath")
+            | ("shell32", "shbrowseforfolderw")
+            | ("shell32", "shfileoperationw")
+            | ("shlwapi", "pathfindfilenamew")
+            | ("shlwapi", "pathisdirectoryw")
+            | ("shlwapi", "pathfileexistsw")
+            | ("shlwapi", "pathcanonicalizew")
+            | ("shlwapi", "shdeletekeyw")
+            | ("unityplayer", "unitygetd3d9interface")
+            | ("unityplayer", "unitygetd3d11interface")
+            | ("unityplayer", "unitygetd3d12interface")
+            | ("unityplayer", "unitygetvulkaninterface")
+            | ("unityplayer", "unitygetglinterface")
+    )
+}
 
 fn resolve_export_name(
     exports: &std::collections::HashMap<&'static str, usize>,
@@ -25,7 +72,20 @@ fn resolve_export_name(
         .unwrap_or_else(|| trimmed.as_str().strip_prefix('_').unwrap_or(trimmed.as_str()))
         .to_string();
 
-    [trimmed, undecorated].into_iter().find_map(|candidate| {
+    let single_suffix = if trimmed.ends_with("WW") {
+        Some(format!("{}W", &trimmed[..trimmed.len() - 1]))
+    } else if trimmed.ends_with("AA") {
+        Some(format!("{}A", &trimmed[..trimmed.len() - 1]))
+    } else {
+        None
+    };
+
+    let mut candidates = vec![trimmed, undecorated];
+    if let Some(s) = single_suffix {
+        candidates.push(s);
+    }
+
+    candidates.into_iter().find_map(|candidate| {
         exports.get(candidate.as_str()).copied().or_else(|| {
             exports
                 .iter()
@@ -35,198 +95,177 @@ fn resolve_export_name(
 }
 
 pub use loader::{
-    free_library, get_loaded_module_filename, get_loaded_module_handle, load_library,
-    resolve_export, LoadedModule, ModuleSource, NativeModule,
+    disable_thread_library_calls, free_library, get_loaded_module_filename,
+    get_loaded_module_handle, load_library, resolve_export, LoadedModule, ModuleSource,
+    NativeModule,
 };
+
+
+pub extern "win64" fn __wine_dbg_output(str_ptr: *const libc::c_char) -> i32 {
+    if !str_ptr.is_null() {
+        if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(str_ptr) }.to_str() {
+            println!("DXVK: {}", s.trim_end());
+        }
+    }
+    0
+}
+
+pub extern "win64" fn __wine_dbg_header(
+    _cls: u32,
+    _ch: u32,
+    _func: *const libc::c_char,
+) -> *const libc::c_char {
+    static EMPTY: &[u8] = b"\0";
+    EMPTY.as_ptr() as *const libc::c_char
+}
+
+pub extern "win64" fn __wine_dbg_get_channel_flags(_ch: *const libc::c_char) -> u32 {
+    0
+}
 
 /// Resolves an import in a static reimplemented DLL.
 /// Returns the address of the function if found, or 0 if not implemented.
-pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
+fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Option<usize> {
     let dll_lower = dll_name.to_lowercase();
 
     // Ignore extensions
     let base_name =
         if let Some(idx) = dll_lower.find('.') { &dll_lower[..idx] } else { &dll_lower };
 
-    match base_name {
-        "kernel32" => {
-            let exports = kernel32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved kernel32!{} -> {:#x}", func_name, addr);
-                return addr;
+    if base_name == "ntdll" {
+        match func_name {
+            "__wine_dbg_output" => return Some(__wine_dbg_output as usize),
+            "__wine_dbg_header" => return Some(__wine_dbg_header as usize),
+            "__wine_dbg_get_channel_flags" => return Some(__wine_dbg_get_channel_flags as usize),
+            _ => {
+                if let Some(addr) = resolve_export_name(&msvcrt::get_exports(), func_name) {
+                    return Some(addr);
+                }
+                if let Some(addr) = resolve_export_name(&kernel32::get_exports(), func_name) {
+                    return Some(addr);
+                }
             }
         }
-        "msvcrt" => {
-            let exports = msvcrt::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved msvcrt!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "ws2_32" => {
-            let exports = ws2_32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved ws2_32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "user32" => {
-            let exports = user32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved user32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "gdi32" => {
-            let exports = gdi32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved gdi32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "unityplayer" => {
-            let exports = unityplayer::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved unityplayer!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "dinput8" => {
-            let exports = crate::win32::dinput8::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved dinput8!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "dsound" => {
-            let exports = crate::win32::dsound::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved dsound!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "advapi32" => {
-            let exports = advapi32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved advapi32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "bcrypt" => {
-            let exports = bcrypt::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved bcrypt!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "crypt32" => {
-            let exports = crypt32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved crypt32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "ole32" => {
-            let exports = ole32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved ole32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "version" => {
-            let exports = version::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved version!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "winmm" => {
-            let exports = winmm::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved winmm!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "shlwapi" => {
-            let exports = shlwapi::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved shlwapi!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "setupapi" => {
-            let exports = setupapi::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved setupapi!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "shell32" => {
-            let exports = shell32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved shell32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "opengl32" => {
-            let exports = opengl32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved opengl32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "oleaut32" => {
-            let exports = oleaut32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved oleaut32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "imm32" => {
-            let exports = imm32::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved imm32!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "winhttp" => {
-            let exports = winhttp::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved winhttp!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "dwmapi" => {
-            let exports = dwmapi::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved dwmapi!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "hid" => {
-            let exports = hid::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved hid!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        "dbghelp" => {
-            let exports = dbghelp::get_exports();
-            if let Some(addr) = resolve_export_name(&exports, func_name) {
-                trace!("Resolved dbghelp!{} -> {:#x}", func_name, addr);
-                return addr;
-            }
-        }
-        _ => {}
     }
 
-    trace!("Unresolved import {}!{}", dll_name, func_name);
-    0
+    match base_name {
+        "kernel32" => resolve_export_name(&kernel32::get_exports(), func_name),
+        // UCRT and the legacy MSVCRT exports used by the current games share
+        // this implementation.  Falling through to the generic stub makes
+        // allocation functions such as ucrtbase!malloc return NULL and causes
+        // a misleading crash much later in Unity startup.
+        "msvcrt" | "ucrtbase" => resolve_export_name(&msvcrt::get_exports(), func_name),
+        "ws2_32" | "iphlpapi" => resolve_export_name(&ws2_32::get_exports(), func_name),
+        "user32" => resolve_export_name(&user32::get_exports(), func_name),
+        "gdi32" => resolve_export_name(&gdi32::get_exports(), func_name),
+        "unityplayer" => resolve_export_name(&unityplayer::get_exports(), func_name),
+        "dinput8" => resolve_export_name(&crate::win32::dinput8::get_exports(), func_name),
+        "dsound" => resolve_export_name(&crate::win32::dsound::get_exports(), func_name),
+        "advapi32" => resolve_export_name(&advapi32::get_exports(), func_name),
+        "bcrypt" => resolve_export_name(&bcrypt::get_exports(), func_name),
+        "crypt32" => resolve_export_name(&crypt32::get_exports(), func_name),
+        "ole32" => resolve_export_name(&ole32::get_exports(), func_name),
+        "version" => resolve_export_name(&version::get_exports(), func_name),
+        "winmm" => resolve_export_name(&winmm::get_exports(), func_name),
+        "shlwapi" => resolve_export_name(&shlwapi::get_exports(), func_name),
+        "setupapi" => resolve_export_name(&setupapi::get_exports(), func_name),
+        "shell32" => resolve_export_name(&shell32::get_exports(), func_name),
+        "opengl32" => resolve_export_name(&opengl32::get_exports(), func_name),
+        "oleaut32" => resolve_export_name(&oleaut32::get_exports(), func_name),
+        "imm32" => resolve_export_name(&imm32::get_exports(), func_name),
+        "winhttp" => resolve_export_name(&winhttp::get_exports(), func_name),
+        "dwmapi" => resolve_export_name(&dwmapi::get_exports(), func_name),
+        "hid" => resolve_export_name(&hid::get_exports(), func_name),
+        "dbghelp" => resolve_export_name(&dbghelp::get_exports(), func_name),
+        "d3d11" => resolve_export_name(&d3d11::get_exports(), func_name),
+        "dxgi" => resolve_export_name(&dxgi::get_exports(), func_name),
+        "vulkan-1" | "winevulkan" => resolve_export_name(&crate::win32::vulkan::get_exports(), func_name),
+        "steam_api64" | "steam_api" => crate::win32::steam_api64::resolve_export(func_name),
+        _ => None,
+    }
+}
+
+/// Resolves an import in a static reimplemented DLL.
+///
+/// Some well-known startup DLLs intentionally use a generic compatibility
+/// fallback so a game can continue far enough to emit diagnostics.  Callers
+/// that need to distinguish that fallback from a real export should use
+/// [`resolve_export_status`].
+pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
+    let dll_lower = dll_name.to_lowercase();
+    let base_name = dll_lower.split('.').next().unwrap_or(&dll_lower);
+
+    if let Some(addr) = resolve_explicit_reimplemented_export(dll_name, func_name) {
+        trace!("Resolved {}!{} -> {:#x}", base_name, func_name, addr);
+        addr
+    } else if matches!(
+        base_name,
+        "kernel32"
+            | "msvcrt"
+            | "ws2_32"
+            | "user32"
+            | "gdi32"
+            | "unityplayer"
+            | "dinput8"
+            | "dsound"
+            | "advapi32"
+            | "crypt32"
+            | "ole32"
+            | "version"
+            | "winmm"
+            | "shlwapi"
+            | "setupapi"
+            | "shell32"
+            | "opengl32"
+            | "oleaut32"
+            | "imm32"
+            | "winhttp"
+            | "dwmapi"
+            | "hid"
+            | "dbghelp"
+            | "d3d11"
+            | "dxgi"
+            | "ntdll"
+            | "ucrtbase"
+            | "nsi"
+            | "dnsapi"
+            | "iphlpapi"
+            | "vulkan-1"
+            | "winevulkan"
+    ) {
+        tracing::warn!("{}!{} requested but not explicitly defined — providing generic stub", base_name, func_name);
+        msvcrt::generic_msvcrt_stub as usize
+    } else {
+        trace!("Unresolved import {}!{}", dll_name, func_name);
+        0
+    }
+}
+
+/// Resolve an export and retain whether the address represents a real
+/// implementation, a bring-up stub, or an unsupported API.
+pub fn resolve_export_status(dll_name: &str, func_name: &str) -> ExportStatus {
+    let status = if resolve_explicit_reimplemented_export(dll_name, func_name).is_none() {
+        ExportStatus::Unsupported
+    } else if is_compatibility_stub(dll_name, func_name) {
+        ExportStatus::CompatibilityStub
+    } else {
+        ExportStatus::Implemented
+    };
+
+    crate::runtime::telemetry::record(format!(
+        "export_resolve:{}!{}={status:?}",
+        dll_name, func_name
+    ));
+    status
 }
 
 /// Resolves an import by ordinal number from a static reimplemented DLL.
 /// Returns the address of the function if found, or 0 if not implemented.
-pub fn resolve_export_by_ordinal(module_handle: usize, dll_name: &str, ordinal: u16) -> Option<usize> {
+pub fn resolve_export_by_ordinal(
+    module_handle: usize,
+    dll_name: &str,
+    ordinal: u16,
+) -> Option<usize> {
     // For reimplemented DLLs, try looking up by "#N" format in exports
     let key = loader::module_key_by_handle(module_handle)?;
     let guard = loader::registry().read().ok()?;
@@ -244,7 +283,7 @@ pub fn resolve_export_by_ordinal(module_handle: usize, dll_name: &str, ordinal: 
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_export_name;
+    use super::{resolve_export_name, resolve_export_status, ExportStatus};
     use std::collections::HashMap;
 
     #[test]
@@ -278,5 +317,27 @@ mod tests {
     fn resolve_reimplemented_kernel32_format_message_a() {
         let addr = super::resolve_reimplemented_export("KERNEL32.dll", "FormatMessageA");
         assert_ne!(addr, 0);
+    }
+
+    #[test]
+    fn ucrtbase_uses_real_crt_allocators() {
+        assert_ne!(super::resolve_reimplemented_export("ucrtbase.dll", "malloc"), 0);
+        assert_ne!(super::resolve_reimplemented_export("ucrtbase.dll", "free"), 0);
+    }
+
+    #[test]
+    fn export_status_distinguishes_implemented_stub_and_unsupported() {
+        assert_eq!(
+            resolve_export_status("kernel32.dll", "GetLastError"),
+            ExportStatus::Implemented
+        );
+        assert_eq!(
+            resolve_export_status("setupapi.dll", "SetupDiGetClassDevsW"),
+            ExportStatus::CompatibilityStub
+        );
+        assert_eq!(
+            resolve_export_status("kernel32.dll", "DefinitelyMissing"),
+            ExportStatus::Unsupported
+        );
     }
 }

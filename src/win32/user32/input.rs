@@ -199,12 +199,47 @@ pub extern "win64" fn GetKeyNameTextA(_l_param: i32, lp_string: *mut u8, cch_siz
     copy_len as i32
 }
 
-pub extern "win64" fn GetAsyncKeyState(_v_key: i32) -> i16 {
+static KEY_STATE: [std::sync::atomic::AtomicU8; 256] = [const { std::sync::atomic::AtomicU8::new(0) }; 256];
+
+pub fn set_key_down(vk: u32) {
+    if (vk as usize) < KEY_STATE.len() {
+        KEY_STATE[vk as usize].store(0x80, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn set_key_up(vk: u32) {
+    if (vk as usize) < KEY_STATE.len() {
+        KEY_STATE[vk as usize].store(0x00, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub extern "win64" fn GetAsyncKeyState(v_key: i32) -> i16 {
+    let has_visible_window = crate::win32::user32::window_registry()
+        .read()
+        .map(|reg| reg.values().any(|w| w.visible))
+        .unwrap_or(false);
+
+    if has_visible_window {
+        let _ = crate::platform::x11::query_pointer_root();
+    }
+
+    if v_key >= 0 && (v_key as usize) < KEY_STATE.len() {
+        let state = KEY_STATE[v_key as usize].load(std::sync::atomic::Ordering::Relaxed);
+        if (state & 0x80) != 0 {
+            return -32768; // 0x8000
+        }
+    }
     set_last_error(0);
     0
 }
 
-pub extern "win64" fn GetKeyState(_n_virt_key: i32) -> i16 {
+pub extern "win64" fn GetKeyState(n_virt_key: i32) -> i16 {
+    if n_virt_key >= 0 && (n_virt_key as usize) < KEY_STATE.len() {
+        let state = KEY_STATE[n_virt_key as usize].load(std::sync::atomic::Ordering::Relaxed);
+        if (state & 0x80) != 0 {
+            return -128;
+        }
+    }
     set_last_error(0);
     0
 }
@@ -215,9 +250,10 @@ pub extern "win64" fn GetKeyboardState(lp_key_state: *mut u8) -> i32 {
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     }
-
     unsafe {
-        std::ptr::write_bytes(lp_key_state, 0, 256);
+        for i in 0..256 {
+            *lp_key_state.add(i) = KEY_STATE[i].load(std::sync::atomic::Ordering::Relaxed);
+        }
     }
     set_last_error(0);
     1

@@ -426,7 +426,7 @@ A DirectX 11 demo app renders correctly via Vulkan.
 
 ## Phase 9: WoW64 — 32-bit Support (Weeks 80-100+)
 
-**Goal**: Run 32-bit PE32 executables on 64-bit Linux.
+**Goal**: Run 32-bit PE32 executables on 64-bit Linux without Wine.
 
 ### Tasks
 
@@ -439,16 +439,16 @@ A DirectX 11 demo app renders correctly via Vulkan.
 
 ### Deliverable
 
-A 32-bit Windows console app can be loaded and audited on 64-bit Linux with native-only runtime guarantees (no Wine fallback). Full PE32 execution remains gated on WoW64 entry-transition support.
+A 32-bit Windows console app can be loaded, audited and rejected with a controlled native-only error. Full PE32 execution remains gated on WoW64 entry-transition support.
 
-Current runtime behavior: `tuxexe run` is native-only. PE32 images no longer delegate to Wine and currently fail with a controlled error until WoW64 entry-transition support is implemented.
+Current runtime behavior: `tuxexe run` is native-only. PE32 images never delegate to Wine and fail before entry-point dispatch until WoW64 execution is implemented.
 
 Compatibility workflow for game bring-up:
 
 - `tuxexe audit <game.exe>` prints implemented vs missing imports by DLL.
 - Use audit output to prioritize startup-critical API gaps before gameplay-path APIs.
 
-Current runtime behavior: `tuxexe run` delegates x86 execution to an external backend by default (`TUXEXE_X86_BACKEND=wine`). Set `TUXEXE_X86_BACKEND=native` to force in-process experimental path.
+Legacy `TUXEXE_X86_BACKEND` values are ignored with a warning for compatibility; no external backend is spawned.
 
 ---
 
@@ -474,12 +474,12 @@ Current runtime behavior: `tuxexe run` delegates x86 execution to an external ba
 | 0     | Project skeleton builds & tests    | ✅     | Tooling               |
 | 1     | PE headers parsed, sections mapped | ✅     | PE loader correctness |
 | 2     | **hello.exe prints "Hello World"** | ✅     | End-to-end execution  |
-| 3     | Multi-threaded app works           | 🟨     | Threading + sync      |
+| 3     | Multi-threaded app works           | ✅     | Threading + sync      |
 | 4     | File I/O + registry queries work   | ✅     | OS services           |
 | 5     | LoadLibrary + DLL plugins work     | ✅     | Dynamic loading       |
-| 6     | HTTP client app works              | ✅     | Networking            |
+| 6     | HTTP client app works              | 🟨     | Networking            |
 | 7     | Win32 GUI window appears           | 🟨     | Graphics pipeline     |
-| 8     | DirectX demo renders               | ✅     | DXVK integration      |
+| 8     | DirectX demo renders               | 🟨     | DXVK integration      |
 | 9     | 32-bit exe runs on 64-bit          | 🟥     | WoW64                 |
 
 **The critical milestone is Phase 2**: once "Hello World" runs, everything else is incremental API coverage.

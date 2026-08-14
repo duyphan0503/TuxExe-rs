@@ -30,7 +30,30 @@ pub fn seed_minimal_defaults(store: &RegistryStore) -> Result<(), RegistryError>
     // HKCR\.exe → exefile
     set_sz(store, r"HKCR\.exe", Some(""), "exefile")?;
 
+    // Steam registry keys
+    let steam_user = r"HKCU\Software\Valve\Steam";
+    set_sz(store, steam_user, Some("SteamPath"), r"C:\Program Files (x86)\Steam")?;
+    set_sz(store, steam_user, Some("SteamExe"), r"C:\Program Files (x86)\Steam\steam.exe")?;
+
+    let steam_active = r"HKCU\Software\Valve\Steam\ActiveProcess";
+    set_sz(store, steam_active, Some("SteamClientDll64"), r"C:\Program Files (x86)\Steam\steamclient64.dll")?;
+    set_sz(store, steam_active, Some("SteamClientDll"), r"C:\Program Files (x86)\Steam\steamclient.dll")?;
+    set_u32(store, steam_active, Some("pid"), 1234)?;
+    set_u32(store, steam_active, Some("ActiveUser"), 1)?;
+
+    let steam_hklm = r"HKLM\SOFTWARE\Valve\Steam";
+    set_sz(store, steam_hklm, Some("InstallPath"), r"C:\Program Files (x86)\Steam")?;
+
     Ok(())
+}
+
+fn set_u32(
+    store: &RegistryStore,
+    path: &str,
+    name: Option<&str>,
+    value: u32,
+) -> Result<(), RegistryError> {
+    store.set_value(path, name, crate::registry::store::REG_DWORD, &value.to_le_bytes())
 }
 
 fn set_sz(

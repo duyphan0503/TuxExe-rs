@@ -201,6 +201,73 @@ pub extern "win64" fn system_time_to_tz_specific_local_time(
     1
 }
 
+/// Convert a local SYSTEMTIME to UTC. When no explicit Windows timezone is
+/// supplied, use the host's timezone database through `mktime`, which also
+/// accounts for daylight-saving time.
+pub extern "win64" fn tz_specific_local_time_to_system_time(
+    lp_time_zone_information: *const TimeZoneInformation,
+    lp_local_time: *const SystemTime,
+    lp_universal_time: *mut SystemTime,
+) -> i32 {
+    if lp_local_time.is_null() || lp_universal_time.is_null() {
+        crate::win32::kernel32::error::set_last_error(87);
+        return 0;
+    }
+    let local = unsafe { *lp_local_time };
+    if system_time_to_filetime_value(&local).is_none() {
+        crate::win32::kernel32::error::set_last_error(87);
+        return 0;
+    }
+
+    let unix_seconds = if lp_time_zone_information.is_null() {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        tm.tm_year = local.wYear as i32 - 1900;
+        tm.tm_mon = local.wMonth as i32 - 1;
+        tm.tm_mday = local.wDay as i32;
+        tm.tm_hour = local.wHour as i32;
+        tm.tm_min = local.wMinute as i32;
+        tm.tm_sec = local.wSecond as i32;
+        tm.tm_isdst = -1;
+        let value = unsafe { libc::mktime(&mut tm) };
+        if value == -1 {
+            crate::win32::kernel32::error::set_last_error(87);
+            return 0;
+        }
+        value
+    } else {
+        let bias_seconds = unsafe { (*lp_time_zone_information).Bias as i64 * 60 };
+        let filetime = system_time_to_filetime_value(&local).expect("validated above");
+        let local_seconds = (filetime / 10_000_000) as i64 - WINDOWS_EPOCH_DIFF_SECS as i64;
+        match local_seconds.checked_add(bias_seconds) {
+            Some(value) => value as libc::time_t,
+            None => {
+                crate::win32::kernel32::error::set_last_error(87);
+                return 0;
+            }
+        }
+    };
+
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&unix_seconds, &mut tm) }.is_null() {
+        crate::win32::kernel32::error::set_last_error(87);
+        return 0;
+    }
+    unsafe {
+        *lp_universal_time = SystemTime {
+            wYear: (tm.tm_year + 1900) as u16,
+            wMonth: (tm.tm_mon + 1) as u16,
+            wDayOfWeek: tm.tm_wday as u16,
+            wDay: tm.tm_mday as u16,
+            wHour: tm.tm_hour as u16,
+            wMinute: tm.tm_min as u16,
+            wSecond: tm.tm_sec as u16,
+            wMilliseconds: local.wMilliseconds,
+        };
+    }
+    crate::win32::kernel32::error::set_last_error(0);
+    1
+}
+
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "win64" fn file_time_to_system_time(
     lp_file_time: *const u64,

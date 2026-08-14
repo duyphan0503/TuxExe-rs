@@ -6,12 +6,13 @@ use std::{
     any::Any,
     ffi::c_void,
     panic,
-    sync::{Arc, Condvar, Mutex},
+    collections::HashMap,
+    sync::{Arc, Condvar, Mutex, OnceLock, Weak},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
-use tracing::{trace, warn};
+use tracing::{info, trace, warn};
 
 use crate::{
     threading::{teb, tls},
@@ -28,6 +29,15 @@ pub const CURRENT_THREAD_PSEUDO_HANDLE: Handle = 0xFFFF_FFFE;
 
 type ThreadStartRoutine = unsafe extern "win64" fn(*mut c_void) -> u32;
 
+thread_local! {
+    // A Windows current-thread pseudo handle is valid for SuspendThread and
+    // ResumeThread.  Suspending the host thread executing the call would make
+    // the runtime unable to return, so keep the observable counter locally.
+    // This is enough for Mono's GC bookkeeping, which only needs the pair to
+    // succeed for the collector thread itself.
+    static CURRENT_THREAD_SUSPEND_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Debug)]
 struct ThreadControl {
     completed: bool,
@@ -40,6 +50,41 @@ struct ThreadControl {
 pub struct ThreadHandleObject {
     control: Arc<(Mutex<ThreadControl>, Condvar)>,
     join_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+/// A non-owning handle returned by OpenThread.  Unlike the CreateThread handle
+/// it must not consume the JoinHandle when callers close it.
+#[derive(Debug)]
+pub struct ThreadReferenceHandleObject {
+    control: Arc<(Mutex<ThreadControl>, Condvar)>,
+}
+
+impl ThreadReferenceHandleObject {
+    pub fn os_thread_id(&self) -> u32 {
+        self.control.0.lock().expect("thread control poisoned").os_thread_id
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.control.0.lock().expect("thread control poisoned").completed
+    }
+}
+
+impl HandleObject for ThreadReferenceHandleObject {
+    fn type_name(&self) -> &'static str {
+        "ThreadReferenceHandle"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+type ThreadControlRef = Arc<(Mutex<ThreadControl>, Condvar)>;
+
+fn thread_registry() -> &'static Mutex<HashMap<u32, Weak<(Mutex<ThreadControl>, Condvar)>>> {
+    static THREADS: OnceLock<Mutex<HashMap<u32, Weak<(Mutex<ThreadControl>, Condvar)>>>> =
+        OnceLock::new();
+    THREADS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl ThreadHandleObject {
@@ -95,13 +140,8 @@ impl ThreadHandleObject {
         WAIT_OBJECT_0
     }
 
-    fn clone_wait_handles(
-        &self,
-    ) -> (
-        Arc<(Mutex<ThreadControl>, Condvar)>,
-        Arc<Mutex<Option<JoinHandle<()>>>>,
-    ) {
-        (self.control.clone(), self.join_handle.clone())
+    pub fn is_completed(&self) -> bool {
+        self.control.0.lock().expect("thread control poisoned").completed
     }
 
     pub fn os_thread_id(&self) -> u32 {
@@ -155,11 +195,53 @@ fn wait_for_start(control: &Arc<(Mutex<ThreadControl>, Condvar)>) {
     let (lock, condvar) = &**control;
     let mut guard = lock.lock().expect("thread control poisoned");
     guard.os_thread_id = current_thread_id();
+    thread_registry()
+        .lock()
+        .expect("thread registry poisoned")
+        .insert(guard.os_thread_id, Arc::downgrade(control));
     condvar.notify_all();
 
     while guard.suspend_count > 0 {
         guard = condvar.wait(guard).expect("thread control poisoned");
     }
+}
+
+fn control_for_handle(handle: Handle) -> Option<ThreadControlRef> {
+    global_table().with(handle, |object| {
+        object
+            .as_any()
+            .downcast_ref::<ThreadHandleObject>()
+            .map(|thread| thread.control.clone())
+            .or_else(|| {
+                object
+                    .as_any()
+                    .downcast_ref::<ThreadReferenceHandleObject>()
+                    .map(|thread| thread.control.clone())
+            })
+    })?
+}
+
+/// Return a distinct Windows handle for a guest OS thread ID, mirroring
+/// OpenThread rather than substituting the current-thread pseudo handle.
+pub fn open_thread_by_id(thread_id: u32) -> Option<Handle> {
+    init_global_table();
+    let control = {
+        let mut registry = thread_registry().lock().expect("thread registry poisoned");
+        let control = registry.get(&thread_id).and_then(Weak::upgrade);
+        if control.is_none() {
+            registry.remove(&thread_id);
+        }
+        control
+    }?;
+    Some(global_table().alloc(Box::new(ThreadReferenceHandleObject { control })))
+}
+
+/// Snapshot the live guest thread IDs.  The caller can add its own host thread
+/// when required, but must not fabricate handles for unknown threads.
+pub fn live_thread_ids() -> Vec<u32> {
+    let mut registry = thread_registry().lock().expect("thread registry poisoned");
+    registry.retain(|_, control| control.upgrade().is_some());
+    registry.keys().copied().collect()
 }
 
 fn finish_thread(control: &Arc<(Mutex<ThreadControl>, Condvar)>, exit_code: u32) {
@@ -198,11 +280,8 @@ pub fn create_thread(
     let start_address = start as usize;
     let parameter = parameter as usize;
     let control_clone = Arc::clone(&control);
-    let builder = if stack_size > 0 {
-        thread::Builder::new().stack_size(stack_size)
-    } else {
-        thread::Builder::new()
-    };
+    let actual_stack_size = if stack_size > 0 { stack_size.max(4 * 1024 * 1024) } else { 4 * 1024 * 1024 };
+    let builder = thread::Builder::new().stack_size(actual_stack_size);
 
     let join_handle = match builder.spawn(move || {
         let start: ThreadStartRoutine = unsafe { std::mem::transmute(start_address) };
@@ -214,10 +293,18 @@ pub fn create_thread(
 
         wait_for_start(&control_clone);
         tls::invoke_thread_attach_callbacks();
+        crate::dll_manager::loader::invoke_thread_attach_dll_mains();
 
-        let result = panic::catch_unwind(|| unsafe { start(parameter) });
+        let result = panic::catch_unwind(|| {
+            crate::runtime::guest_stack::invoke_thread(start as usize, parameter)
+                .map_err(|error| format!("guest thread stack transition failed: {error}"))
+        });
         let exit_code = match result {
-            Ok(code) => code,
+            Ok(Ok(code)) => code,
+            Ok(Err(error)) => {
+                warn!(%error, "Guest thread could not enter PE64 routine");
+                THREAD_EXIT_PANIC
+            }
             Err(payload) => match payload.downcast::<ThreadExitSignal>() {
                 Ok(signal) => signal.0,
                 Err(_) => THREAD_EXIT_PANIC,
@@ -269,10 +356,13 @@ fn wait_for_thread_id(handle: Handle) -> u32 {
 pub fn wait_for_thread(handle: Handle, timeout_ms: u32) -> u32 {
     let waiter = global_table()
         .with(handle, |object| {
-            object
-                .as_any()
-                .downcast_ref::<ThreadHandleObject>()
-                .map(ThreadHandleObject::clone_wait_handles)
+            if let Some(th) = object.as_any().downcast_ref::<ThreadHandleObject>() {
+                return Some((th.control.clone(), Some(th.join_handle.clone())));
+            }
+            if let Some(tr) = object.as_any().downcast_ref::<ThreadReferenceHandleObject>() {
+                return Some((tr.control.clone(), None));
+            }
+            None
         })
         .flatten();
 
@@ -280,25 +370,95 @@ pub fn wait_for_thread(handle: Handle, timeout_ms: u32) -> u32 {
         return WAIT_FAILED;
     };
 
-    ThreadHandleObject::wait_with_handles(control, join_handle, timeout_ms)
+    if let Some(join) = join_handle {
+        ThreadHandleObject::wait_with_handles(control, join, timeout_ms)
+    } else {
+        let (lock, condvar) = &*control;
+        let mut guard = lock.lock().expect("thread control poisoned");
+        if timeout_ms == INFINITE {
+            while !guard.completed {
+                guard = condvar.wait(guard).expect("thread control poisoned");
+            }
+            WAIT_OBJECT_0
+        } else {
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+            while !guard.completed {
+                let now = Instant::now();
+                if now >= deadline {
+                    return WAIT_TIMEOUT;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                let (next, timeout) =
+                    condvar.wait_timeout(guard, remaining).expect("thread control poisoned");
+                guard = next;
+                if timeout.timed_out() {
+                    return WAIT_TIMEOUT;
+                }
+            }
+            if guard.completed {
+                WAIT_OBJECT_0
+            } else {
+                WAIT_TIMEOUT
+            }
+        }
+    }
 }
 
 pub fn suspend_thread(handle: Handle) -> u32 {
-    global_table()
-        .with(handle, |object| {
-            object.as_any().downcast_ref::<ThreadHandleObject>().map(ThreadHandleObject::suspend)
+    if handle == CURRENT_THREAD_PSEUDO_HANDLE {
+        return CURRENT_THREAD_SUSPEND_COUNT.with(|count| {
+            let previous = count.get();
+            count.set(previous.saturating_add(1));
+            previous
+        });
+    }
+
+    let result = control_for_handle(handle)
+        .map(|control| {
+            let (lock, _) = &*control;
+            let mut guard = lock.lock().expect("thread control poisoned");
+            let previous = guard.suspend_count;
+            guard.suspend_count = guard.suspend_count.saturating_add(1);
+            previous
         })
-        .flatten()
-        .unwrap_or(u32::MAX)
+        .unwrap_or(u32::MAX);
+    if result == u32::MAX {
+        info!(handle, "SuspendThread rejected unknown thread handle");
+    } else {
+        info!(handle, previous_suspend_count = result, "SuspendThread accepted guest thread");
+    }
+    result
 }
 
 pub fn resume_thread(handle: Handle) -> u32 {
-    global_table()
-        .with(handle, |object| {
-            object.as_any().downcast_ref::<ThreadHandleObject>().map(ThreadHandleObject::resume)
+    if handle == CURRENT_THREAD_PSEUDO_HANDLE {
+        return CURRENT_THREAD_SUSPEND_COUNT.with(|count| {
+            let previous = count.get();
+            count.set(previous.saturating_sub(1));
+            previous
+        });
+    }
+
+    let result = control_for_handle(handle)
+        .map(|control| {
+            let (lock, condvar) = &*control;
+            let mut guard = lock.lock().expect("thread control poisoned");
+            let previous = guard.suspend_count;
+            if guard.suspend_count > 0 {
+                guard.suspend_count -= 1;
+                if guard.suspend_count == 0 {
+                    condvar.notify_all();
+                }
+            }
+            previous
         })
-        .flatten()
-        .unwrap_or(u32::MAX)
+        .unwrap_or(u32::MAX);
+    if result == u32::MAX {
+        info!(handle, "ResumeThread rejected unknown thread handle");
+    } else {
+        info!(handle, previous_suspend_count = result, "ResumeThread accepted guest thread");
+    }
+    result
 }
 
 pub fn current_thread_pseudo_handle() -> Handle {
@@ -373,4 +533,17 @@ mod tests {
         assert_eq!(wait_for_thread(handle, INFINITE), WAIT_OBJECT_0);
         assert_eq!(THREAD_RESULT.load(Ordering::SeqCst), 9);
     }
+
+    #[test]
+    fn current_thread_pseudo_handle_has_a_balanced_suspend_count() {
+        let _guard = serial_guard();
+        while resume_thread(CURRENT_THREAD_PSEUDO_HANDLE) != 0 {}
+
+        assert_eq!(suspend_thread(CURRENT_THREAD_PSEUDO_HANDLE), 0);
+        assert_eq!(suspend_thread(CURRENT_THREAD_PSEUDO_HANDLE), 1);
+        assert_eq!(resume_thread(CURRENT_THREAD_PSEUDO_HANDLE), 2);
+        assert_eq!(resume_thread(CURRENT_THREAD_PSEUDO_HANDLE), 1);
+        assert_eq!(resume_thread(CURRENT_THREAD_PSEUDO_HANDLE), 0);
+    }
+
 }

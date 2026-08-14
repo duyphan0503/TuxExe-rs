@@ -2,6 +2,7 @@
 
 use std::{
     any::Any,
+    collections::HashMap,
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
@@ -17,6 +18,12 @@ pub const WAIT_ABANDONED_0: u32 = 0x80;
 pub const WAIT_TIMEOUT: u32 = 258;
 pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 pub const INFINITE: u32 = 0xFFFF_FFFF;
+
+/// Reserved by the TuxExe-flavoured DXVK build for the DXGI frame-latency
+/// waitable object. It has no host kernel counterpart; DXVK signals it after
+/// each frame, so exposing it as immediately signalled is the compatible
+/// fallback until native handle duplication is implemented cross-ABI.
+pub const DXVK_FRAME_LATENCY_HANDLE: Handle = 0xd7a1_0001;
 
 #[derive(Debug)]
 struct MutexState {
@@ -43,6 +50,10 @@ impl MutexHandleObject {
         }
     }
 
+    fn from_state(state: Arc<(Mutex<MutexState>, Condvar)>) -> Self {
+        Self { state }
+    }
+
     fn release(&self) -> i32 {
         let (lock, condvar) = &*self.state;
         let mut guard = lock.lock().expect("mutex state poisoned");
@@ -59,6 +70,14 @@ impl MutexHandleObject {
         }
         1
     }
+}
+
+fn named_mutexes() -> &'static Mutex<HashMap<String, std::sync::Weak<(Mutex<MutexState>, Condvar)>>>
+{
+    static MUTEXES: std::sync::OnceLock<
+        Mutex<HashMap<String, std::sync::Weak<(Mutex<MutexState>, Condvar)>>>,
+    > = std::sync::OnceLock::new();
+    MUTEXES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn wait_on_mutex_state(state: Arc<(Mutex<MutexState>, Condvar)>, timeout_ms: u32) -> u32 {
@@ -215,6 +234,10 @@ impl SemaphoreHandleObject {
         }
     }
 
+    fn from_state(state: Arc<(Mutex<SemaphoreState>, Condvar)>) -> Self {
+        Self { state }
+    }
+
     fn release(&self, release_count: i32, previous_count: *mut i32) -> i32 {
         let (lock, condvar) = &*self.state;
         let mut guard = lock.lock().expect("semaphore state poisoned");
@@ -232,6 +255,14 @@ impl SemaphoreHandleObject {
         condvar.notify_all();
         1
     }
+}
+
+fn named_semaphores(
+) -> &'static Mutex<HashMap<String, std::sync::Weak<(Mutex<SemaphoreState>, Condvar)>>> {
+    static SEMAPHORES: std::sync::OnceLock<
+        Mutex<HashMap<String, std::sync::Weak<(Mutex<SemaphoreState>, Condvar)>>>,
+    > = std::sync::OnceLock::new();
+    SEMAPHORES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn wait_on_semaphore_state(state: Arc<(Mutex<SemaphoreState>, Condvar)>, timeout_ms: u32) -> u32 {
@@ -285,6 +316,38 @@ pub fn create_mutex(initial_owner: bool) -> Handle {
     global_table().alloc(Box::new(MutexHandleObject::new(initial_owner)))
 }
 
+/// Returns `(handle, already_existed)`. Named kernel objects share state but
+/// every open receives an independently closeable handle.
+pub fn create_named_mutex(name: Option<&str>, initial_owner: bool) -> (Handle, bool) {
+    let Some(name) = name.filter(|name| !name.is_empty()) else {
+        return (create_mutex(initial_owner), false);
+    };
+    init_global_table();
+    let key = name.to_ascii_lowercase();
+    let mut named = named_mutexes().lock().expect("named mutex registry poisoned");
+    let (state, existed) = match named.get(&key).and_then(std::sync::Weak::upgrade) {
+        Some(state) => (state, true),
+        None => {
+            let state = MutexHandleObject::new(initial_owner).state;
+            named.insert(key, Arc::downgrade(&state));
+            (state, false)
+        }
+    };
+    let handle = global_table().alloc(Box::new(MutexHandleObject::from_state(state)));
+    (handle, existed)
+}
+
+pub fn open_named_mutex(name: &str) -> Option<Handle> {
+    init_global_table();
+    let key = name.to_ascii_lowercase();
+    let state = named_mutexes()
+        .lock()
+        .expect("named mutex registry poisoned")
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade)?;
+    Some(global_table().alloc(Box::new(MutexHandleObject::from_state(state))))
+}
+
 pub fn create_event(manual_reset: bool, initial_state: bool) -> Handle {
     init_global_table();
     global_table().alloc(Box::new(EventHandleObject::new(manual_reset, initial_state)))
@@ -316,6 +379,43 @@ pub fn create_semaphore(initial_count: i32, maximum_count: i32) -> Handle {
 
     init_global_table();
     global_table().alloc(Box::new(SemaphoreHandleObject::new(normalized_initial, normalized_max)))
+}
+
+pub fn create_named_semaphore(
+    name: Option<&str>,
+    initial_count: i32,
+    maximum_count: i32,
+) -> (Handle, bool) {
+    let Some(name) = name.filter(|name| !name.is_empty()) else {
+        return (create_semaphore(initial_count, maximum_count), false);
+    };
+    let mut normalized_initial = initial_count.max(0);
+    let normalized_max = maximum_count.max(1);
+    normalized_initial = normalized_initial.min(normalized_max);
+    init_global_table();
+    let key = name.to_ascii_lowercase();
+    let mut named = named_semaphores().lock().expect("named semaphore registry poisoned");
+    let (state, existed) = match named.get(&key).and_then(std::sync::Weak::upgrade) {
+        Some(state) => (state, true),
+        None => {
+            let state = SemaphoreHandleObject::new(normalized_initial, normalized_max).state;
+            named.insert(key, Arc::downgrade(&state));
+            (state, false)
+        }
+    };
+    let handle = global_table().alloc(Box::new(SemaphoreHandleObject::from_state(state)));
+    (handle, existed)
+}
+
+pub fn open_named_semaphore(name: &str) -> Option<Handle> {
+    init_global_table();
+    let key = name.to_ascii_lowercase();
+    let state = named_semaphores()
+        .lock()
+        .expect("named semaphore registry poisoned")
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade)?;
+    Some(global_table().alloc(Box::new(SemaphoreHandleObject::from_state(state))))
 }
 
 pub fn release_mutex(handle: Handle) -> i32 {
@@ -357,7 +457,44 @@ pub fn release_semaphore(handle: Handle, release_count: i32, previous_count: *mu
         .unwrap_or(0)
 }
 
+pub fn is_signaled(handle: Handle) -> Result<bool, ()> {
+    if handle == DXVK_FRAME_LATENCY_HANDLE {
+        return Ok(true);
+    }
+    let current_tid = thread::current_os_thread_id();
+    let res = global_table().with(handle, |object| {
+        if let Some(th) = object.as_any().downcast_ref::<thread::ThreadHandleObject>() {
+            return Ok(th.is_completed());
+        }
+        if let Some(tr) = object.as_any().downcast_ref::<thread::ThreadReferenceHandleObject>() {
+            return Ok(tr.is_completed());
+        }
+        if let Some(mutex) = object.as_any().downcast_ref::<MutexHandleObject>() {
+            let (lock, _) = &*mutex.state;
+            let guard = lock.lock().expect("mutex state poisoned");
+            let sig = guard.owner_tid.is_none() || guard.owner_tid == Some(current_tid);
+            return Ok(sig);
+        }
+        if let Some(event) = object.as_any().downcast_ref::<EventHandleObject>() {
+            let (lock, _) = &*event.state;
+            let guard = lock.lock().expect("event state poisoned");
+            return Ok(guard.signaled);
+        }
+        if let Some(semaphore) = object.as_any().downcast_ref::<SemaphoreHandleObject>() {
+            let (lock, _) = &*semaphore.state;
+            let guard = lock.lock().expect("semaphore state poisoned");
+            return Ok(guard.count > 0);
+        }
+        Err(())
+    });
+    res.unwrap_or(Err(()))
+}
+
 pub fn wait_for_single_object(handle: Handle, timeout_ms: u32) -> u32 {
+    if handle == DXVK_FRAME_LATENCY_HANDLE {
+        return WAIT_OBJECT_0;
+    }
+
     enum WaitTarget {
         Thread(Handle),
         Mutex(Arc<(Mutex<MutexState>, Condvar)>),
@@ -366,7 +503,9 @@ pub fn wait_for_single_object(handle: Handle, timeout_ms: u32) -> u32 {
     }
 
     let target = global_table().with(handle, |object| {
-        if object.as_any().is::<thread::ThreadHandleObject>() {
+        if object.as_any().is::<thread::ThreadHandleObject>()
+            || object.as_any().is::<thread::ThreadReferenceHandleObject>()
+        {
             return Some(WaitTarget::Thread(handle));
         }
         if let Some(mutex) = object.as_any().downcast_ref::<MutexHandleObject>() {
@@ -382,7 +521,9 @@ pub fn wait_for_single_object(handle: Handle, timeout_ms: u32) -> u32 {
     });
 
     match target.flatten() {
-        Some(WaitTarget::Thread(thread_handle)) => thread::wait_for_thread(thread_handle, timeout_ms),
+        Some(WaitTarget::Thread(thread_handle)) => {
+            thread::wait_for_thread(thread_handle, timeout_ms)
+        }
         Some(WaitTarget::Mutex(state)) => wait_on_mutex_state(state, timeout_ms),
         Some(WaitTarget::Event(state)) => wait_on_event_state(state, timeout_ms),
         Some(WaitTarget::Semaphore(state)) => wait_on_semaphore_state(state, timeout_ms),
@@ -395,29 +536,10 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
         return WAIT_FAILED;
     }
 
-    if wait_all {
-        let deadline = if timeout_ms == INFINITE {
-            None
-        } else {
-            Some(Instant::now() + Duration::from_millis(timeout_ms as u64))
-        };
-
-        for handle in handles {
-            let timeout = deadline
-                .map(|end| end.saturating_duration_since(Instant::now()))
-                .unwrap_or(Duration::from_secs(u64::MAX / 2));
-            let timeout_ms = if deadline.is_none() {
-                INFINITE
-            } else {
-                timeout.as_millis().min(u32::MAX as u128) as u32
-            };
-
-            let result = wait_for_single_object(*handle, timeout_ms);
-            if result != WAIT_OBJECT_0 {
-                return result;
-            }
+    for handle in handles {
+        if is_signaled(*handle).is_err() {
+            return WAIT_FAILED;
         }
-        return WAIT_OBJECT_0;
     }
 
     let deadline = if timeout_ms == INFINITE {
@@ -425,6 +547,43 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
     } else {
         Some(Instant::now() + Duration::from_millis(timeout_ms as u64))
     };
+
+    if wait_all {
+        loop {
+            let mut all_signaled = true;
+            for handle in handles {
+                match is_signaled(*handle) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        all_signaled = false;
+                        break;
+                    }
+                    Err(()) => return WAIT_FAILED,
+                }
+            }
+
+            if all_signaled {
+                for handle in handles {
+                    let result = wait_for_single_object(*handle, 0);
+                    if result != WAIT_OBJECT_0 {
+                        all_signaled = false;
+                        break;
+                    }
+                }
+                if all_signaled {
+                    return WAIT_OBJECT_0;
+                }
+            }
+
+            if let Some(end) = deadline {
+                if Instant::now() >= end {
+                    return WAIT_TIMEOUT;
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     loop {
         for (index, handle) in handles.iter().enumerate() {
@@ -483,5 +642,69 @@ mod tests {
         assert_eq!(wait_for_single_object(mutex, INFINITE), WAIT_OBJECT_0);
         assert_eq!(release_mutex(mutex), 1);
         assert_eq!(release_mutex(mutex), 1);
+    }
+
+    #[test]
+    fn wait_for_multiple_objects_wait_all_preserves_auto_reset_events_until_all_signaled() {
+        let _guard = serial_guard();
+        let ev1 = create_event(false, false); // auto-reset
+        let ev2 = create_event(false, false); // auto-reset
+
+        set_event(ev1);
+        // ev1 is signaled, ev2 is not. wait_all should timeout without consuming ev1.
+        assert_eq!(wait_for_multiple_objects(&[ev1, ev2], true, 10), WAIT_TIMEOUT);
+
+        // Verify ev1 is still signaled!
+        assert_eq!(is_signaled(ev1), Ok(true));
+
+        // Now set ev2, and wait_all should succeed and atomically consume both ev1 and ev2.
+        set_event(ev2);
+        assert_eq!(wait_for_multiple_objects(&[ev1, ev2], true, 100), WAIT_OBJECT_0);
+
+        // Verify both auto-reset events were consumed
+        assert_eq!(is_signaled(ev1), Ok(false));
+        assert_eq!(is_signaled(ev2), Ok(false));
+    }
+
+    #[test]
+    fn wait_for_thread_reference_handle_and_is_signaled() {
+        let _guard = serial_guard();
+        let ev = create_event(true, false);
+        let ev_copy = ev;
+
+        let thread_handle = thread::create_thread(
+            std::ptr::null(),
+            0,
+            thread_worker as *const std::ffi::c_void,
+            ev_copy as usize as *mut std::ffi::c_void,
+            0,
+            std::ptr::null_mut(),
+        );
+        assert_ne!(thread_handle, INVALID_HANDLE_VALUE);
+
+        let os_tid = global_table()
+            .with(thread_handle, |obj| {
+                obj.as_any()
+                    .downcast_ref::<thread::ThreadHandleObject>()
+                    .map(thread::ThreadHandleObject::os_thread_id)
+            })
+            .flatten()
+            .expect("must have os_tid");
+
+        let ref_handle = thread::open_thread_by_id(os_tid).expect("open_thread_by_id");
+        assert_eq!(is_signaled(ref_handle), Ok(false));
+
+        // Signal event to let worker exit
+        set_event(ev);
+
+        // Wait on the reference handle
+        assert_eq!(wait_for_single_object(ref_handle, 2000), WAIT_OBJECT_0);
+        assert_eq!(is_signaled(ref_handle), Ok(true));
+    }
+
+    extern "win64" fn thread_worker(param: *mut std::ffi::c_void) -> u32 {
+        let ev = param as usize as Handle;
+        wait_for_single_object(ev, INFINITE);
+        0
     }
 }

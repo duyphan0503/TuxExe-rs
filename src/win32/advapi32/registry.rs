@@ -40,24 +40,32 @@ fn get_registry_store() -> &'static RegistryStore {
     REGISTRY.get_or_init(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let db_path = format!("{}/.tuxexe/registry.db", home);
-        std::fs::create_dir_all(format!("{}/.tuxexe", home)).ok();
+        let _ = std::fs::create_dir_all(format!("{}/.tuxexe", home));
 
-        RegistryStore::new(db_path.into()).expect("Failed to initialize registry")
+        let store = RegistryStore::new(db_path.into()).unwrap_or_else(|e| {
+            tracing::warn!("Failed to initialize registry ({e}), falling back to temp memory");
+            RegistryStore::new("/tmp/tuxexe_registry.db".into())
+                .unwrap_or_else(|_| RegistryStore::new("file:tuxexe_reg?mode=memory&cache=shared".into()).expect("memory registry"))
+        });
+        let _ = crate::registry::defaults::seed_minimal_defaults(&store);
+        store
     })
 }
 
 fn hkey_to_path(hKey: usize) -> Option<String> {
-    match hKey {
-        HKEY_CLASSES_ROOT => Some("HKEY_CLASSES_ROOT".to_string()),
-        HKEY_CURRENT_USER => Some("HKEY_CURRENT_USER".to_string()),
-        HKEY_LOCAL_MACHINE => Some("HKEY_LOCAL_MACHINE".to_string()),
-        HKEY_USERS => Some("HKEY_USERS".to_string()),
-        HKEY_CURRENT_CONFIG => Some("HKEY_CURRENT_CONFIG".to_string()),
+    // PE64 callers commonly sign-extend predefined 32-bit HKEY constants.
+    // Normalize to the low DWORD before matching them.
+    match hKey as u32 {
+        x if x == HKEY_CLASSES_ROOT as u32 => Some("HKEY_CLASSES_ROOT".to_string()),
+        x if x == HKEY_CURRENT_USER as u32 => Some("HKEY_CURRENT_USER".to_string()),
+        x if x == HKEY_LOCAL_MACHINE as u32 => Some("HKEY_LOCAL_MACHINE".to_string()),
+        x if x == HKEY_USERS as u32 => Some("HKEY_USERS".to_string()),
+        x if x == HKEY_CURRENT_CONFIG as u32 => Some("HKEY_CURRENT_CONFIG".to_string()),
         _ => {
             // Try to get from handle table
             let table = global_table();
             table
-                .with(hKey as u32, |obj| {
+                .with(hKey, |obj| {
                     obj.as_any().downcast_ref::<RegistryKeyHandle>().map(|key| key.path.clone())
                 })
                 .flatten()
@@ -138,6 +146,26 @@ pub extern "win64" fn RegOpenKeyExW(
     RegOpenKeyExA(hKey, subkey_cstr.as_ptr(), _ulOptions, samDesired, phkResult)
 }
 
+/// RegOpenKeyA - Open registry key (ANSI legacy)
+#[no_mangle]
+pub extern "win64" fn RegOpenKeyA(
+    hKey: usize,
+    lpSubKey: *const u8,
+    phkResult: *mut usize,
+) -> i32 {
+    RegOpenKeyExA(hKey, lpSubKey, 0, 0x20019, phkResult)
+}
+
+/// RegOpenKeyW - Open registry key (Unicode legacy)
+#[no_mangle]
+pub extern "win64" fn RegOpenKeyW(
+    hKey: usize,
+    lpSubKey: *const u16,
+    phkResult: *mut usize,
+) -> i32 {
+    RegOpenKeyExW(hKey, lpSubKey, 0, 0x20019, phkResult)
+}
+
 /// RegCloseKey - Close registry key
 #[no_mangle]
 pub extern "win64" fn RegCloseKey(hKey: usize) -> i32 {
@@ -155,7 +183,7 @@ pub extern "win64" fn RegCloseKey(hKey: usize) -> i32 {
 
     // Remove from handle table
     let table = global_table();
-    table.close_handle(hKey as u32);
+    table.close_handle(hKey);
 
     ERROR_SUCCESS
 }
@@ -354,8 +382,16 @@ pub extern "win64" fn RegCreateKeyExA(
         let store = get_registry_store();
         let _ = store.set_value(&full_path, Some("__created__"), REG_SZ, b"");
 
-        // Try to open again
-        return RegOpenKeyExA(hKey, lpSubKey, 0, 0, phkResult);
+        if phkResult.is_null() {
+            return ERROR_FILE_NOT_FOUND;
+        }
+
+        let key_handle = RegistryKeyHandle { path: full_path };
+        let handle = global_table().alloc(Box::new(key_handle));
+        unsafe {
+            *phkResult = handle as usize;
+        }
+        return ERROR_SUCCESS;
     }
 
     result
@@ -547,4 +583,282 @@ pub extern "win64" fn RegEnumKeyExW(
         }
         _ => ERROR_FILE_NOT_FOUND,
     }
+}
+
+/// RegNotifyChangeKeyValue - Notify registry key changes (Stub)
+#[no_mangle]
+pub extern "win64" fn RegNotifyChangeKeyValue(
+    _hKey: usize,
+    _bWatchSubtree: i32,
+    _dwNotifyFilter: u32,
+    _hEvent: usize,
+    _fAsynchronous: i32,
+) -> i32 {
+    tracing::debug!("RegNotifyChangeKeyValue called — stub success");
+    ERROR_SUCCESS
+}
+
+/// RegDeleteValueW - Delete registry value (Unicode)
+#[no_mangle]
+pub extern "win64" fn RegDeleteValueW(hKey: usize, lpValueName: *const u16) -> i32 {
+    let path = match hkey_to_path(hKey) {
+        Some(p) => p,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+    let value_name = if lpValueName.is_null() {
+        String::new()
+    } else {
+        unsafe { crate::utils::wide_string::from_wide_ptr(lpValueName) }.unwrap_or_default()
+    };
+    let store = get_registry_store();
+    let _ = store.delete_value(&path, Some(&value_name));
+    ERROR_SUCCESS
+}
+
+/// RegDeleteTreeA - Delete registry tree (ANSI)
+#[no_mangle]
+pub extern "win64" fn RegDeleteTreeA(hKey: usize, lpSubKey: *const u8) -> i32 {
+    let base_path = match hkey_to_path(hKey) {
+        Some(p) => p,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+    let full_path = if lpSubKey.is_null() {
+        base_path
+    } else {
+        let sub = unsafe { CStr::from_ptr(lpSubKey as *const i8) }.to_string_lossy();
+        if sub.is_empty() {
+            base_path
+        } else {
+            format!("{}\\{}", base_path, sub)
+        }
+    };
+    let store = get_registry_store();
+    let _ = store.delete_tree(&full_path);
+    ERROR_SUCCESS
+}
+
+/// RegDeleteTreeW - Delete registry tree (Unicode)
+#[no_mangle]
+pub extern "win64" fn RegDeleteTreeW(hKey: usize, lpSubKey: *const u16) -> i32 {
+    let base_path = match hkey_to_path(hKey) {
+        Some(p) => p,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+    let full_path = if lpSubKey.is_null() {
+        base_path
+    } else {
+        let sub = unsafe { crate::utils::wide_string::from_wide_ptr(lpSubKey) }.unwrap_or_default();
+        if sub.is_empty() {
+            base_path
+        } else {
+            format!("{}\\{}", base_path, sub)
+        }
+    };
+    let store = get_registry_store();
+    let _ = store.delete_tree(&full_path);
+    ERROR_SUCCESS
+}
+
+/// RegEnumValueA - Enumerate registry values (ANSI)
+#[no_mangle]
+pub extern "win64" fn RegEnumValueA(
+    hKey: usize,
+    dwIndex: u32,
+    lpValueName: *mut u8,
+    lpcchValueName: *mut u32,
+    _lpReserved: *const u32,
+    lpType: *mut u32,
+    lpData: *mut u8,
+    lpcbData: *mut u32,
+) -> i32 {
+    if lpValueName.is_null() || lpcchValueName.is_null() {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    let path = match hkey_to_path(hKey) {
+        Some(p) => p,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+    let store = get_registry_store();
+    match store.enum_values(&path) {
+        Ok(values) => {
+            if (dwIndex as usize) >= values.len() {
+                return ERROR_NO_MORE_ITEMS;
+            }
+            let (name, val) = &values[dwIndex as usize];
+            let name_bytes = name.as_bytes();
+            unsafe {
+                let max_len = *lpcchValueName as usize;
+                if max_len <= name_bytes.len() {
+                    *lpcchValueName = (name_bytes.len() + 1) as u32;
+                    return ERROR_MORE_DATA;
+                }
+                ptr::copy_nonoverlapping(name_bytes.as_ptr(), lpValueName, name_bytes.len());
+                *lpValueName.add(name_bytes.len()) = 0;
+                *lpcchValueName = name_bytes.len() as u32;
+
+                if !lpType.is_null() {
+                    *lpType = val.reg_type;
+                }
+                if !lpData.is_null() && !lpcbData.is_null() {
+                    let buf_len = *lpcbData as usize;
+                    let copy_len = buf_len.min(val.data.len());
+                    ptr::copy_nonoverlapping(val.data.as_ptr(), lpData, copy_len);
+                    *lpcbData = val.data.len() as u32;
+                } else if !lpcbData.is_null() {
+                    *lpcbData = val.data.len() as u32;
+                }
+            }
+            ERROR_SUCCESS
+        }
+        _ => ERROR_FILE_NOT_FOUND,
+    }
+}
+
+/// RegEnumValueW - Enumerate registry values (Unicode)
+#[no_mangle]
+pub extern "win64" fn RegEnumValueW(
+    hKey: usize,
+    dwIndex: u32,
+    lpValueName: *mut u16,
+    lpcchValueName: *mut u32,
+    _lpReserved: *const u32,
+    lpType: *mut u32,
+    lpData: *mut u8,
+    lpcbData: *mut u32,
+) -> i32 {
+    if lpValueName.is_null() || lpcchValueName.is_null() {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    let path = match hkey_to_path(hKey) {
+        Some(p) => p,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+    let store = get_registry_store();
+    match store.enum_values(&path) {
+        Ok(values) => {
+            if (dwIndex as usize) >= values.len() {
+                return ERROR_NO_MORE_ITEMS;
+            }
+            let (name, val) = &values[dwIndex as usize];
+            let name_wide = crate::utils::wide_string::str_to_wide(name);
+            unsafe {
+                let max_len = *lpcchValueName as usize;
+                if max_len <= name_wide.len() {
+                    *lpcchValueName = (name_wide.len() + 1) as u32;
+                    return ERROR_MORE_DATA;
+                }
+                ptr::copy_nonoverlapping(name_wide.as_ptr(), lpValueName, name_wide.len());
+                *lpValueName.add(name_wide.len()) = 0;
+                *lpcchValueName = name_wide.len() as u32;
+
+                if !lpType.is_null() {
+                    *lpType = val.reg_type;
+                }
+                if !lpData.is_null() && !lpcbData.is_null() {
+                    let buf_len = *lpcbData as usize;
+                    let copy_len = buf_len.min(val.data.len());
+                    ptr::copy_nonoverlapping(val.data.as_ptr(), lpData, copy_len);
+                    *lpcbData = val.data.len() as u32;
+                } else if !lpcbData.is_null() {
+                    *lpcbData = val.data.len() as u32;
+                }
+            }
+            ERROR_SUCCESS
+        }
+        _ => ERROR_FILE_NOT_FOUND,
+    }
+}
+
+/// RegQueryInfoKeyA - Query information about registry key (ANSI)
+#[no_mangle]
+pub extern "win64" fn RegQueryInfoKeyA(
+    hKey: usize,
+    _lpClass: *mut u8,
+    _lpcchClass: *mut u32,
+    _lpReserved: *const u32,
+    lpcSubKeys: *mut u32,
+    lpcbMaxSubKeyLen: *mut u32,
+    _lpcbMaxClassLen: *mut u32,
+    lpcValues: *mut u32,
+    lpcbMaxValueNameLen: *mut u32,
+    lpcbMaxValueLen: *mut u32,
+    _lpcbSecurityDescriptor: *mut u32,
+    _lpftLastWriteTime: *mut u64,
+) -> i32 {
+    let path = match hkey_to_path(hKey) {
+        Some(p) => p,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+    let store = get_registry_store();
+    let subkeys = store.enum_subkeys(&path).unwrap_or_default();
+    let values = store.enum_values(&path).unwrap_or_default();
+
+    unsafe {
+        if !lpcSubKeys.is_null() {
+            *lpcSubKeys = subkeys.len() as u32;
+        }
+        if !lpcbMaxSubKeyLen.is_null() {
+            let max_k = subkeys.iter().map(|k| k.len()).max().unwrap_or(0);
+            *lpcbMaxSubKeyLen = max_k as u32;
+        }
+        if !lpcValues.is_null() {
+            *lpcValues = values.len() as u32;
+        }
+        if !lpcbMaxValueNameLen.is_null() {
+            let max_v = values.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+            *lpcbMaxValueNameLen = max_v as u32;
+        }
+        if !lpcbMaxValueLen.is_null() {
+            let max_d = values.iter().map(|(_, v)| v.data.len()).max().unwrap_or(0);
+            *lpcbMaxValueLen = max_d as u32;
+        }
+    }
+    ERROR_SUCCESS
+}
+
+/// RegQueryInfoKeyW - Query information about registry key (Unicode)
+#[no_mangle]
+pub extern "win64" fn RegQueryInfoKeyW(
+    hKey: usize,
+    _lpClass: *mut u16,
+    _lpcchClass: *mut u32,
+    _lpReserved: *const u32,
+    lpcSubKeys: *mut u32,
+    lpcbMaxSubKeyLen: *mut u32,
+    _lpcbMaxClassLen: *mut u32,
+    lpcValues: *mut u32,
+    lpcbMaxValueNameLen: *mut u32,
+    lpcbMaxValueLen: *mut u32,
+    _lpcbSecurityDescriptor: *mut u32,
+    _lpftLastWriteTime: *mut u64,
+) -> i32 {
+    let path = match hkey_to_path(hKey) {
+        Some(p) => p,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+    let store = get_registry_store();
+    let subkeys = store.enum_subkeys(&path).unwrap_or_default();
+    let values = store.enum_values(&path).unwrap_or_default();
+
+    unsafe {
+        if !lpcSubKeys.is_null() {
+            *lpcSubKeys = subkeys.len() as u32;
+        }
+        if !lpcbMaxSubKeyLen.is_null() {
+            let max_k = subkeys.iter().map(|k| k.len()).max().unwrap_or(0);
+            *lpcbMaxSubKeyLen = max_k as u32;
+        }
+        if !lpcValues.is_null() {
+            *lpcValues = values.len() as u32;
+        }
+        if !lpcbMaxValueNameLen.is_null() {
+            let max_v = values.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+            *lpcbMaxValueNameLen = max_v as u32;
+        }
+        if !lpcbMaxValueLen.is_null() {
+            let max_d = values.iter().map(|(_, v)| v.data.len()).max().unwrap_or(0);
+            *lpcbMaxValueLen = max_d as u32;
+        }
+    }
+    ERROR_SUCCESS
 }

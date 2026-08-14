@@ -56,6 +56,7 @@ fn peek_or_pop_filtered(
 }
 
 fn get_message_blocking(hwnd_filter: usize, min_filter: u32, max_filter: u32) -> Msg {
+    crate::platform::x11::pump_x11_events();
     let (queue, condvar) = message_queue();
     let mut guard = queue.lock().expect("message queue poisoned");
 
@@ -67,6 +68,7 @@ fn get_message_blocking(hwnd_filter: usize, min_filter: u32, max_filter: u32) ->
             return guard.remove(index).expect("index must exist for a filtered message removal");
         }
 
+        crate::platform::x11::pump_x11_events();
         guard = condvar.wait(guard).expect("message queue poisoned");
     }
 }
@@ -116,6 +118,7 @@ pub extern "win64" fn PeekMessageA(
         return 0;
     }
 
+    crate::platform::x11::pump_x11_events();
     let remove = wRemoveMsg & PM_REMOVE != 0;
     let Some(message) = peek_or_pop_filtered(hWnd, wMsgFilterMin, wMsgFilterMax, remove) else {
         set_last_error(ERROR_SUCCESS);

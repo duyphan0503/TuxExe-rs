@@ -11,8 +11,13 @@ pub extern "win64" fn UnityMain(
     _lp_cmd_line: *const i8,
     _n_cmd_show: i32,
 ) -> i32 {
-    trace!("UnityMain called with hInstance=0x{:x}, hPrevInstance=0x{:x}, nCmdShow={}", _h_instance, _h_prev_instance, _n_cmd_show);
-    
+    trace!(
+        "UnityMain called with hInstance=0x{:x}, hPrevInstance=0x{:x}, nCmdShow={}",
+        _h_instance,
+        _h_prev_instance,
+        _n_cmd_show
+    );
+
     // For now, return success to allow Unity engine initialization
     // In a full implementation, this would initialize the Unity engine
     1
@@ -250,7 +255,11 @@ pub extern "win64" fn UnityRequestResizeWindow(_width: u32, _height: u32) -> i32
     1
 }
 
-pub extern "win64" fn UnityRequestSetScreenResolution(_width: u32, _height: u32, _refresh_rate: u32) -> i32 {
+pub extern "win64" fn UnityRequestSetScreenResolution(
+    _width: u32,
+    _height: u32,
+    _refresh_rate: u32,
+) -> i32 {
     trace!("UnityRequestSetScreenResolution({}, {}, {}) - stub", _width, _height, _refresh_rate);
     1
 }
@@ -337,14 +346,14 @@ pub extern "win64" fn UnityGetGfxJobSystem() -> *mut c_void {
 
 pub fn get_exports() -> std::collections::HashMap<&'static str, usize> {
     let mut exports = std::collections::HashMap::new();
-    
+
     exports.insert("UnityMain", UnityMain as usize);
     exports.insert("UnityGetD3D9Interface", UnityGetD3D9Interface as usize);
     exports.insert("UnityGetD3D11Interface", UnityGetD3D11Interface as usize);
     exports.insert("UnityGetD3D12Interface", UnityGetD3D12Interface as usize);
     exports.insert("UnityGetVulkanInterface", UnityGetVulkanInterface as usize);
     exports.insert("UnityGetGLInterface", UnityGetGLInterface as usize);
-    
+
     // Unity Engine Initialization Functions
     exports.insert("UnityInitDirect3D11", UnityInitDirect3D11 as usize);
     exports.insert("UnityInitDirect3D12", UnityInitDirect3D12 as usize);
@@ -357,7 +366,7 @@ pub fn get_exports() -> std::collections::HashMap<&'static str, usize> {
     exports.insert("UnityGetTexture2D", UnityGetTexture2D as usize);
     exports.insert("UnityPluginLoad", UnityPluginLoad as usize);
     exports.insert("UnityPluginUnload", UnityPluginUnload as usize);
-    
+
     // Unity Engine Core Functions
     exports.insert("UnityGetEngineAPI", UnityGetEngineAPI as usize);
     exports.insert("UnitySetEngineAPI", UnitySetEngineAPI as usize);
@@ -404,6 +413,6 @@ pub fn get_exports() -> std::collections::HashMap<&'static str, usize> {
     exports.insert("UnityGetGfxJobQueue", UnityGetGfxJobQueue as usize);
     exports.insert("UnitySetGfxJobSystem", UnitySetGfxJobSystem as usize);
     exports.insert("UnityGetGfxJobSystem", UnityGetGfxJobSystem as usize);
-    
+
     exports
 }

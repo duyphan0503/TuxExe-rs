@@ -196,10 +196,7 @@ pub extern "win64" fn SymGetSearchPath(
     0
 }
 
-pub extern "win64" fn SymSetSearchPath(
-    _hProcess: usize,
-    _SearchPath: *const c_char,
-) -> i32 {
+pub extern "win64" fn SymSetSearchPath(_hProcess: usize, _SearchPath: *const c_char) -> i32 {
     trace!("SymSetSearchPath — stub (returning TRUE)");
     set_last_error(ERROR_SUCCESS);
     1

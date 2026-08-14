@@ -42,6 +42,7 @@ impl DriveMap {
             let dir = format!("drive_{}", ch.to_ascii_lowercase());
             map.insert(ch, prefix.join(dir));
         }
+        map.insert('Z', PathBuf::from("/"));
         Self { map }
     }
 

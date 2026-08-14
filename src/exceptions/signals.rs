@@ -61,11 +61,16 @@ extern "C" fn host_signal_handler(
         fault_address,
     };
 
+    if crate::memory::virtual_alloc::try_handle_page_fault(record.fault_address) {
+        trace!(fault_address = format_args!("0x{:x}", record.fault_address), "Auto-committed VirtualAlloc page");
+        return;
+    }
+
     let instruction_pointer = extract_instruction_pointer(context);
     let reg_dump = extract_register_dump(context);
 
     if instruction_pointer != 0 {
-        let ip_unwind_match = unwind::lookup_runtime_function(instruction_pointer);
+        let ip_unwind_match = unwind::lookup_static_runtime_function(instruction_pointer);
         if let Some(hit) = ip_unwind_match {
             trace!(
                 instruction_pointer = format_args!("0x{:x}", instruction_pointer),
@@ -83,7 +88,7 @@ extern "C" fn host_signal_handler(
         }
     }
 
-    let unwind_match = unwind::lookup_runtime_function(record.fault_address);
+    let unwind_match = unwind::lookup_static_runtime_function(record.fault_address);
     if let Some(hit) = unwind_match {
         trace!(
             fault_address = format_args!("0x{:x}", record.fault_address),
@@ -100,6 +105,60 @@ extern "C" fn host_signal_handler(
         );
     }
 
+    // 1. Dispatch Vectored Exception Handlers (VEH)
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "x86_64"))]
+    unsafe {
+        let uctx = context.cast::<libc::ucontext_t>();
+        if !uctx.is_null() {
+            let gregs = &mut (*uctx).uc_mcontext.gregs;
+            let mut win_ctx = crate::win32::kernel32::error::WinContext {
+                rax: gregs[libc::REG_RAX as usize] as u64,
+                rbx: gregs[libc::REG_RBX as usize] as u64,
+                rcx: gregs[libc::REG_RCX as usize] as u64,
+                rdx: gregs[libc::REG_RDX as usize] as u64,
+                rsi: gregs[libc::REG_RSI as usize] as u64,
+                rdi: gregs[libc::REG_RDI as usize] as u64,
+                rbp: gregs[libc::REG_RBP as usize] as u64,
+                rsp: gregs[libc::REG_RSP as usize] as u64,
+                r8: gregs[libc::REG_R8 as usize] as u64,
+                r9: gregs[libc::REG_R9 as usize] as u64,
+                r10: gregs[libc::REG_R10 as usize] as u64,
+                r11: gregs[libc::REG_R11 as usize] as u64,
+                r12: gregs[libc::REG_R12 as usize] as u64,
+                r13: gregs[libc::REG_R13 as usize] as u64,
+                r14: gregs[libc::REG_R14 as usize] as u64,
+                r15: gregs[libc::REG_R15 as usize] as u64,
+                rip: gregs[libc::REG_RIP as usize] as u64,
+                eflags: gregs[libc::REG_EFL as usize] as u32,
+                ..Default::default()
+            };
+
+            if crate::win32::kernel32::error::dispatch_vectored_exception(&record, &mut win_ctx) {
+                trace!("Signal handled by Vectored Exception Handler");
+                gregs[libc::REG_RAX as usize] = win_ctx.rax as i64;
+                gregs[libc::REG_RBX as usize] = win_ctx.rbx as i64;
+                gregs[libc::REG_RCX as usize] = win_ctx.rcx as i64;
+                gregs[libc::REG_RDX as usize] = win_ctx.rdx as i64;
+                gregs[libc::REG_RSI as usize] = win_ctx.rsi as i64;
+                gregs[libc::REG_RDI as usize] = win_ctx.rdi as i64;
+                gregs[libc::REG_RBP as usize] = win_ctx.rbp as i64;
+                gregs[libc::REG_RSP as usize] = win_ctx.rsp as i64;
+                gregs[libc::REG_R8 as usize] = win_ctx.r8 as i64;
+                gregs[libc::REG_R9 as usize] = win_ctx.r9 as i64;
+                gregs[libc::REG_R10 as usize] = win_ctx.r10 as i64;
+                gregs[libc::REG_R11 as usize] = win_ctx.r11 as i64;
+                gregs[libc::REG_R12 as usize] = win_ctx.r12 as i64;
+                gregs[libc::REG_R13 as usize] = win_ctx.r13 as i64;
+                gregs[libc::REG_R14 as usize] = win_ctx.r14 as i64;
+                gregs[libc::REG_R15 as usize] = win_ctx.r15 as i64;
+                gregs[libc::REG_RIP as usize] = win_ctx.rip as i64;
+                gregs[libc::REG_EFL as usize] = win_ctx.eflags as i64;
+                return;
+            }
+        }
+    }
+
+    // 2. Walk structured exception handling (SEH)
     if seh::walk_x86_seh_chain(&record) || seh::walk_seh_chain(&record) {
         trace!("Signal handled by SEH chain");
         return;
@@ -107,12 +166,15 @@ extern "C" fn host_signal_handler(
 
     trace!("SEH chain walk failed — checking for special cases");
 
-    // Fast path for main image range access (common during Unity startup)
-    // This reduces expensive SEH walks for legitimate main executable accesses
-    if instruction_pointer != 0 && crate::win32::kernel32::process::is_likely_main_image_address(instruction_pointer) {
-        trace!("Fast path: instruction pointer in main image range — likely valid access");
-        // Don't treat this as an exception, just continue execution
-        return;
+    if instruction_pointer != 0
+        && crate::win32::kernel32::process::is_likely_main_image_address(instruction_pointer)
+    {
+        trace!("Instruction pointer is in mapped PE image range");
+        // Do not resume a guest fault by skipping its store. In particular,
+        // skipping a linked-list write leaves Unity's allocator internally
+        // inconsistent and merely converts the original fault into a later,
+        // opaque heap corruption. Guest faults must continue to normal SEH or
+        // the unhandled path until the missing API/lifecycle cause is fixed.
     }
 
     // Special handling for NULL function pointer calls (rip=0x0)
@@ -129,20 +191,16 @@ extern "C" fn host_signal_handler(
                 let rip_ptr = &mut (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize];
                 let rsp_ptr = &mut (*uctx).uc_mcontext.gregs[libc::REG_RSP as usize];
                 let rax_ptr = &mut (*uctx).uc_mcontext.gregs[libc::REG_RAX as usize];
-                
+
                 // Read return address from stack
                 let rsp = *rsp_ptr as usize;
-                let return_addr = if rsp != 0 {
-                    *(rsp as *const usize)
-                } else {
-                    0
-                };
+                let return_addr = if rsp != 0 { *(rsp as *const usize) } else { 0 };
                 trace!("Return address on stack: 0x{:x}", return_addr);
 
                 let is_plausible_return = |addr: usize| {
                     addr > 0x10000
                         && addr < 0x0000_8000_0000_0000usize
-                        && (unwind::lookup_runtime_function(addr).is_some()
+                        && (unwind::lookup_static_runtime_function(addr).is_some()
                             || crate::dll_manager::loader::module_base_for_address(addr).is_some())
                 };
 
@@ -162,11 +220,7 @@ extern "C" fn host_signal_handler(
                 let mut recovered: Option<(usize, usize)> = None;
                 for slot in 1..=32usize {
                     let candidate_ptr = (rsp + slot * 8) as *const usize;
-                    let candidate = if candidate_ptr as usize != 0 {
-                        *candidate_ptr
-                    } else {
-                        0
-                    };
+                    let candidate = if candidate_ptr as usize != 0 { *candidate_ptr } else { 0 };
                     if is_plausible_return(candidate) {
                         recovered = Some((candidate, slot));
                         break;
@@ -187,12 +241,13 @@ extern "C" fn host_signal_handler(
                     // Final fallback: Try to get return address from frame pointer (RBP)
                     let rbp = (*uctx).uc_mcontext.gregs[libc::REG_RBP as usize] as usize;
                     if rbp != 0 {
-                        let potential_ret_addr = if rbp + 8 < rsp + 1024 { // reasonable bounds check
+                        let potential_ret_addr = if rbp + 8 < rsp + 1024 {
+                            // reasonable bounds check
                             *((rbp + 8) as *const usize)
                         } else {
                             0
                         };
-                        
+
                         if is_plausible_return(potential_ret_addr) {
                             *rip_ptr = potential_ret_addr as i64;
                             *rsp_ptr = (rbp + 16) as i64; // adjust stack appropriately
@@ -205,19 +260,21 @@ extern "C" fn host_signal_handler(
                             return;
                         }
                     }
-                    
+
                     // As a last resort, try to get the return address from the main executable range
                     // since the entry point was at 0x140001260 according to our logs
                     let main_image_range = crate::win32::kernel32::process::main_image_contains;
                     // Limit scan to reduce excessive logging - only try a few strategic locations
-                    let scan_offsets = [0x1008, 0x1020, 0x1040, 0x1080, 0x1100, 0x1200, 0x1400, 0x1800, 0x2000];
+                    let scan_offsets =
+                        [0x1008, 0x1020, 0x1040, 0x1080, 0x1100, 0x1200, 0x1400, 0x1800, 0x2000];
                     for offset in scan_offsets.iter() {
                         let potential_addr = 0x140000000 + offset;
                         if is_plausible_return(potential_addr) && main_image_range(potential_addr) {
                             *rip_ptr = potential_addr as i64;
                             *rsp_ptr = (*rsp_ptr as usize + 8) as i64; // increment stack pointer
                             *rax_ptr = 0;
-                            trace!(  // Changed from warn to trace to reduce log spam
+                            trace!(
+                                // Changed from warn to trace to reduce log spam
                                 recovered_return = format_args!("0x{potential_addr:x}"),
                                 method = "main_image_scan",
                                 "Recovered NULL call by scanning main image for return address"
@@ -225,7 +282,7 @@ extern "C" fn host_signal_handler(
                             return;
                         }
                     }
-                    
+
                     // No valid return address means we cannot recover execution.
                     // Re-raising avoids spinning forever in the signal handler loop.
                     let breadcrumbs = telemetry::recent_compact(24);

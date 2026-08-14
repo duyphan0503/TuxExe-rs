@@ -9,6 +9,24 @@
 //! Windows .exe → PE Loader → DLL Manager → NT Kernel Emulation → Linux syscalls
 //! ```
 
+// The Win32 surface intentionally exposes C-compatible raw-pointer entry
+// points. These lints are not actionable without changing the public ABI;
+// pointer validation remains the responsibility of each API implementation.
+#![allow(
+    clippy::derivable_impls,
+    clippy::field_reassign_with_default,
+    clippy::if_same_then_else,
+    clippy::manual_contains,
+    clippy::manual_div_ceil,
+    clippy::manual_range_contains,
+    clippy::needless_return,
+    clippy::not_unsafe_ptr_arg_deref,
+    clippy::type_complexity,
+    clippy::unnecessary_cast,
+    clippy::unusual_byte_groupings,
+    clippy::zero_ptr
+)]
+
 pub mod dll_manager;
 pub mod dxvk;
 pub mod exceptions;

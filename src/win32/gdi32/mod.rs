@@ -164,28 +164,48 @@ pub struct PixelFormatDescriptor {
 pub extern "win64" fn GetDeviceCaps(_hdc: usize, _nIndex: i32) -> i32 {
     // Return sensible defaults for common queries
     // Windows GDI device capabilities: https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-getdevicecaps
-    if _nIndex == 8 /*HORZRES*/ {
+    if _nIndex == 8
+    /*HORZRES*/
+    {
         1920 // Width in pixels
-    } else if _nIndex == 10 /*VERTRES*/ {
+    } else if _nIndex == 10
+    /*VERTRES*/
+    {
         1080 // Height in pixels
-    } else if _nIndex == 12 /*BITSPIXEL*/ {
+    } else if _nIndex == 12
+    /*BITSPIXEL*/
+    {
         32 // Bits per pixel
-    } else if _nIndex == 14 /*PLANES*/ {
+    } else if _nIndex == 14
+    /*PLANES*/
+    {
         1 // Number of color planes
-    } else if _nIndex == 88 /*LOGPIXELSX*/ {
+    } else if _nIndex == 88
+    /*LOGPIXELSX*/
+    {
         96 // Horizontal DPI
-    } else if _nIndex == 90 /*LOGPIXELSY*/ {
+    } else if _nIndex == 90
+    /*LOGPIXELSY*/
+    {
         96 // Vertical DPI
-    } else if _nIndex == 116 /*VREFRESH*/ {
+    } else if _nIndex == 116
+    /*VREFRESH*/
+    {
         60 // Vertical refresh rate
-    } else if _nIndex == 38 /*RASTERCAPS*/ {
+    } else if _nIndex == 38
+    /*RASTERCAPS*/
+    {
         0x00000001 // RC_BITBLT
     } else {
         0
     }
 }
 
-pub extern "win64" fn SetPixelFormat(_hdc: usize, _format: i32, _ppfd: *const PixelFormatDescriptor) -> i32 {
+pub extern "win64" fn SetPixelFormat(
+    _hdc: usize,
+    _format: i32,
+    _ppfd: *const PixelFormatDescriptor,
+) -> i32 {
     // Always succeed — we're stubbing OpenGL anyway
     set_last_error(ERROR_SUCCESS);
     1

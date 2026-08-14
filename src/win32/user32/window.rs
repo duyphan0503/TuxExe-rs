@@ -4,14 +4,16 @@
 use std::ffi::{c_void, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::utils::wide_string::from_wide_ptr;
 
 use super::{
-    create_window_with_parent, enqueue_message, find_class, is_window_visible, register_class,
-    remove_window, set_window_visibility, update_window_rect, window_exists, window_origin,
-    window_parent, window_rect, Msg, WndClassA, WndClassW, WM_CREATE, WM_DESTROY, WM_PAINT,
-    WM_SHOWWINDOW,
+    create_window_with_parent, create_window_with_parent_and_handle, enqueue_message, find_class,
+    is_window_visible, message_queue, register_class, remove_window, set_window_visibility,
+    update_window_rect, window_exists, window_origin, window_parent, window_rect, Msg, WndClassA,
+    WndClassW, HTCLIENT, WA_ACTIVE, WM_ACTIVATE, WM_ACTIVATEAPP, WM_CREATE, WM_DESTROY,
+    WM_ERASEBKGND, WM_KILLFOCUS, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SHOWWINDOW,
 };
 
 const ERROR_SUCCESS: u32 = 0;
@@ -36,12 +38,24 @@ const SPI_GETMOUSESPEED: u32 = 0x0070;
 const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
 const SM_CYCAPTION: i32 = 4;
+const SM_CXBORDER: i32 = 5;
+const SM_CYBORDER: i32 = 6;
+const SM_CXDLGFRAME: i32 = 7;
+const SM_CYDLGFRAME: i32 = 8;
 const SM_CXCURSOR: i32 = 13;
 const SM_CYCURSOR: i32 = 14;
 const SM_CXFULLSCREEN: i32 = 16;
 const SM_CYFULLSCREEN: i32 = 17;
 const SM_MOUSEPRESENT: i32 = 19;
 const SM_SWAPBUTTON: i32 = 23;
+const SM_CXFRAME: i32 = 32;
+const SM_CYFRAME: i32 = 33;
+const SM_CXMAXIMIZED: i32 = 61;
+const SM_CYMAXIMIZED: i32 = 62;
+const SM_XVIRTUALSCREEN: i32 = 76;
+const SM_YVIRTUALSCREEN: i32 = 77;
+const SM_CXVIRTUALSCREEN: i32 = 78;
+const SM_CYVIRTUALSCREEN: i32 = 79;
 const SM_CMONITORS: i32 = 80;
 const SM_REMOTESESSION: i32 = 0x1000;
 const DESKTOP_WINDOW_HANDLE: usize = 0x30_0000;
@@ -408,34 +422,32 @@ pub extern "win64" fn CreateWindowExA(
     _hInstance: usize,
     lpParam: *const c_void,
 ) -> usize {
-    let Some(class_name) = (unsafe { c_string(lpClassName) }) else {
-        set_last_error(ERROR_INVALID_PARAMETER);
-        return 0;
-    };
-
-    let Some(registered_class) = find_class(&class_name) else {
-        set_last_error(ERROR_CANNOT_FIND_WND_CLASS);
-        return 0;
-    };
-
+    let class_name =
+        unsafe { c_string(lpClassName) }.unwrap_or_else(|| "UnityWndClass".to_string());
+    let wnd_proc = find_class(&class_name).and_then(|c| c.wnd_proc).or(Some(DefWindowProcA));
     let title = unsafe { c_string(lpWindowName) }.unwrap_or_default();
 
-    eprintln!("[TuxExe] CreateWindowExA: class='{}' title='{}'", class_name, title);
+    tracing::info!(%class_name, %title, x, y, nWidth, nHeight, "CreateWindowExA: creating window");
+
+    let actual_x = if x == i32::MIN || x < 0 { 100 } else { x };
+    let actual_y = if y == i32::MIN || y < 0 { 100 } else { y };
+    let actual_w = if nWidth <= 0 || nWidth == i32::MIN { 1280 } else { nWidth };
+    let actual_h = if nHeight <= 0 || nHeight == i32::MIN { 720 } else { nHeight };
 
     // Try to create a REAL X11 window first
-    if let Some(hwnd) = crate::platform::x11::create_x11_window(
-        &title, x, y, nWidth, nHeight,
-    ) {
-        eprintln!("[TuxExe] X11 window created: hwnd=0x{:x}", hwnd);
-        // Register in our window table for message handling
-        create_window_with_parent(
-            registered_class.wnd_proc,
+    if let Some(hwnd) = crate::platform::x11::create_x11_window(&title, x, y, nWidth, nHeight) {
+        tracing::info!(hwnd = format_args!("0x{:x}", hwnd), "X11 window created successfully");
+        let native_window_id = crate::platform::x11::hwnd_to_x11_window(hwnd).unwrap_or(0);
+        create_window_with_parent_and_handle(
+            hwnd,
+            wnd_proc,
             title,
-            x,
-            y,
-            nWidth,
-            nHeight,
+            actual_x,
+            actual_y,
+            actual_w,
+            actual_h,
             hWndParent,
+            native_window_id,
         );
 
         enqueue_message(Msg {
@@ -452,15 +464,7 @@ pub extern "win64" fn CreateWindowExA(
     }
 
     // Fallback to fake window if X11 unavailable
-    let hwnd = create_window_with_parent(
-        registered_class.wnd_proc,
-        title,
-        x,
-        y,
-        nWidth,
-        nHeight,
-        hWndParent,
-    );
+    let hwnd = create_window_with_parent(wnd_proc, title, actual_x, actual_y, actual_w, actual_h, hWndParent);
     enqueue_message(Msg {
         hwnd,
         message: WM_CREATE,
@@ -525,6 +529,9 @@ pub extern "win64" fn ShowWindow(hWnd: usize, nCmdShow: i32) -> i32 {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
+    // The USER32 record is not the display server. Keep the native X11
+    // window in sync so Unity's ShowWindow call actually becomes visible.
+    let _ = crate::platform::x11::set_x11_window_visible(hWnd, visible);
 
     enqueue_message(Msg {
         hwnd: hWnd,
@@ -534,6 +541,33 @@ pub extern "win64" fn ShowWindow(hWnd: usize, nCmdShow: i32) -> i32 {
         time: 0,
         ..Default::default()
     });
+
+    if visible {
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_ACTIVATEAPP,
+            wParam: 1,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_ACTIVATE,
+            wParam: WA_ACTIVE,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_SETFOCUS,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+    }
 
     set_last_error(ERROR_SUCCESS);
     1
@@ -551,6 +585,7 @@ pub extern "win64" fn MoveWindow(
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
+    let _ = crate::platform::x11::configure_x11_window(hWnd, X, Y, nWidth, nHeight);
 
     if bRepaint != 0 {
         enqueue_message(Msg {
@@ -580,6 +615,7 @@ pub extern "win64" fn SetWindowPos(
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
+    let _ = crate::platform::x11::configure_x11_window(hWnd, X, Y, cx, cy);
 
     set_last_error(ERROR_SUCCESS);
     1
@@ -592,6 +628,35 @@ pub extern "win64" fn SetForegroundWindow(hWnd: usize) -> i32 {
     }
 
     foreground_window().store(hWnd, Ordering::Relaxed);
+    if hWnd != 0 {
+        if is_window_visible(hWnd) {
+            let _ = crate::platform::x11::raise_x11_window(hWnd);
+        }
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_ACTIVATEAPP,
+            wParam: 1,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_ACTIVATE,
+            wParam: WA_ACTIVE,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_SETFOCUS,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+    }
     set_last_error(ERROR_SUCCESS);
     1
 }
@@ -645,8 +710,10 @@ pub extern "win64" fn EnumDisplayMonitors(
     let monitor_rect = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
 
     if let Some(callback) = lpfn_enum {
+        tracing::info!(callback = callback as usize, hdc, data = dw_data, "EnumDisplayMonitors invoking guest callback");
         let callback_result =
             unsafe { callback(PRIMARY_MONITOR_HANDLE, hdc, &monitor_rect as *const Rect, dw_data) };
+        tracing::info!(callback_result, "EnumDisplayMonitors guest callback returned");
         if callback_result == 0 {
             set_last_error(ERROR_SUCCESS);
             return 1;
@@ -657,8 +724,55 @@ pub extern "win64" fn EnumDisplayMonitors(
     1
 }
 
-pub extern "win64" fn GetMonitorInfoW(hMonitor: usize, lpmi: *mut c_void) -> i32 {
-    if hMonitor == 0 || lpmi.is_null() {
+pub extern "win64" fn MonitorFromPoint(_pt: crate::win32::user32::Point, _flags: u32) -> usize {
+    PRIMARY_MONITOR_HANDLE
+}
+
+pub extern "win64" fn SetRect(
+    lprc: *mut Rect,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+) -> i32 {
+    if !lprc.is_null() {
+        unsafe {
+            *lprc = Rect { left, top, right, bottom };
+        }
+    }
+    1
+}
+
+pub extern "win64" fn ChangeDisplaySettingsExW(
+    _lpszDeviceName: *const u16,
+    _lpDevMode: *const c_void,
+    _hwnd: usize,
+    _dwflags: u32,
+    _lparam: *const c_void,
+) -> i32 {
+    0
+}
+
+pub extern "win64" fn ChangeDisplaySettingsW(_lpDevMode: *const c_void, _dwflags: u32) -> i32 {
+    0
+}
+
+pub extern "win64" fn ChangeDisplaySettingsA(_lpDevMode: *const c_void, _dwflags: u32) -> i32 {
+    0
+}
+
+pub extern "win64" fn ChangeDisplaySettingsExA(
+    _lpszDeviceName: *const std::ffi::c_char,
+    _lpDevMode: *const c_void,
+    _hwnd: usize,
+    _dwflags: u32,
+    _lparam: *const c_void,
+) -> i32 {
+    0
+}
+
+pub extern "win64" fn GetMonitorInfoW(_hMonitor: usize, lpmi: *mut c_void) -> i32 {
+    if lpmi.is_null() {
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     }
@@ -691,8 +805,8 @@ pub extern "win64" fn GetMonitorInfoW(hMonitor: usize, lpmi: *mut c_void) -> i32
     1
 }
 
-pub extern "win64" fn GetMonitorInfoA(hMonitor: usize, lpmi: *mut c_void) -> i32 {
-    if hMonitor == 0 || lpmi.is_null() {
+pub extern "win64" fn GetMonitorInfoA(_hMonitor: usize, lpmi: *mut c_void) -> i32 {
+    if lpmi.is_null() {
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     }
@@ -905,6 +1019,34 @@ pub extern "win64" fn AdjustWindowRectEx(
     1
 }
 
+pub extern "win64" fn AdjustWindowRectExForDpi(
+    lp_rect: *mut Rect,
+    dw_style: u32,
+    b_menu: i32,
+    dw_ex_style: u32,
+    _dpi: u32,
+) -> i32 {
+    AdjustWindowRectEx(lp_rect, dw_style, b_menu, dw_ex_style)
+}
+
+pub extern "win64" fn EnableNonClientDpiScaling(h_wnd: usize) -> i32 {
+    if !window_exists(h_wnd) {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn GetDpiForWindow(h_wnd: usize) -> u32 {
+    if h_wnd != 0 && !window_exists(h_wnd) {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    set_last_error(ERROR_SUCCESS);
+    96
+}
+
 pub extern "win64" fn SetWindowLongA(hWnd: usize, nIndex: i32, dwNewLong: i32) -> i32 {
     if !window_exists(hWnd) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
@@ -944,6 +1086,27 @@ pub extern "win64" fn SetWindowLongPtrA(hWnd: usize, nIndex: i32, dwNewLong: isi
         return 0;
     }
 
+    if nIndex == -4 {
+        let prev = {
+            let mut reg = super::window_registry().write().expect("window registry poisoned");
+            if let Some(w) = reg.get_mut(&hWnd) {
+                let prev_proc = w.wnd_proc.map(|p| p as usize as isize).unwrap_or(0);
+                w.wnd_proc = if dwNewLong != 0 {
+                    Some(unsafe { std::mem::transmute(dwNewLong) })
+                } else {
+                    None
+                };
+                prev_proc
+            } else {
+                0
+            }
+        };
+        let mut map = window_longs().lock().expect("window long map poisoned");
+        map.insert((hWnd, nIndex), dwNewLong);
+        set_last_error(ERROR_SUCCESS);
+        return prev;
+    }
+
     let mut map = window_longs().lock().expect("window long map poisoned");
     let key = (hWnd, nIndex);
     let prev = map.insert(key, dwNewLong).unwrap_or(0);
@@ -959,6 +1122,13 @@ pub extern "win64" fn GetWindowLongPtrA(hWnd: usize, nIndex: i32) -> isize {
     if !window_exists(hWnd) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
+    }
+
+    if nIndex == -4 {
+        if let Some(proc) = super::window_proc_for(hWnd) {
+            set_last_error(ERROR_SUCCESS);
+            return proc as usize as isize;
+        }
     }
 
     let map = window_longs().lock().expect("window long map poisoned");
@@ -1229,9 +1399,9 @@ pub extern "win64" fn LoadImageW(
     handle
 }
 
-unsafe fn populate_dev_mode_blob(blob: *mut u8, dm_size: u16, is_wide: bool) {
+unsafe fn populate_dev_mode_blob(blob: *mut u8, dm_size: u16, is_wide: bool, width: u32, height: u32) {
     let (fields_offset, bits_offset, width_offset, height_offset, freq_offset) = if is_wide {
-        (72usize, 172usize, 176usize, 180usize, 188usize)
+        (72usize, 168usize, 172usize, 176usize, 184usize)
     } else {
         (40usize, 104usize, 108usize, 112usize, 120usize)
     };
@@ -1246,15 +1416,22 @@ unsafe fn populate_dev_mode_blob(blob: *mut u8, dm_size: u16, is_wide: bool) {
         *(blob.add(bits_offset).cast::<u32>()) = 32;
     }
     if dm_size >= width_offset + 4 {
-        *(blob.add(width_offset).cast::<u32>()) = 1920;
+        *(blob.add(width_offset).cast::<u32>()) = width;
     }
     if dm_size >= height_offset + 4 {
-        *(blob.add(height_offset).cast::<u32>()) = 1080;
+        *(blob.add(height_offset).cast::<u32>()) = height;
     }
     if dm_size >= freq_offset + 4 {
         *(blob.add(freq_offset).cast::<u32>()) = 60;
     }
 }
+
+const SUPPORTED_DISPLAY_MODES: &[(u32, u32)] = &[
+    (1920, 1080),
+    (1600, 900),
+    (1366, 768),
+    (1280, 720),
+];
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "win64" fn EnumDisplaySettingsW(
@@ -1267,15 +1444,19 @@ pub extern "win64" fn EnumDisplaySettingsW(
         return 0;
     }
 
-    if i_mode_num != 0 && i_mode_num != ENUM_CURRENT_SETTINGS {
-        set_last_error(ERROR_SUCCESS);
-        return 0;
-    }
+    let (width, height) = match i_mode_num {
+        ENUM_CURRENT_SETTINGS | 0xFFFF_FFFE /* ENUM_REGISTRY_SETTINGS */ => (1920, 1080),
+        idx if (idx as usize) < SUPPORTED_DISPLAY_MODES.len() => SUPPORTED_DISPLAY_MODES[idx as usize],
+        _ => {
+            set_last_error(ERROR_SUCCESS);
+            return 0;
+        }
+    };
 
     unsafe {
         // DEVMODEW.dmSize at offset 68.
         let dm_size = *(lp_dev_mode.cast::<u8>().add(68).cast::<u16>());
-        populate_dev_mode_blob(lp_dev_mode.cast::<u8>(), dm_size, true);
+        populate_dev_mode_blob(lp_dev_mode.cast::<u8>(), dm_size, true, width, height);
     }
 
     set_last_error(ERROR_SUCCESS);
@@ -1293,15 +1474,19 @@ pub extern "win64" fn EnumDisplaySettingsA(
         return 0;
     }
 
-    if i_mode_num != 0 && i_mode_num != ENUM_CURRENT_SETTINGS {
-        set_last_error(ERROR_SUCCESS);
-        return 0;
-    }
+    let (width, height) = match i_mode_num {
+        ENUM_CURRENT_SETTINGS | 0xFFFF_FFFE => (1920, 1080),
+        idx if (idx as usize) < SUPPORTED_DISPLAY_MODES.len() => SUPPORTED_DISPLAY_MODES[idx as usize],
+        _ => {
+            set_last_error(ERROR_SUCCESS);
+            return 0;
+        }
+    };
 
     unsafe {
         // DEVMODEA.dmSize at offset 36.
         let dm_size = *(lp_dev_mode.cast::<u8>().add(36).cast::<u16>());
-        populate_dev_mode_blob(lp_dev_mode.cast::<u8>(), dm_size, false);
+        populate_dev_mode_blob(lp_dev_mode.cast::<u8>(), dm_size, false, width, height);
     }
 
     set_last_error(ERROR_SUCCESS);
@@ -1790,6 +1975,19 @@ pub extern "win64" fn GetCursorPos(lp_point: *mut super::Point) -> i32 {
         return 0;
     }
 
+    let has_visible_window = super::window_registry()
+        .read()
+        .map(|reg| reg.values().any(|w| w.visible))
+        .unwrap_or(false);
+
+    if has_visible_window {
+        if let Some((root_x, root_y)) = crate::platform::x11::query_pointer_root() {
+            let mut pos = cursor_position().lock().expect("cursor position poisoned");
+            pos.x = root_x;
+            pos.y = root_y;
+        }
+    }
+
     let pos = *cursor_position().lock().expect("cursor position poisoned");
     unsafe {
         *lp_point = pos;
@@ -1810,10 +2008,14 @@ pub extern "win64" fn SetCursorPos(x: i32, y: i32) -> i32 {
 
 pub extern "win64" fn GetSystemMetrics(n_index: i32) -> i32 {
     let value = match n_index {
-        SM_CXSCREEN | SM_CXFULLSCREEN => 1920,
-        SM_CYSCREEN | SM_CYFULLSCREEN => 1080,
+        SM_CXSCREEN | SM_CXFULLSCREEN | SM_CXVIRTUALSCREEN | SM_CXMAXIMIZED => 1920,
+        SM_CYSCREEN | SM_CYFULLSCREEN | SM_CYVIRTUALSCREEN | SM_CYMAXIMIZED => 1080,
+        SM_XVIRTUALSCREEN | SM_YVIRTUALSCREEN => 0,
         SM_CYCAPTION => 23,
         SM_CXCURSOR | SM_CYCURSOR => 32,
+        SM_CXBORDER | SM_CYBORDER => 1,
+        SM_CXFRAME | SM_CYFRAME => 4,
+        SM_CXDLGFRAME | SM_CYDLGFRAME => 3,
         SM_MOUSEPRESENT => 1,
         SM_SWAPBUTTON => 0,
         SM_CMONITORS => 1,
@@ -1823,6 +2025,20 @@ pub extern "win64" fn GetSystemMetrics(n_index: i32) -> i32 {
 
     set_last_error(ERROR_SUCCESS);
     value
+}
+
+pub extern "win64" fn GetSystemMetricsForDpi(n_index: i32, _dpi: u32) -> i32 {
+    GetSystemMetrics(n_index)
+}
+
+pub extern "win64" fn SystemParametersInfoForDpi(
+    ui_action: u32,
+    ui_param: u32,
+    pv_param: *mut c_void,
+    f_win_ini: u32,
+    _dpi: u32,
+) -> i32 {
+    SystemParametersInfoA(ui_action, ui_param, pv_param, f_win_ini)
 }
 
 pub extern "win64" fn SetCapture(h_wnd: usize) -> usize {
@@ -1875,20 +2091,30 @@ pub extern "win64" fn UnregisterDeviceNotification(h_dev_notify: usize) -> i32 {
 
 pub extern "win64" fn DefWindowProcA(
     _hWnd: usize,
-    _uMsg: u32,
+    uMsg: u32,
     _wParam: usize,
     _lParam: isize,
 ) -> isize {
-    0
+    match uMsg {
+        WM_ERASEBKGND => 1,
+        WM_NCHITTEST => HTCLIENT,
+        WM_SETCURSOR => 1,
+        _ => 0,
+    }
 }
 
 pub extern "win64" fn DefWindowProcW(
     _hWnd: usize,
-    _uMsg: u32,
+    uMsg: u32,
     _wParam: usize,
     _lParam: isize,
 ) -> isize {
-    0
+    match uMsg {
+        WM_ERASEBKGND => 1,
+        WM_NCHITTEST => HTCLIENT,
+        WM_SETCURSOR => 1,
+        _ => 0,
+    }
 }
 
 // ── New USER32 stubs required by UnityPlayer.dll ────────────────────────────
@@ -2068,13 +2294,32 @@ pub extern "win64" fn GetFocus() -> usize {
     focused_window().load(Ordering::Relaxed)
 }
 
-/// Set keyboard focus to the given window. Returns the previously focused HWND.
 pub extern "win64" fn SetFocus(hWnd: usize) -> usize {
     if hWnd != 0 && !is_desktop_window(hWnd) && !window_exists(hWnd) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
     let prev = focused_window().swap(hWnd, Ordering::Relaxed);
+    if prev != 0 && prev != hWnd {
+        enqueue_message(Msg {
+            hwnd: prev,
+            message: WM_KILLFOCUS,
+            wParam: hWnd,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+    }
+    if hWnd != 0 {
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_SETFOCUS,
+            wParam: prev,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+    }
     set_last_error(ERROR_SUCCESS);
     prev
 }
@@ -2083,6 +2328,46 @@ pub extern "win64" fn SetFocus(hWnd: usize) -> usize {
 pub extern "win64" fn GetActiveWindow() -> usize {
     set_last_error(ERROR_SUCCESS);
     foreground_window().load(Ordering::Relaxed)
+}
+
+/// Set the active window. Returns the previously active HWND.
+pub extern "win64" fn SetActiveWindow(hWnd: usize) -> usize {
+    if hWnd != 0 && !is_desktop_window(hWnd) && !window_exists(hWnd) {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    let prev = foreground_window().swap(hWnd, Ordering::Relaxed);
+    if hWnd != 0 {
+        if is_window_visible(hWnd) {
+            let _ = crate::platform::x11::raise_x11_window(hWnd);
+        }
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_ACTIVATEAPP,
+            wParam: 1,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_ACTIVATE,
+            wParam: WA_ACTIVE,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_SETFOCUS,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+    }
+    set_last_error(ERROR_SUCCESS);
+    prev
 }
 
 /// Return TRUE if the window is minimised (iconic). We never minimise windows,
@@ -2199,15 +2484,85 @@ pub extern "win64" fn KillTimer(hWnd: usize, uIDEvent: usize) -> i32 {
 /// Wait for multiple object handles OR a message. Returns WAIT_TIMEOUT (0x102)
 /// immediately in our stub so that callers loop back to PeekMessage.
 pub extern "win64" fn MsgWaitForMultipleObjects(
-    _nCount: u32,
-    _pHandles: *const usize,
-    _bWaitAll: i32,
-    _dwMilliseconds: u32,
-    _dwWakeMask: u32,
+    n_count: u32,
+    handles: *const usize,
+    wait_all: i32,
+    milliseconds: u32,
+    wake_mask: u32,
 ) -> u32 {
+    const MWMO_WAITALL: u32 = 0x0001;
+    MsgWaitForMultipleObjectsEx(
+        n_count,
+        handles,
+        milliseconds,
+        wake_mask,
+        if wait_all != 0 { MWMO_WAITALL } else { 0 },
+    )
+}
+
+pub extern "win64" fn MsgWaitForMultipleObjectsEx(
+    n_count: u32,
+    handles: *const usize,
+    milliseconds: u32,
+    _wake_mask: u32,
+    flags: u32,
+) -> u32 {
+    const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x102;
-    set_last_error(ERROR_SUCCESS);
-    WAIT_TIMEOUT
+    const WAIT_FAILED: u32 = 0xffff_ffff;
+    const WAIT_IO_COMPLETION: u32 = 0x00c0;
+    const MWMO_WAITALL: u32 = 0x0001;
+    const MWMO_ALERTABLE: u32 = 0x0002;
+
+    if n_count > 0 && handles.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+    let guest_handles = if n_count == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(handles, n_count as usize) }
+            .iter()
+            .map(|handle| *handle as usize)
+            .collect()
+    };
+
+    let wait_all = (flags & MWMO_WAITALL) != 0;
+    let alertable = (flags & MWMO_ALERTABLE) != 0;
+    let current_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+
+    let deadline = (milliseconds != u32::MAX)
+        .then(|| Instant::now() + Duration::from_millis(milliseconds as u64));
+
+    loop {
+        if alertable && crate::win32::kernel32::process::execute_queued_apc(current_tid) {
+            set_last_error(ERROR_SUCCESS);
+            return WAIT_IO_COMPLETION;
+        }
+
+        crate::platform::x11::pump_x11_events();
+
+        if !message_queue().0.lock().expect("message queue poisoned").is_empty() {
+            set_last_error(ERROR_SUCCESS);
+            return WAIT_OBJECT_0 + n_count;
+        }
+        if !guest_handles.is_empty() {
+            let wait = crate::nt_kernel::sync::wait_for_multiple_objects(&guest_handles, wait_all, 0);
+            if wait != WAIT_TIMEOUT && wait != WAIT_FAILED {
+                set_last_error(ERROR_SUCCESS);
+                return wait;
+            }
+            if wait == WAIT_FAILED {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                return WAIT_FAILED;
+            }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            set_last_error(ERROR_SUCCESS);
+            return WAIT_TIMEOUT;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Return the cursor blink interval in milliseconds.
@@ -2218,6 +2573,45 @@ pub extern "win64" fn GetCaretBlinkTime() -> u32 {
 /// Return the double-click interval in milliseconds.
 pub extern "win64" fn GetDoubleClickTime() -> u32 {
     500 // Typical Windows default
+}
+
+pub extern "win64" fn RegisterTouchWindow(_hWnd: usize, _ulFlags: u32) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn UnregisterTouchWindow(_hWnd: usize) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn IsTouchWindow(_hWnd: usize, _pulFlags: *mut u32) -> i32 {
+    0
+}
+
+pub extern "win64" fn GetPointerType(_pointerId: u32, pointerType: *mut u32) -> i32 {
+    if !pointerType.is_null() {
+        unsafe { *pointerType = 1; /* PT_POINTER */ }
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn GetPointerTouchInfo(_pointerId: u32, _touchInfo: *mut c_void) -> i32 {
+    set_last_error(ERROR_INVALID_PARAMETER);
+    0
+}
+
+pub extern "win64" fn GetPointerTouchInfoHistory(
+    _pointerId: u32,
+    entriesCount: *mut u32,
+    _touchInfo: *mut c_void,
+) -> i32 {
+    if !entriesCount.is_null() {
+        unsafe { *entriesCount = 0; }
+    }
+    set_last_error(ERROR_INVALID_PARAMETER);
+    0
 }
 
 // ── end of new USER32 stubs ───────────────────────────────────────────────────
@@ -2291,6 +2685,13 @@ mod tests {
         let mut msg = Msg::default();
         assert_eq!(message::GetMessageA(&raw mut msg, hwnd, 0, 0), 1);
         assert_eq!(msg.message, WM_CREATE);
+
+        // This must work for both fallback and native X11 windows.  A native
+        // HWND not registered in USER32 is rejected here, which prevents GL
+        // and Vulkan backends from binding the window as a render target.
+        let hdc = GetDC(hwnd);
+        assert_ne!(hdc, 0);
+        assert_eq!(ReleaseDC(hwnd, hdc), 1);
 
         assert_eq!(ShowWindow(hwnd, 1), 1);
         assert_eq!(message::GetMessageA(&raw mut msg, hwnd, WM_SHOWWINDOW, WM_SHOWWINDOW), 1);
@@ -2614,10 +3015,10 @@ mod tests {
             1
         );
 
-        let width = u32::from_ne_bytes(blob[176..180].try_into().expect("width bytes"));
-        let height = u32::from_ne_bytes(blob[180..184].try_into().expect("height bytes"));
-        assert!(width > 0);
-        assert!(height > 0);
+        let width = u32::from_ne_bytes(blob[172..176].try_into().expect("width bytes"));
+        let height = u32::from_ne_bytes(blob[176..180].try_into().expect("height bytes"));
+        assert_eq!(width, 1920);
+        assert_eq!(height, 1080);
     }
 
     #[test]
@@ -2896,5 +3297,96 @@ mod tests {
         assert!(h != 0);
         assert_eq!(UnregisterDeviceNotification(h), 1);
         assert_eq!(UnregisterDeviceNotification(0), 0);
+    }
+
+    #[test]
+    fn def_window_proc_returns_expected_default_codes() {
+        let _guard = serial_guard();
+        assert_eq!(DefWindowProcA(0, WM_ERASEBKGND, 0, 0), 1);
+        assert_eq!(DefWindowProcA(0, WM_NCHITTEST, 0, 0), HTCLIENT);
+        assert_eq!(DefWindowProcA(0, WM_SETCURSOR, 0, 0), 1);
+        assert_eq!(DefWindowProcA(0, 0x1234, 0, 0), 0);
+
+        assert_eq!(DefWindowProcW(0, WM_ERASEBKGND, 0, 0), 1);
+        assert_eq!(DefWindowProcW(0, WM_NCHITTEST, 0, 0), HTCLIENT);
+        assert_eq!(DefWindowProcW(0, WM_SETCURSOR, 0, 0), 1);
+        assert_eq!(DefWindowProcW(0, 0x1234, 0, 0), 0);
+    }
+
+    #[test]
+    fn msg_wait_for_multiple_objects_ex_alertable_executes_apc() {
+        let _guard = serial_guard();
+        const WAIT_IO_COMPLETION: u32 = 0x00c0;
+        const MWMO_ALERTABLE: u32 = 0x0002;
+
+        static APC_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        APC_DONE.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        extern "win64" fn apc_cb(_param: usize) {
+            APC_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+        let ev = crate::nt_kernel::sync::create_event(false, false);
+
+        // Queue APC for current thread
+        crate::win32::kernel32::process::queue_user_apc(
+            apc_cb as usize,
+            crate::win32::kernel32::process::CURRENT_THREAD_PSEUDO_HANDLE as *mut c_void,
+            0,
+        );
+
+        let res = MsgWaitForMultipleObjectsEx(1, &raw const ev, 1000, 0, MWMO_ALERTABLE);
+        assert_eq!(res, WAIT_IO_COMPLETION);
+        assert!(APC_DONE.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn set_focus_and_set_active_window_enqueue_activation_messages() {
+        let _guard = serial_guard();
+
+        let class_name = std::ffi::CString::new("ActivationTestClass").expect("class");
+        let wnd_class = WndClassA {
+            style: 0,
+            lpfnWndProc: None,
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: 0,
+            hIcon: 0,
+            hCursor: 0,
+            hbrBackground: 0,
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+        };
+        assert_ne!(RegisterClassA(&raw const wnd_class), 0);
+
+        let title = std::ffi::CString::new("Activation Test").expect("title");
+        let hwnd1 = CreateWindowExA(0, class_name.as_ptr(), title.as_ptr(), 0, 0, 0, 100, 100, 0, 0, 0, std::ptr::null());
+        let hwnd2 = CreateWindowExA(0, class_name.as_ptr(), title.as_ptr(), 0, 0, 0, 100, 100, 0, 0, 0, std::ptr::null());
+        assert_ne!(hwnd1, 0);
+        assert_ne!(hwnd2, 0);
+
+        // SetFocus on hwnd1
+        SetFocus(hwnd1);
+        let mut msg = Msg::default();
+        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd1, WM_SETFOCUS, WM_SETFOCUS, 1), 1);
+        assert_eq!(msg.message, WM_SETFOCUS);
+
+        // Switch focus to hwnd2 -> should generate WM_KILLFOCUS for hwnd1 and WM_SETFOCUS for hwnd2
+        SetFocus(hwnd2);
+        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd1, WM_KILLFOCUS, WM_KILLFOCUS, 1), 1);
+        assert_eq!(msg.message, WM_KILLFOCUS);
+        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd2, WM_SETFOCUS, WM_SETFOCUS, 1), 1);
+        assert_eq!(msg.message, WM_SETFOCUS);
+
+        // SetActiveWindow on hwnd1
+        SetActiveWindow(hwnd1);
+        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd1, WM_ACTIVATEAPP, WM_ACTIVATEAPP, 1), 1);
+        assert_eq!(msg.message, WM_ACTIVATEAPP);
+        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd1, WM_ACTIVATE, WM_ACTIVATE, 1), 1);
+        assert_eq!(msg.message, WM_ACTIVATE);
+
+        DestroyWindow(hwnd1);
+        DestroyWindow(hwnd2);
     }
 }

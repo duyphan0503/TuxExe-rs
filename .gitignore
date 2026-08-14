@@ -16,3 +16,19 @@ tests/test_binaries/*.exe
 
 # Local planning doc (not for commits)
 docs/IMPLEMENTATION_PLAN.md
+
+# Agent scratch and generated files
+.agents/
+.claw/
+.clawd-todos.json
+.qwen/
+.sandbox-home/
+.sandbox-tmp/
+*.py
+test_program.c
+tmp/
+runtime/
+PROJECT.md
+QWEN.md
+PERFORMANCE_IMPROVEMENTS_SUMMARY.md
+

@@ -1,7 +1,7 @@
 # TuxExe-rs Architecture Document
 
 ## Vision
-A Rust-based Windows application compatibility layer for Linux that can run PE (.exe/.dll) executables natively, replacing Wine with a focus on **performance** and **memory safety**.
+A Rust-based Windows application compatibility layer for Linux that can run PE (.exe/.dll) executables natively, replacing Wine with a focus on **performance** and **memory safety**. The runtime is native-only and never launches Wine.
 
 ## Design Decisions
 
@@ -10,7 +10,7 @@ A Rust-based Windows application compatibility layer for Linux that can run PE (
 | Target PE format | PE32 + PE32+ (both) | Full 32-bit and 64-bit compatibility |
 | Syscall strategy | User-space NT→Linux translation | No kernel module needed initially; kernel module as future optimization |
 | Graphics | Reuse DXVK/vkd3d-proton | Proven DirectX→Vulkan translation; focus Rust effort on core runtime |
-| DLL strategy | Hybrid (Rust reimpl + real DLL loading) | Reimplement critical DLLs, load real Windows DLLs as fallback |
+| DLL strategy | Native Rust reimplementation + PE plugin loading | No Wine fallback; native PE modules use the same mapper and import contract |
 | Language | Rust | Memory safety, performance, modern tooling |
 | Primary motivation | Performance improvement over Wine | Rust's zero-cost abstractions + modern design |
 
@@ -268,6 +268,11 @@ Implement Windows registry as a persistent key-value store:
 - **Performance**: In-memory cache with write-back to disk
 
 ### 10. WoW64 Subsystem (`crate::wow64`)
+
+Running 32-bit PE32 on a 64-bit Linux host is currently staged. The loader,
+low-address validation, TEB32 metadata and thunk descriptions exist; execution
+is deliberately rejected until the x86 entry transition and ABI dispatcher are
+complete.
 
 Running 32-bit PE32 on a 64-bit Linux host:
 

@@ -22,9 +22,24 @@ extern "win64" fn DwmEnableBlurBehindWindow(_hwnd: usize, _pBlurBehind: *mut u8)
     -2147024809
 }
 
-extern "win64" fn DwmGetWindowAttribute(_hwnd: usize, _dwAttribute: u32, _pvAttribute: *mut c_void, _cbAttribute: u32) -> i32 {
+extern "win64" fn DwmGetWindowAttribute(
+    _hwnd: usize,
+    _dwAttribute: u32,
+    _pvAttribute: *mut c_void,
+    _cbAttribute: u32,
+) -> i32 {
     trace!("DwmGetWindowAttribute — stub");
     -2147024809 // E_FAIL
+}
+
+extern "win64" fn DwmSetWindowAttribute(
+    _hwnd: usize,
+    _dwAttribute: u32,
+    _pvAttribute: *const c_void,
+    _cbAttribute: u32,
+) -> i32 {
+    trace!("DwmSetWindowAttribute — stub");
+    0 // S_OK
 }
 
 pub fn get_exports() -> HashMap<&'static str, usize> {
@@ -32,5 +47,6 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("DwmIsCompositionEnabled", DwmIsCompositionEnabled as usize);
     exports.insert("DwmEnableBlurBehindWindow", DwmEnableBlurBehindWindow as usize);
     exports.insert("DwmGetWindowAttribute", DwmGetWindowAttribute as usize);
+    exports.insert("DwmSetWindowAttribute", DwmSetWindowAttribute as usize);
     exports
 }

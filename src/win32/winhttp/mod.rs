@@ -56,6 +56,9 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("WinHttpCheckPlatform", WinHttpCheckPlatform as usize);
     exports.insert("WinHttpOpen", WinHttpOpen as usize);
     exports.insert("WinHttpCloseHandle", WinHttpCloseHandle as usize);
-    exports.insert("WinHttpGetIEProxyConfigForCurrentUser", WinHttpGetIEProxyConfigForCurrentUser as usize);
+    exports.insert(
+        "WinHttpGetIEProxyConfigForCurrentUser",
+        WinHttpGetIEProxyConfigForCurrentUser as usize,
+    );
     exports
 }

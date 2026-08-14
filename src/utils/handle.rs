@@ -20,7 +20,7 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, RwLock,
     },
 };
@@ -31,17 +31,17 @@ use std::{
 ///
 /// On real Windows, `HANDLE` is a `*mut c_void`. We use `u32` for simplicity;
 /// the high bit is reserved for pseudo-handles.
-pub type Handle = u32;
+pub type Handle = usize;
 
-/// Sentinel for `INVALID_HANDLE_VALUE` (-1 as u32).
-pub const INVALID_HANDLE_VALUE: Handle = 0xFFFF_FFFF;
+/// Sentinel for `INVALID_HANDLE_VALUE` (-1 as usize).
+pub const INVALID_HANDLE_VALUE: Handle = usize::MAX;
 
-/// Pseudo-handle for `STD_INPUT_HANDLE` (-10 as u32).
-pub const PSEUDO_STDIN: Handle = 0xFFFF_FFF6;
-/// Pseudo-handle for `STD_OUTPUT_HANDLE` (-11 as u32).
-pub const PSEUDO_STDOUT: Handle = 0xFFFF_FFF5;
-/// Pseudo-handle for `STD_ERROR_HANDLE` (-12 as u32).
-pub const PSEUDO_STDERR: Handle = 0xFFFF_FFF4;
+/// Pseudo-handle for `STD_INPUT_HANDLE` (-10 as usize).
+pub const PSEUDO_STDIN: Handle = -10isize as usize;
+/// Pseudo-handle for `STD_OUTPUT_HANDLE` (-11 as usize).
+pub const PSEUDO_STDOUT: Handle = -11isize as usize;
+/// Pseudo-handle for `STD_ERROR_HANDLE` (-12 as usize).
+pub const PSEUDO_STDERR: Handle = -12isize as usize;
 
 use std::any::Any;
 
@@ -87,7 +87,7 @@ impl HandleObject for StdioHandle {
 #[derive(Debug)]
 pub struct HandleTable {
     /// Monotonically increasing counter (starts at 1; 0 is never allocated).
-    counter: AtomicU32,
+    counter: AtomicUsize,
     /// Inner map from handle ID → boxed object.
     inner: RwLock<HashMap<Handle, Box<dyn HandleObject>>>,
 }
@@ -95,7 +95,7 @@ pub struct HandleTable {
 impl HandleTable {
     /// Create a new, empty handle table with the three stdio pseudo-handles pre-inserted.
     pub fn new() -> Self {
-        let table = Self { counter: AtomicU32::new(1), inner: RwLock::new(HashMap::new()) };
+        let table = Self { counter: AtomicUsize::new(1), inner: RwLock::new(HashMap::new()) };
         table.insert_at(PSEUDO_STDIN, Box::new(StdioHandle { fd: 0, name: "stdin" }));
         table.insert_at(PSEUDO_STDOUT, Box::new(StdioHandle { fd: 1, name: "stdout" }));
         table.insert_at(PSEUDO_STDERR, Box::new(StdioHandle { fd: 2, name: "stderr" }));

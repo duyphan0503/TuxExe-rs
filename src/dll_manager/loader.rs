@@ -15,12 +15,13 @@ use crate::pe_loader::imports::{enumerate_delay_imports, enumerate_imports, reso
 use crate::pe_loader::mapper::{map_pe, MappedImage};
 use crate::pe_loader::parser::ParsedPe;
 use crate::pe_loader::relocations::apply_relocations;
-use crate::threading::tls::initialize_static_tls;
+use crate::threading::tls::{initialize_static_tls, invoke_tls_callbacks_for, register_tls_callbacks};
 
 use super::search::resolve_dll_path;
 
 const DLL_PROCESS_DETACH: u32 = 0;
 const DLL_PROCESS_ATTACH: u32 = 1;
+const DLL_THREAD_ATTACH: u32 = 2;
 
 #[derive(Debug)]
 pub enum ModuleSource {
@@ -43,6 +44,7 @@ pub struct LoadedModule {
     pub canonical_name: String,
     pub source: ModuleSource,
     pub ref_count: usize,
+    pub thread_library_calls_disabled: bool,
 }
 
 pub(crate) fn registry() -> &'static RwLock<HashMap<String, LoadedModule>> {
@@ -58,58 +60,38 @@ fn next_module_handle() -> usize {
 fn canonicalize_module_name(name: &str) -> String {
     let lower = name.trim().replace('\\', "/").to_ascii_lowercase();
     let leaf = lower.rsplit('/').next().unwrap_or(&lower);
-    let with_ext = if leaf.ends_with(".dll") {
-        leaf.to_string()
-    } else {
-        format!("{leaf}.dll")
-    };
+    let with_ext = if leaf.ends_with(".dll") { leaf.to_string() } else { format!("{leaf}.dll") };
 
     normalize_api_set_name(&with_ext)
 }
 
 fn normalize_api_set_name(canonical: &str) -> String {
-    match canonical {
-        // Common API-set forwarders used by Unity/CRT startup.
-        // We route them to concrete host DLLs like Windows loader does.
-        "api-ms-win-core-synch-l1-2-0.dll"
-        | "api-ms-win-core-synch-l1-1-0.dll"
-        | "api-ms-win-core-threadpool-l1-2-0.dll"
-        | "api-ms-win-core-threadpool-l1-1-0.dll"
-        | "api-ms-win-core-fibers-l1-1-1.dll"
-        | "api-ms-win-core-fibers-l1-1-0.dll"
-        | "api-ms-win-core-processthreads-l1-1-0.dll"
-        | "api-ms-win-core-processthreads-l1-1-1.dll"
-        | "api-ms-win-core-handle-l1-1-0.dll"
-        | "api-ms-win-core-heap-l1-1-0.dll"
-        | "api-ms-win-core-memory-l1-1-0.dll"
-        | "api-ms-win-core-file-l1-1-0.dll"
-        | "api-ms-win-core-file-l1-2-0.dll"
-        | "api-ms-win-core-libraryloader-l1-1-0.dll"
-        | "api-ms-win-core-localization-l1-2-0.dll"
-        | "api-ms-win-core-localization-l1-2-1.dll"
-        | "api-ms-win-core-datetime-l1-1-0.dll"
-        | "api-ms-win-core-sysinfo-l1-1-0.dll"
-        | "api-ms-win-core-string-l1-1-0.dll"
-        | "api-ms-win-core-errorhandling-l1-1-0.dll"
-        | "api-ms-win-core-debug-l1-1-0.dll"
-        | "api-ms-win-core-profile-l1-1-0.dll"
-        | "api-ms-win-core-util-l1-1-0.dll"
-        | "ext-ms-win-ntuser-window-l1-1-0.dll"
-        | "ext-ms-win-ntuser-message-l1-1-0.dll"
-        | "ext-ms-win-ntuser-input-l1-1-0.dll" => "kernel32.dll".to_string(),
-
-        "api-ms-win-crt-runtime-l1-1-0.dll"
-        | "api-ms-win-crt-heap-l1-1-0.dll"
-        | "api-ms-win-crt-stdio-l1-1-0.dll"
-        | "api-ms-win-crt-string-l1-1-0.dll"
-        | "api-ms-win-crt-convert-l1-1-0.dll"
-        | "api-ms-win-crt-locale-l1-1-0.dll"
-        | "api-ms-win-crt-math-l1-1-0.dll"
-        | "api-ms-win-crt-time-l1-1-0.dll"
-        | "api-ms-win-crt-environment-l1-1-0.dll" => "msvcrt.dll".to_string(),
-
-        _ => canonical.to_string(),
+    let lower = canonical.to_ascii_lowercase();
+    if lower.starts_with("api-ms-win-crt-") {
+        return "msvcrt.dll".to_string();
     }
+    if lower.starts_with("api-ms-win-core-") {
+        return "kernel32.dll".to_string();
+    }
+    if lower.starts_with("api-ms-win-security-")
+        || lower.starts_with("api-ms-win-eventing-")
+        || lower.starts_with("api-ms-win-service-")
+    {
+        return "advapi32.dll".to_string();
+    }
+    if lower.starts_with("ext-ms-win-ntuser-") {
+        return "user32.dll".to_string();
+    }
+    if lower.starts_with("ext-ms-win-gdi-") {
+        return "gdi32.dll".to_string();
+    }
+    if lower.starts_with("api-ms-win-shcore-")
+        || lower.starts_with("api-ms-win-appmodel-")
+        || lower.starts_with("api-ms-win-devices-")
+    {
+        return "kernel32.dll".to_string();
+    }
+    canonical.to_string()
 }
 
 fn is_reimplemented(canonical: &str) -> bool {
@@ -138,6 +120,17 @@ fn is_reimplemented(canonical: &str) -> bool {
             | "dwmapi.dll"
             | "hid.dll"
             | "dbghelp.dll"
+            | "d3d11.dll"
+            | "dxgi.dll"
+            | "ntdll.dll"
+            | "ucrtbase.dll"
+            | "nsi.dll"
+            | "dnsapi.dll"
+            | "iphlpapi.dll"
+            | "winevulkan.dll"
+            | "vulkan-1.dll"
+            | "steam_api64.dll"
+            | "steam_api.dll"
     )
 }
 
@@ -150,29 +143,15 @@ pub(crate) fn module_key_by_handle(handle: usize) -> Option<String> {
 }
 
 fn should_call_dll_main() -> bool {
-    match std::env::var("TUXEXE_CALL_DLLMAIN") {
-        Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
-        Err(_) => false,
-    }
+    !matches!(
+        std::env::var("TUXEXE_SKIP_DLLMAIN"),
+        Ok(value) if matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    )
 }
 
 fn should_call_dll_main_for(canonical: &str) -> bool {
-    if should_call_dll_main() {
-        return true;
-    }
-
-    if canonical.eq_ignore_ascii_case("unityplayer.dll") {
-        return matches!(
-            std::env::var("TUXEXE_CALL_UNITY_DLLMAIN"),
-            Ok(value)
-                if matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes"
-                )
-        );
-    }
-
-    false
+    let _ = canonical;
+    should_call_dll_main()
 }
 
 fn call_dll_main(native: &NativeModule, reason: u32) -> Result<(), String> {
@@ -188,12 +167,27 @@ fn call_dll_main(native: &NativeModule, reason: u32) -> Result<(), String> {
         "Invoking DllMain"
     );
 
-    // SAFETY: We mapped and relocated the image and call its declared DLL entrypoint ABI.
-    let result = unsafe {
-        let dll_main: extern "win64" fn(*mut c_void, u32, *mut c_void) -> i32 =
-            std::mem::transmute(entry);
-        dll_main(native.mapped.base_addr() as *mut c_void, reason, std::ptr::null_mut())
-    };
+    let result = crate::runtime::guest_stack::invoke_status(
+        entry,
+        native.mapped.base_addr() as *mut c_void,
+        reason,
+        std::ptr::null_mut(),
+    )
+    .map_err(|error| format!("DllMain stack transition failed: {error}"))?;
+
+    if native
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("unityplayer.dll"))
+    {
+        tracing::info!(
+            result,
+            global_0x1ac2288 =
+                format_args!("0x{:x}", native.mapped.read_u64(0x1ac2288).unwrap_or(0)),
+            "UnityPlayer DllMain compatibility state"
+        );
+    }
 
     if reason == DLL_PROCESS_ATTACH && result == 0 {
         return Err(format!(
@@ -243,7 +237,7 @@ fn prime_unity_dispatch_cache(module_path: &std::path::Path, mapped: &mut Mapped
     const DISPATCH_VECTOR_PTR_RVA: usize = 0x1bb1448;
     const DISPATCH_VECTOR_COUNT_RVA: usize = 0x1bb1440;
     const DISPATCH_TABLE_RVA: usize = 0x1bb1d00;
-    const SLOTS_TO_PRIME: usize = 64;
+    const SLOTS_TO_PRIME: usize = 0x200;
 
     let Some(cookie) = mapped.read_u64(COOKIE_RVA) else {
         warn!("Unity dispatch cache prime skipped: cookie RVA unreadable");
@@ -251,50 +245,53 @@ fn prime_unity_dispatch_cache(module_path: &std::path::Path, mapped: &mut Mapped
     };
     let encoded_minus_one = !0u64 ^ cookie;
 
-    // NOTE:
-    // The wider dispatch vector/table around 0x1bb1d00 appears to carry mixed
-    // pointer semantics across Unity versions (some paths expect decoded
-    // pointers, others encoded sentinels). Writing encoded sentinel values into
-    // that table causes deterministic invalid dereferences like
-    //   fault = encoded_minus_one + 0x14
-    // at startup.
+    // The resolver treats a zero raw entry as an already-resolved pointer. With
+    // the cookie transform used by this Unity build, zero therefore decodes to
+    // the cookie itself (0xae64b77e88c8000 in the observed run) and the guard
+    // dispatcher jumps into unmapped memory. Seed the startup slots with the
+    // encoded -1 sentinel instead; Unity's resolver recognizes that sentinel
+    // and performs the normal GetProcAddress slow path.
     //
-    // Keep this compatibility patch narrow: only seed the single early startup
-    // slot we have validated, and avoid touching the broader dispatch vector.
+    // The legacy setup never wrote the table. It published a vector pointer
+    // and count instead, so keep it as an exact A/B mode while narrowing this
+    // build-specific startup workaround.
+    if unity_dispatch_mode() == UnityDispatchMode::Legacy {
+        let vector_ptr = mapped.read_u64(DISPATCH_VECTOR_PTR_RVA);
+        let vector_count = mapped.read_u32(DISPATCH_VECTOR_COUNT_RVA);
+        if matches!(vector_ptr, Some(0)) {
+            let dispatch_table_va = mapped.base_addr().saturating_add(DISPATCH_TABLE_RVA) as u64;
+            let _ = mapped.write_u64(DISPATCH_VECTOR_PTR_RVA, dispatch_table_va);
+        }
+        if matches!(vector_count, Some(0)) {
+            let _ = mapped.write_u32(DISPATCH_VECTOR_COUNT_RVA, 64);
+        }
+        info!(
+            ptr_rva = format_args!("0x{DISPATCH_VECTOR_PTR_RVA:x}"),
+            count_rva = format_args!("0x{DISPATCH_VECTOR_COUNT_RVA:x}"),
+            table_rva = format_args!("0x{DISPATCH_TABLE_RVA:x}"),
+            "Initialized Unity dispatch vector in legacy mode"
+        );
+    } else if unity_dispatch_prime_enabled() {
+        for slot in 0..SLOTS_TO_PRIME {
+            let _ = mapped.write_u64(
+                DISPATCH_TABLE_RVA + slot * std::mem::size_of::<u64>(),
+                encoded_minus_one,
+            );
+        }
+        info!(
+            table_rva = format_args!("0x{DISPATCH_TABLE_RVA:x}"),
+            encoded_minus_one = format_args!("0x{encoded_minus_one:x}"),
+            slots = SLOTS_TO_PRIME,
+            "Initialized Unity dispatch table with encoded slow-path sentinels"
+        );
+    } else {
+        info!("Unity dispatch-table prime disabled for diagnosis");
+    }
 
     // Unity also uses a single encoded dispatch slot at 0x1bb1400 for an
     // early startup fallback path. In current traces, force-seeding this slot
     // makes Unity jump into a path that immediately dereferences NULL.
     // Keep it untouched and let Unity initialize it lazily.
-
-    let vector_ptr = mapped.read_u64(DISPATCH_VECTOR_PTR_RVA);
-    let vector_count = mapped.read_u32(DISPATCH_VECTOR_COUNT_RVA);
-    info!(
-        ptr_rva = format_args!("0x{DISPATCH_VECTOR_PTR_RVA:x}"),
-        cnt_rva = format_args!("0x{DISPATCH_VECTOR_COUNT_RVA:x}"),
-        ptr = format_args!("0x{:x}", vector_ptr.unwrap_or(0)),
-        count = vector_count.unwrap_or(0),
-        "Unity dispatch vector probe"
-    );
-
-    if matches!(vector_ptr, Some(0)) {
-        let dispatch_table_va = mapped.base_addr().saturating_add(DISPATCH_TABLE_RVA) as u64;
-        let _ = mapped.write_u64(DISPATCH_VECTOR_PTR_RVA, dispatch_table_va);
-        info!(
-            ptr_rva = format_args!("0x{DISPATCH_VECTOR_PTR_RVA:x}"),
-            table_va = format_args!("0x{dispatch_table_va:x}"),
-            "Seeded Unity dispatch vector base pointer to primed dispatch table"
-        );
-    }
-
-    if matches!(vector_count, Some(0)) {
-        let _ = mapped.write_u32(DISPATCH_VECTOR_COUNT_RVA, SLOTS_TO_PRIME as u32);
-        info!(
-            cnt_rva = format_args!("0x{DISPATCH_VECTOR_COUNT_RVA:x}"),
-            count = SLOTS_TO_PRIME,
-            "Seeded Unity dispatch vector count"
-        );
-    }
 
     if matches!(mapped.read_u64(HEAP_HANDLE_RVA), Some(0)) {
         let process_heap = crate::memory::heap::get_process_heap();
@@ -314,6 +311,33 @@ fn prime_unity_dispatch_cache(module_path: &std::path::Path, mapped: &mut Mapped
     );
 }
 
+fn unity_startup_patches_enabled() -> bool {
+    !matches!(
+        std::env::var("TUXEXE_UNITY_STARTUP_PATCHES"),
+        Ok(value) if matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no")
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnityDispatchMode {
+    Sentinel,
+    Legacy,
+}
+
+fn unity_dispatch_mode() -> UnityDispatchMode {
+    match std::env::var("TUXEXE_UNITY_DISPATCH_MODE") {
+        Ok(value) if value.trim().eq_ignore_ascii_case("legacy") => UnityDispatchMode::Legacy,
+        _ => UnityDispatchMode::Sentinel,
+    }
+}
+
+fn unity_dispatch_prime_enabled() -> bool {
+    !matches!(
+        std::env::var("TUXEXE_UNITY_DISPATCH_PRIME"),
+        Ok(value) if matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no")
+    )
+}
+
 fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
     let parsed = ParsedPe::from_file(&path).map_err(|e| format!("parse failed: {e}"))?;
     let mut mapped = map_pe(&parsed).map_err(|e| format!("map failed: {e}"))?;
@@ -330,6 +354,11 @@ fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
 
     initialize_static_tls(&parsed, &mut mapped)
         .map_err(|e| format!("static TLS init failed: {e}"))?;
+    // Worker threads created after this DLL loads must receive its
+    // DLL_THREAD_ATTACH callbacks as well. Keeping only the executable's
+    // callback table leaves UnityPlayer's per-thread queues uninitialised.
+    register_tls_callbacks(&parsed, &mapped)
+        .map_err(|e| format!("TLS callback registration failed: {e}"))?;
 
     prime_unity_dispatch_cache(&path, &mut mapped);
 
@@ -346,7 +375,7 @@ fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
     //
     // Fix: replace test+je with unconditional JMP to skip the crash block.
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-    if name.eq_ignore_ascii_case("unityplayer.dll") {
+    if name.eq_ignore_ascii_case("unityplayer.dll") && unity_startup_patches_enabled() {
         // Patch 1: Jump over crash block (test eax,eax + je +0x0e -> jmp +0x10 + NOP + NOP)
         let patch1_rva = 0x843c6dusize;
         let patch1_bytes: [u8; 4] = [0xEB, 0x10, 0x90, 0x90];
@@ -365,33 +394,25 @@ fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
             false
         };
 
-        // Patch 3: Replace the Unity thunk `jmp rax` stub (RVA 0x16a4850)
-        // with an indirect jump through the known dispatch IAT slot at
-        // RVA 0x16b00e8 (`jmp qword ptr [rip+0xb892]`).
-        //
-        // This avoids immediate crashes when RAX carries an encoded/invalid
-        // dispatch cache value during very early startup.
-        let patch3_rva = 0x16a4850usize;
-        let patch3_bytes: [u8; 6] = [0xFF, 0x25, 0x92, 0xB8, 0x00, 0x00];
-        let patch3_ok = if patch3_rva < mapped.size() {
-            mapped.write_slice(patch3_rva, &patch3_bytes)
-        } else {
-            false
-        };
-
-        if patch1_ok || patch2_ok || patch3_ok {
+        if patch1_ok || patch2_ok {
             tracing::info!(
                 rva1 = format_args!("0x{patch1_rva:x}"),
                 rva2 = format_args!("0x{patch2_rva:x}"),
-                rva3 = format_args!("0x{patch3_rva:x}"),
                 "Applied UnityPlayer.dll runtime crash patches"
             );
         } else {
             tracing::warn!("Failed to apply UnityPlayer.dll runtime crash patches");
         }
+    } else if name.eq_ignore_ascii_case("unityplayer.dll") {
+        tracing::info!("UnityPlayer startup crash patches disabled for diagnosis");
     }
 
     mapped.apply_protections(&parsed).map_err(|e| format!("protections failed: {e}"))?;
+
+    // TLS callbacks execute after the image has its final section
+    // protections, matching the Windows loader ordering.
+    invoke_tls_callbacks_for(&parsed, &mapped, DLL_PROCESS_ATTACH)
+        .map_err(|e| format!("TLS PROCESS_ATTACH failed: {e}"))?;
 
     let exports = build_export_map(&parsed, &mapped);
     Ok(NativeModule { path, mapped, parsed, exports })
@@ -413,20 +434,23 @@ pub fn load_library(module_name: &str) -> Result<usize, String> {
         }
     }
 
-    if is_reimplemented(&canonical) {
+    let local_path = if !is_reimplemented(&canonical) { resolve_dll_path(module_name) } else { None };
+
+    if local_path.is_none() && is_reimplemented(&canonical) {
         let handle = next_module_handle();
         let module = LoadedModule {
             handle,
             canonical_name: canonical.clone(),
             source: ModuleSource::Reimplemented,
             ref_count: 1,
+            thread_library_calls_disabled: false,
         };
         registry().write().expect("dll registry poisoned").insert(canonical.clone(), module);
         info!(module = %canonical, handle = format_args!("0x{handle:x}"), "Loaded module");
         return Ok(handle);
     }
 
-    let Some(path) = resolve_dll_path(module_name) else {
+    let Some(path) = local_path.or_else(|| resolve_dll_path(module_name)) else {
         return Err(format!("DLL not found: {module_name}"));
     };
 
@@ -437,6 +461,7 @@ pub fn load_library(module_name: &str) -> Result<usize, String> {
             canonical_name: canonical.clone(),
             source: ModuleSource::LoadingNative(path.clone()),
             ref_count: 1,
+            thread_library_calls_disabled: false,
         };
         registry().write().expect("dll registry poisoned").insert(canonical.clone(), module);
     }
@@ -452,7 +477,7 @@ pub fn load_library(module_name: &str) -> Result<usize, String> {
                 info!(
                     module = %canonical,
                     path = %path.display(),
-                    "Skipping DllMain(PROCESS_ATTACH); set TUXEXE_CALL_DLLMAIN=1 (global) or TUXEXE_CALL_UNITY_DLLMAIN=1 (Unity only)"
+                    "Skipping DllMain(PROCESS_ATTACH) per TUXEXE_SKIP_DLLMAIN"
                 );
             }
 
@@ -494,6 +519,16 @@ pub fn module_base_for_address(address: usize) -> Option<usize> {
         let base = native.mapped.base_addr();
         let end = base.saturating_add(native.mapped.size());
         (address >= base && address < end).then_some(base)
+    })
+}
+
+pub fn module_base_by_name(name: &str) -> Option<usize> {
+    let canonical = canonicalize_module_name(name);
+    registry().read().ok()?.get(&canonical).and_then(|module| {
+        let ModuleSource::Native(native) = &module.source else {
+            return None;
+        };
+        Some(native.mapped.base_addr())
     })
 }
 
@@ -552,6 +587,72 @@ pub fn free_library(module_handle: usize) -> Result<(), String> {
 pub fn get_loaded_module_handle(module_name: &str) -> Option<usize> {
     let canonical = canonicalize_module_name(module_name);
     registry().read().expect("dll registry poisoned").get(&canonical).map(|m| m.handle)
+}
+
+/// Apply the DllMain thread-notification opt-out to a loaded module. Windows
+/// rejects this request for DLLs with static TLS because they still require
+/// per-thread initialization.
+pub fn disable_thread_library_calls(module_handle: usize) -> bool {
+    let mut modules = registry().write().expect("dll registry poisoned");
+    let Some(module) = modules.values_mut().find(|module| module.handle == module_handle) else {
+        return false;
+    };
+    if matches!(&module.source, ModuleSource::Native(native) if native.parsed.tls_dir.is_some()) {
+        return false;
+    }
+    module.thread_library_calls_disabled = true;
+    true
+}
+
+/// Deliver the Windows `DLL_THREAD_ATTACH` notification to each native module
+/// that opted in to thread-library calls. `CreateThread` performs this after
+/// static TLS and TLS callbacks have been established for the new TEB.
+///
+/// We snapshot the immutable entry addresses before entering guest code so a
+/// DllMain may safely call `LoadLibrary` without holding the module registry
+/// lock.
+pub fn invoke_thread_attach_dll_mains() {
+    if !should_call_dll_main() {
+        return;
+    }
+
+    let entries = {
+        let modules = registry().read().expect("dll registry poisoned");
+        modules
+            .values()
+            .filter_map(|module| {
+                if module.thread_library_calls_disabled {
+                    return None;
+                }
+                let ModuleSource::Native(native) = &module.source else {
+                    return None;
+                };
+                (native.parsed.entry_point_rva != 0).then_some((
+                    module.canonical_name.clone(),
+                    native.mapped.base_addr(),
+                    native.mapped.base_addr() + native.parsed.entry_point_rva as usize,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (module, image_base, entry) in entries {
+        trace!(
+            module,
+            entry = format_args!("0x{entry:x}"),
+            "Invoking DllMain(DLL_THREAD_ATTACH)"
+        );
+        match crate::runtime::guest_stack::invoke_status(
+            entry,
+            image_base as *mut c_void,
+            DLL_THREAD_ATTACH,
+            std::ptr::null_mut(),
+        ) {
+            Ok(0) => warn!(module, "DllMain returned FALSE during DLL_THREAD_ATTACH"),
+            Ok(_) => {}
+            Err(error) => warn!(module, %error, "DllMain DLL_THREAD_ATTACH failed"),
+        }
+    }
 }
 
 /// Return a displayable module filename/path for a loaded module handle.
@@ -625,14 +726,8 @@ mod tests {
         reset_registry_for_tests();
         assert_eq!(canonicalize_module_name("KERNEL32"), "kernel32.dll");
         assert_eq!(canonicalize_module_name("C:\\Windows\\System32\\msvcrt.dll"), "msvcrt.dll");
-        assert_eq!(
-            canonicalize_module_name("api-ms-win-core-synch-l1-2-0"),
-            "kernel32.dll"
-        );
-        assert_eq!(
-            canonicalize_module_name("api-ms-win-crt-runtime-l1-1-0.dll"),
-            "msvcrt.dll"
-        );
+        assert_eq!(canonicalize_module_name("api-ms-win-core-synch-l1-2-0"), "kernel32.dll");
+        assert_eq!(canonicalize_module_name("api-ms-win-crt-runtime-l1-1-0.dll"), "msvcrt.dll");
     }
 
     #[test]
@@ -668,6 +763,18 @@ mod tests {
         let handle = load_library("kernel32").expect("load");
         let addr = resolve_export(handle, "CancelIo");
         assert!(addr.is_some());
+    }
+
+    #[test]
+    fn graphics_modules_are_loaded_as_reimplemented_modules() {
+        let _guard = crate::test_support::serial_guard();
+        reset_registry_for_tests();
+
+        let d3d11 = load_library("D3D11").expect("load d3d11");
+        let dxgi = load_library("dxgi.dll").expect("load dxgi");
+
+        assert!(resolve_export(d3d11, "D3D11CreateDevice").is_some());
+        assert!(resolve_export(dxgi, "CreateDXGIFactory1").is_some());
     }
 
     #[test]

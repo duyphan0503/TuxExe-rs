@@ -2,6 +2,10 @@
 
 use crate::utils::wide_string::from_wide_ptr;
 use std::ffi::CStr;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex, OnceLock,
+};
 use tracing::trace;
 
 thread_local! {
@@ -19,26 +23,168 @@ pub extern "win64" fn set_last_error(err_code: u32) {
     LAST_ERROR.with(|e| e.set(err_code));
 }
 
-static mut UNHANDLED_EXCEPTION_FILTER: usize = 0;
+static UNHANDLED_EXCEPTION_FILTER: AtomicUsize = AtomicUsize::new(0);
+
+fn vectored_handlers() -> &'static Mutex<Vec<(usize, usize)>> {
+    static HANDLERS: OnceLock<Mutex<Vec<(usize, usize)>>> = OnceLock::new();
+    HANDLERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+static NEXT_VECTORED_HANDLER: AtomicUsize = AtomicUsize::new(1);
+
+#[repr(C)]
+pub struct ExceptionPointers {
+    pub exception_record: *mut WinExceptionRecord,
+    pub context_record: *mut WinContext,
+}
+
+#[repr(C)]
+pub struct WinExceptionRecord {
+    pub exception_code: u32,
+    pub exception_flags: u32,
+    pub exception_record: *mut WinExceptionRecord,
+    pub exception_address: *mut std::ffi::c_void,
+    pub number_parameters: u32,
+    pub exception_information: [usize; 15],
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy)]
+pub struct WinContext {
+    pub p1_home: u64,
+    pub p2_home: u64,
+    pub p3_home: u64,
+    pub p4_home: u64,
+    pub p5_home: u64,
+    pub p6_home: u64,
+    pub context_flags: u32,
+    pub mx_csr: u32,
+    pub seg_cs: u16,
+    pub seg_ds: u16,
+    pub seg_es: u16,
+    pub seg_fs: u16,
+    pub seg_gs: u16,
+    pub seg_ss: u16,
+    pub eflags: u32,
+    pub dr0: u64,
+    pub dr1: u64,
+    pub dr2: u64,
+    pub dr3: u64,
+    pub dr6: u64,
+    pub dr7: u64,
+    pub rax: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rbx: u64,
+    pub rsp: u64,
+    pub rbp: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub flt_save: [u8; 512],
+    pub vector_register: [u128; 26],
+    pub vector_control: u64,
+    pub debug_control: u64,
+    pub last_branch_to_rip: u64,
+    pub last_branch_from_rip: u64,
+    pub last_exception_to_rip: u64,
+    pub last_exception_from_rip: u64,
+}
+
+impl Default for WinContext {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+pub const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
+pub const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+
+/// Register a vectored handler so code which owns the callback's lifecycle can
+/// safely add/remove it and receive dispatched host signals.
+pub extern "win64" fn add_vectored_exception_handler(first: u32, handler: usize) -> usize {
+    if handler == 0 {
+        set_last_error(87);
+        return 0;
+    }
+    let handle = NEXT_VECTORED_HANDLER.fetch_add(1, Ordering::Relaxed);
+    let mut handlers = vectored_handlers().lock().expect("vectored handler list poisoned");
+    if first != 0 {
+        handlers.insert(0, (handle, handler));
+    } else {
+        handlers.push((handle, handler));
+    }
+    tracing::info!(first, handler = format_args!("0x{:x}", handler), handle, "AddVectoredExceptionHandler registered");
+    handle
+}
+
+pub extern "win64" fn remove_vectored_exception_handler(handle: usize) -> u32 {
+    let mut handlers = vectored_handlers().lock().expect("vectored handler list poisoned");
+    if let Some(index) = handlers.iter().position(|(registered, _)| *registered == handle) {
+        handlers.remove(index);
+        1
+    } else {
+        0
+    }
+}
+
+pub fn dispatch_vectored_exception(
+    record: &crate::exceptions::signals::ExceptionRecord,
+    context: &mut WinContext,
+) -> bool {
+    let handlers: Vec<usize> = {
+        let guard = vectored_handlers().lock().expect("vectored handler list poisoned");
+        guard.iter().map(|(_, h)| *h).collect()
+    };
+
+    if handlers.is_empty() {
+        return false;
+    }
+
+    let mut win_record = WinExceptionRecord {
+        exception_code: record.exception_code,
+        exception_flags: 0,
+        exception_record: std::ptr::null_mut(),
+        exception_address: context.rip as *mut std::ffi::c_void,
+        number_parameters: 2,
+        exception_information: [
+            0,
+            record.fault_address,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+    };
+
+    let mut pointers = ExceptionPointers {
+        exception_record: &mut win_record,
+        context_record: context,
+    };
+
+    for handler_addr in handlers {
+        let handler: extern "win64" fn(*mut ExceptionPointers) -> i32 =
+            unsafe { std::mem::transmute(handler_addr) };
+        let res = handler(&mut pointers);
+        tracing::debug!(handler_addr = format_args!("0x{:x}", handler_addr), result = res, "Dispatched vectored exception handler");
+        if res == EXCEPTION_CONTINUE_EXECUTION {
+            return true;
+        }
+    }
+
+    false
+}
 
 pub extern "win64" fn set_unhandled_exception_filter(
     lp_top_level_exception_filter: usize,
 ) -> usize {
     trace!("SetUnhandledExceptionFilter({:#x})", lp_top_level_exception_filter);
-    let allow_registration = std::env::var("TUXEXE_ENABLE_UNHANDLED_FILTER")
-        .ok()
-        .is_some_and(|value| value == "1");
-    unsafe {
-        let old = UNHANDLED_EXCEPTION_FILTER;
-        if allow_registration {
-            UNHANDLED_EXCEPTION_FILTER = lp_top_level_exception_filter;
-        } else {
-            // Windows crash-report filters often expect full SEH/EXCEPTION_POINTERS semantics.
-            // Until we implement that path, keep custom filters disabled by default.
-            UNHANDLED_EXCEPTION_FILTER = 0;
-        }
-        old
-    }
+    UNHANDLED_EXCEPTION_FILTER.swap(lp_top_level_exception_filter, Ordering::SeqCst)
 }
 
 pub extern "win64" fn unhandled_exception_filter(exception_info: *mut std::ffi::c_void) -> i32 {
@@ -47,7 +193,7 @@ pub extern "win64" fn unhandled_exception_filter(exception_info: *mut std::ffi::
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    let filter = unsafe { UNHANDLED_EXCEPTION_FILTER };
+    let filter = UNHANDLED_EXCEPTION_FILTER.load(Ordering::SeqCst);
     trace!("UnhandledExceptionFilter(filter={:#x})", filter);
     if filter == 0 {
         return EXCEPTION_CONTINUE_SEARCH;
@@ -268,7 +414,8 @@ mod tests {
     fn unhandled_exception_filter_uses_registered_handler() {
         let _guard = crate::test_support::serial_guard();
         let old = set_unhandled_exception_filter(test_filter as usize);
-        let result = unhandled_exception_filter(std::ptr::null_mut());
+        let mut exception_info = 0u8;
+        let result = unhandled_exception_filter(&mut exception_info as *mut u8 as *mut _);
         assert_eq!(result, 1);
         let _ = set_unhandled_exception_filter(old);
     }

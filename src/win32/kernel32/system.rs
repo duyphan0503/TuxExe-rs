@@ -132,6 +132,12 @@ pub extern "win64" fn GetSystemInfo(lpSystemInfo: *mut SYSTEM_INFO) {
             PROCESSOR_ARCHITECTURE_INTEL
         };
 
+        // Windows exposes the active processor set as a native-word bitmask.
+        // Linux hosts can report more logical CPUs than fit in that mask; do
+        // not let the shift overflow (or panic in debug builds).
+        let active_processor_mask =
+            if num_cpus >= usize::BITS { usize::MAX } else { (1usize << num_cpus) - 1 };
+
         (*lpSystemInfo) = SYSTEM_INFO {
             wProcessorArchitecture: arch,
             wReserved: 0,
@@ -142,7 +148,7 @@ pub extern "win64" fn GetSystemInfo(lpSystemInfo: *mut SYSTEM_INFO) {
             } else {
                 0x7FFEFFFF // x86 user-mode max
             },
-            dwActiveProcessorMask: (1 << num_cpus) - 1, // Bitmask of active processors
+            dwActiveProcessorMask: active_processor_mask,
             dwNumberOfProcessors: num_cpus,
             dwProcessorType: if cfg!(target_arch = "x86_64") {
                 8664 // PROCESSOR_AMD_X8664
@@ -244,6 +250,20 @@ pub extern "win64" fn GetVersion() -> u32 {
     let build = 19045u32;
 
     (build << 16) | (minor << 8) | major
+}
+
+/// RtlGetVersion - Returns Windows version information (NT status)
+#[no_mangle]
+pub extern "win64" fn RtlGetVersion(lpVersionInformation: *mut OSVERSIONINFOW) -> u32 {
+    tracing::debug!("RtlGetVersion called");
+    if lpVersionInformation.is_null() {
+        return 0xC000000D; // STATUS_INVALID_PARAMETER
+    }
+    if GetVersionExW(lpVersionInformation) != 0 {
+        0 // STATUS_SUCCESS
+    } else {
+        0xC0000001 // STATUS_UNSUCCESSFUL
+    }
 }
 
 /// GetComputerNameA - Returns computer name (ANSI)

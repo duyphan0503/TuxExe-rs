@@ -24,9 +24,7 @@ impl CompatibilityProfile {
         {
             Ok(Self::MadIsland)
         } else {
-            Err(format!(
-                "unknown compatibility profile '{value}' (supported: default, mad-island)"
-            ))
+            Err(format!("unknown compatibility profile '{value}' (supported: default, mad-island)"))
         }
     }
 
@@ -59,9 +57,9 @@ impl AppliedCompatibility {
                 env_overrides.push(("TUXEXE_IMPORT_POLICY", "strict-startup".to_string()));
             }
             CompatibilityProfile::MadIsland => {
-                // Unity bring-up defaults: strict import policy + explicit Unity DllMain path.
+                // Unity bring-up defaults: strict import policy. Native PE DLL
+                // lifecycle callbacks are now enabled by the loader contract.
                 env_overrides.push(("TUXEXE_IMPORT_POLICY", "strict-startup".to_string()));
-                env_overrides.push(("TUXEXE_CALL_UNITY_DLLMAIN", "1".to_string()));
                 env_overrides.push(("TUXEXE_COMPAT_PROFILE", "mad-island".to_string()));
                 // Keep graphics stack explicit for DX12-first path diagnostics.
                 env_overrides.push(("DXVK_LOG_LEVEL", "info".to_string()));
@@ -132,8 +130,9 @@ impl RunReport {
 
     pub fn write_to(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("failed to create report directory {}: {err}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|err| {
+                format!("failed to create report directory {}: {err}", parent.display())
+            })?;
         }
         std::fs::write(path, self.render_text())
             .map_err(|err| format!("failed to write report {}: {err}", path.display()))
@@ -188,7 +187,10 @@ mod tests {
 
     #[test]
     fn parses_profile_aliases() {
-        assert_eq!(CompatibilityProfile::from_cli(None).expect("default"), CompatibilityProfile::Default);
+        assert_eq!(
+            CompatibilityProfile::from_cli(None).expect("default"),
+            CompatibilityProfile::Default
+        );
         assert_eq!(
             CompatibilityProfile::from_cli(Some("mad_island")).expect("alias"),
             CompatibilityProfile::MadIsland

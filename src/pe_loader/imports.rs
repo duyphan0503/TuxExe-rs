@@ -334,10 +334,9 @@ pub fn enumerate_delay_imports(pe: &ParsedPe, mapped: &MappedImage) -> PeResult<
 
 /// Resolve all enumerated imports and write their addresses into the mapped IAT.
 ///
-/// Looks up each function in the `dll_manager` dispatch table. If found, writes
-/// the resulting function pointer into the IAT. Unresolved imports are currently
-/// skipped (logged as warnings) allowing execution to proceed until such a function
-/// is called.
+/// Looks up each function in the `dll_manager` dispatch table and writes the
+/// resulting function pointer into the IAT. Strict mode is fail-fast for every
+/// unresolved import; the relaxed fallback exists only for diagnostics.
 pub fn resolve_imports(
     mapped: &mut MappedImage,
     pe: &ParsedPe,
@@ -385,15 +384,22 @@ pub fn resolve_imports(
                 }
                 unresolved_records.push((entry.dll.clone(), func_name.clone(), startup_critical));
 
-                if policy == UnresolvedImportPolicy::StrictStartup && startup_critical {
+                if policy == UnresolvedImportPolicy::StrictStartup {
                     log_unresolved_report(&unresolved_records, policy);
                     return Err(PeError::Mapping(format!(
-                        "Unresolved startup-critical import: {}!{} (set TUXEXE_IMPORT_POLICY=relaxed for diagnostics)",
+                        "Unresolved import: {}!{}{} (set TUXEXE_IMPORT_POLICY=relaxed for diagnostics)",
                         entry.dll, func_name
+                        , if startup_critical { " [startup-critical]" } else { "" }
                     )));
                 }
 
                 if pe.is_pe64 {
+                    crate::runtime::telemetry::record(format!(
+                        "unresolved_import:{}!{}{}",
+                        entry.dll,
+                        func_name,
+                        if entry.delayed { " [delay]" } else { "" }
+                    ));
                     tracing::warn!(
                         dll = %entry.dll,
                         func = %func_name,
@@ -468,7 +474,10 @@ pub fn resolve_imports(
                 tracing::error!("  Zero IAT at RVA 0x{:x}", rva);
             }
         } else {
-            tracing::info!("All {} IAT entries are non-zero after resolution", import_table.entries.len());
+            tracing::info!(
+                "All {} IAT entries are non-zero after resolution",
+                import_table.entries.len()
+            );
         }
     }
 
@@ -476,7 +485,7 @@ pub fn resolve_imports(
 }
 
 extern "win64" fn unresolved_import_stub() -> usize {
-    crate::runtime::telemetry::record("unresolved_import_stub");
+    crate::runtime::telemetry::record("unresolved_import_stub invoked");
     tracing::error!("UNRESOLVED IMPORT STUB CALLED — returning 0 (NULL function pointer)!");
     let bt = std::backtrace::Backtrace::force_capture();
     tracing::error!("Backtrace: {}", bt);

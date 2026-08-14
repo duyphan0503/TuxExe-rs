@@ -4,7 +4,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    ffi::c_void,
+    ffi::{c_void, CStr},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex, OnceLock, RwLock,
@@ -14,12 +14,17 @@ use std::{
 
 use crate::{
     nt_kernel::sync as nt_sync,
-    utils::handle::{global_table, Handle, HandleObject, INVALID_HANDLE_VALUE},
+    utils::{
+        handle::{global_table, Handle, HandleObject, INVALID_HANDLE_VALUE},
+        wide_string::from_wide_ptr,
+    },
 };
 
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_ALREADY_EXISTS: u32 = 183;
 const CREATE_WAITABLE_TIMER_MANUAL_RESET: u32 = 0x0000_0001;
 
 #[repr(C)]
@@ -56,7 +61,13 @@ fn critical_sections(
 
 #[derive(Debug, Default)]
 struct SrwLockState {
-    owner_tid: Option<u32>,
+    exclusive_owner: Option<u32>,
+    shared_holders: HashMap<u32, u32>,
+}
+
+#[derive(Debug, Default)]
+struct ConditionVariableState {
+    generation: u64,
 }
 
 fn srw_locks() -> &'static RwLock<HashMap<usize, Arc<(Mutex<SrwLockState>, Condvar)>>> {
@@ -65,10 +76,18 @@ fn srw_locks() -> &'static RwLock<HashMap<usize, Arc<(Mutex<SrwLockState>, Condv
     TABLE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+fn condition_variables(
+) -> &'static RwLock<HashMap<usize, Arc<(Mutex<ConditionVariableState>, Condvar)>>> {
+    static TABLE: OnceLock<RwLock<HashMap<usize, Arc<(Mutex<ConditionVariableState>, Condvar)>>>> =
+        OnceLock::new();
+    TABLE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct SListState {
     head: usize,
     depth: u16,
+    sequence: u64,
 }
 
 fn slist_states() -> &'static RwLock<HashMap<usize, SListState>> {
@@ -85,6 +104,47 @@ unsafe fn set_slist_entry_next(entry: *mut c_void, next: usize) {
     // SAFETY: SLIST_ENTRY starts with a single pointer-sized `Next` field.
     unsafe {
         *(entry.cast::<usize>()) = next;
+    }
+}
+
+/// Persist the x64 `SLIST_HEADER` alongside the host-side lock.  Windows
+/// callers are allowed to inspect this header directly (and Mono does so in
+/// its allocator fast paths), so keeping the state only in a Rust map turns a
+/// successful `InterlockedPushEntrySList` into a later use of an uninitialised
+/// free-list pointer.  On 64-bit user mode Windows the `Header16` view is in
+/// use: word 0 is `Depth|Sequence`; word 1 is
+/// `HeaderType|Init|Reserved:2|NextEntry:60`.  `NextEntry` is the original
+/// 16-byte-aligned pointer, stored in bits 4..63 (the low four bits are the
+/// flags), rather than a pointer compressed by four bits.
+unsafe fn write_slist_header(list_head: *mut c_void, state: SListState) {
+    const HEADER_TYPE_BIT: u64 = 1;
+    const INIT_BIT: u64 = 1 << 1;
+
+    // Header16 reserves the upper 48 bits of word 0 for the sequence.
+    let first = (state.depth as u64) | (state.sequence << 16);
+    let second = (state.head as u64 & !0xf) | HEADER_TYPE_BIT | INIT_BIT;
+    unsafe {
+        list_head.cast::<u64>().write_unaligned(first);
+        list_head.cast::<u8>().add(8).cast::<u64>().write_unaligned(second);
+    }
+}
+
+/// Read the guest-visible x64 `SLIST_HEADER` back into its logical form.
+///
+/// Mono emits lock-free SList operations directly in JIT code, so the header
+/// can change without passing through our exported Interlocked* functions.
+/// Treating the Rust side table as authoritative in that situation loses
+/// entries that Mono has just linked and eventually exposes a stale/free-list
+/// pointer to its allocator.  The header must therefore be the source of
+/// truth whenever an exported SList function is entered.
+unsafe fn read_slist_header(list_head: *mut c_void) -> SListState {
+    let first = unsafe { list_head.cast::<u64>().read_unaligned() };
+    let second = unsafe { list_head.cast::<u8>().add(8).cast::<u64>().read_unaligned() };
+
+    SListState {
+        head: (second & !0xf) as usize,
+        depth: first as u16,
+        sequence: first >> 16,
     }
 }
 
@@ -229,11 +289,26 @@ fn spawn_timer_queue_worker(timer_handle: Handle, due_time_ms: u32, period_ms: u
     });
 }
 
-fn get_or_create_critical_section(ptr: *mut c_void) -> Arc<(Mutex<CriticalSectionState>, Condvar)> {
+fn get_or_create_srw_lock(ptr: *mut c_void) -> Arc<(Mutex<SrwLockState>, Condvar)> {
     let key = ptr as usize;
 
-    if let Some(entry) =
-        critical_sections().read().expect("critical section table poisoned").get(&key)
+    if let Some(entry) = srw_locks().read().expect("srw lock table poisoned").get(&key) {
+        return Arc::clone(entry);
+    }
+
+    let entry = Arc::new((Mutex::new(SrwLockState::default()), Condvar::new()));
+    srw_locks().write().expect("srw lock table poisoned").insert(key, Arc::clone(&entry));
+    entry
+}
+
+fn get_or_create_critical_section(
+    ptr: *mut c_void,
+) -> Arc<(Mutex<CriticalSectionState>, Condvar)> {
+    let key = ptr as usize;
+    if let Some(entry) = critical_sections()
+        .read()
+        .expect("critical section table poisoned")
+        .get(&key)
     {
         return Arc::clone(entry);
     }
@@ -246,16 +321,96 @@ fn get_or_create_critical_section(ptr: *mut c_void) -> Arc<(Mutex<CriticalSectio
     entry
 }
 
-fn get_or_create_srw_lock(ptr: *mut c_void) -> Arc<(Mutex<SrwLockState>, Condvar)> {
+fn get_or_create_condition_variable(
+    ptr: *mut c_void,
+) -> Arc<(Mutex<ConditionVariableState>, Condvar)> {
     let key = ptr as usize;
-
-    if let Some(entry) = srw_locks().read().expect("srw lock table poisoned").get(&key) {
+    if let Some(entry) =
+        condition_variables().read().expect("condition variable table poisoned").get(&key)
+    {
         return Arc::clone(entry);
     }
 
-    let entry = Arc::new((Mutex::new(SrwLockState::default()), Condvar::new()));
-    srw_locks().write().expect("srw lock table poisoned").insert(key, Arc::clone(&entry));
+    let entry = Arc::new((Mutex::new(ConditionVariableState::default()), Condvar::new()));
+    condition_variables()
+        .write()
+        .expect("condition variable table poisoned")
+        .insert(key, Arc::clone(&entry));
     entry
+}
+
+pub fn reset_srw_lock(ptr: *mut c_void) {
+    if !ptr.is_null() {
+        srw_locks().write().expect("srw lock table poisoned").remove(&(ptr as usize));
+    }
+}
+
+pub fn reset_condition_variable(ptr: *mut c_void) {
+    if !ptr.is_null() {
+        condition_variables()
+            .write()
+            .expect("condition variable table poisoned")
+            .remove(&(ptr as usize));
+    }
+}
+
+pub fn sleep_condition_variable_with_unlock<F>(
+    condition_variable: *mut c_void,
+    timeout_ms: u32,
+    unlock: F,
+) -> bool
+where
+    F: FnOnce(),
+{
+    if condition_variable.is_null() {
+        return false;
+    }
+
+    let entry = get_or_create_condition_variable(condition_variable);
+    let (lock, condvar) = &*entry;
+    let guard = lock.lock().expect("condition variable state poisoned");
+    let generation = guard.generation;
+
+    // Hold the condition state mutex while releasing the caller's lock. A
+    // waker increments this generation under the same mutex, so it cannot be
+    // lost in the release-to-wait gap.
+    unlock();
+
+    if timeout_ms == nt_sync::INFINITE {
+        drop(
+            condvar
+                .wait_while(guard, |state| state.generation == generation)
+                .expect("condition variable state poisoned"),
+        );
+        return true;
+    }
+
+    let timeout = Duration::from_millis(timeout_ms as u64);
+    let (guard, _) = condvar
+        .wait_timeout_while(guard, timeout, |state| state.generation == generation)
+        .expect("condition variable state poisoned");
+    guard.generation != generation
+}
+
+pub fn sleep_condition_variable(condition_variable: *mut c_void, timeout_ms: u32) -> bool {
+    sleep_condition_variable_with_unlock(condition_variable, timeout_ms, || {})
+}
+
+pub fn wake_condition_variable(condition_variable: *mut c_void, wake_all: bool) {
+    if condition_variable.is_null() {
+        return;
+    }
+
+    let entry = get_or_create_condition_variable(condition_variable);
+    let (lock, condvar) = &*entry;
+    let mut guard = lock.lock().expect("condition variable state poisoned");
+    guard.generation = guard.generation.wrapping_add(1);
+    drop(guard);
+    if wake_all {
+        condvar.notify_all();
+    } else {
+        condvar.notify_one();
+    }
 }
 
 pub extern "win64" fn InitializeCriticalSection(lpCriticalSection: *mut c_void) {
@@ -287,7 +442,9 @@ pub extern "win64" fn InitializeSListHead(list_head: *mut c_void) {
     }
 
     let key = list_head as usize;
-    slist_states().write().expect("slist table poisoned").insert(key, SListState::default());
+    let state = SListState::default();
+    slist_states().write().expect("slist table poisoned").insert(key, state);
+    unsafe { write_slist_header(list_head, state) };
 }
 
 pub extern "win64" fn InterlockedPushEntrySList(
@@ -300,7 +457,11 @@ pub extern "win64" fn InterlockedPushEntrySList(
 
     let key = list_head as usize;
     let mut guard = slist_states().write().expect("slist table poisoned");
-    let state = guard.entry(key).or_default();
+    // The table is only a host-side lock.  Do not use its previous value:
+    // native/JIT SList instructions may have updated this guest header since
+    // our last call.
+    let state = guard.entry(key).or_insert_with(|| unsafe { read_slist_header(list_head) });
+    *state = unsafe { read_slist_header(list_head) };
     let previous_head = state.head;
 
     // SAFETY: list_entry points to caller-owned SLIST_ENTRY storage.
@@ -310,6 +471,8 @@ pub extern "win64" fn InterlockedPushEntrySList(
 
     state.head = list_entry as usize;
     state.depth = state.depth.saturating_add(1);
+    state.sequence = state.sequence.wrapping_add(1);
+    unsafe { write_slist_header(list_head, *state) };
 
     previous_head as *mut c_void
 }
@@ -321,7 +484,8 @@ pub extern "win64" fn InterlockedPopEntrySList(list_head: *mut c_void) -> *mut c
 
     let key = list_head as usize;
     let mut guard = slist_states().write().expect("slist table poisoned");
-    let state = guard.entry(key).or_default();
+    let state = guard.entry(key).or_insert_with(|| unsafe { read_slist_header(list_head) });
+    *state = unsafe { read_slist_header(list_head) };
     if state.head == 0 {
         return std::ptr::null_mut();
     }
@@ -333,6 +497,8 @@ pub extern "win64" fn InterlockedPopEntrySList(list_head: *mut c_void) -> *mut c
     if state.depth > 0 {
         state.depth -= 1;
     }
+    state.sequence = state.sequence.wrapping_add(1);
+    unsafe { write_slist_header(list_head, *state) };
 
     head
 }
@@ -344,10 +510,13 @@ pub extern "win64" fn InterlockedFlushSList(list_head: *mut c_void) -> *mut c_vo
 
     let key = list_head as usize;
     let mut guard = slist_states().write().expect("slist table poisoned");
-    let state = guard.entry(key).or_default();
+    let state = guard.entry(key).or_insert_with(|| unsafe { read_slist_header(list_head) });
+    *state = unsafe { read_slist_header(list_head) };
     let old_head = state.head as *mut c_void;
     state.head = 0;
     state.depth = 0;
+    state.sequence = state.sequence.wrapping_add(1);
+    unsafe { write_slist_header(list_head, *state) };
     old_head
 }
 
@@ -356,8 +525,8 @@ pub extern "win64" fn QueryDepthSList(list_head: *mut c_void) -> u16 {
         return 0;
     }
 
-    let key = list_head as usize;
-    slist_states().read().expect("slist table poisoned").get(&key).map_or(0, |s| s.depth)
+    // Keep this consistent with Mono's inlined lock-free operations as well.
+    unsafe { read_slist_header(list_head).depth }
 }
 
 pub extern "win64" fn EnterCriticalSection(lpCriticalSection: *mut c_void) {
@@ -414,7 +583,6 @@ pub extern "win64" fn LeaveCriticalSection(lpCriticalSection: *mut c_void) {
     if guard.recursion_count > 0 {
         guard.recursion_count -= 1;
     }
-
     if guard.recursion_count == 0 {
         guard.owner_tid = None;
         condvar.notify_one();
@@ -422,14 +590,12 @@ pub extern "win64" fn LeaveCriticalSection(lpCriticalSection: *mut c_void) {
 }
 
 pub extern "win64" fn DeleteCriticalSection(lpCriticalSection: *mut c_void) {
-    if lpCriticalSection.is_null() {
-        return;
+    if !lpCriticalSection.is_null() {
+        critical_sections()
+            .write()
+            .expect("critical section table poisoned")
+            .remove(&(lpCriticalSection as usize));
     }
-
-    critical_sections()
-        .write()
-        .expect("critical section table poisoned")
-        .remove(&(lpCriticalSection as usize));
 }
 
 pub extern "win64" fn AcquireSRWLockExclusive(SRWLock: *mut c_void) {
@@ -442,11 +608,27 @@ pub extern "win64" fn AcquireSRWLockExclusive(SRWLock: *mut c_void) {
     let mut guard = lock.lock().expect("srw lock state poisoned");
     let current_tid = current_thread_id();
 
-    while matches!(guard.owner_tid, Some(owner) if owner != current_tid) {
+    while guard.exclusive_owner.is_some() || !guard.shared_holders.is_empty() {
         guard = condvar.wait(guard).expect("srw lock state poisoned");
     }
 
-    guard.owner_tid = Some(current_tid);
+    guard.exclusive_owner = Some(current_tid);
+}
+
+pub extern "win64" fn TryAcquireSRWLockExclusive(SRWLock: *mut c_void) -> i32 {
+    if SRWLock.is_null() {
+        return 0;
+    }
+
+    let entry = get_or_create_srw_lock(SRWLock);
+    let (lock, _) = &*entry;
+    let mut guard = lock.lock().expect("srw lock state poisoned");
+    if guard.exclusive_owner.is_some() || !guard.shared_holders.is_empty() {
+        return 0;
+    }
+
+    guard.exclusive_owner = Some(current_thread_id());
+    1
 }
 
 pub extern "win64" fn ReleaseSRWLockExclusive(SRWLock: *mut c_void) {
@@ -457,9 +639,42 @@ pub extern "win64" fn ReleaseSRWLockExclusive(SRWLock: *mut c_void) {
     let entry = get_or_create_srw_lock(SRWLock);
     let (lock, condvar) = &*entry;
     let mut guard = lock.lock().expect("srw lock state poisoned");
-    if guard.owner_tid.is_some() {
-        guard.owner_tid = None;
+    if guard.exclusive_owner == Some(current_thread_id()) {
+        guard.exclusive_owner = None;
         condvar.notify_one();
+    }
+}
+
+pub extern "win64" fn AcquireSRWLockShared(SRWLock: *mut c_void) {
+    if SRWLock.is_null() {
+        return;
+    }
+
+    let entry = get_or_create_srw_lock(SRWLock);
+    let (lock, condvar) = &*entry;
+    let mut guard = lock.lock().expect("srw lock state poisoned");
+    while guard.exclusive_owner.is_some() {
+        guard = condvar.wait(guard).expect("srw lock state poisoned");
+    }
+    let tid = current_thread_id();
+    *guard.shared_holders.entry(tid).or_default() += 1;
+}
+
+pub extern "win64" fn ReleaseSRWLockShared(SRWLock: *mut c_void) {
+    if SRWLock.is_null() {
+        return;
+    }
+
+    let entry = get_or_create_srw_lock(SRWLock);
+    let (lock, condvar) = &*entry;
+    let mut guard = lock.lock().expect("srw lock state poisoned");
+    let tid = current_thread_id();
+    if let Some(depth) = guard.shared_holders.get_mut(&tid) {
+        *depth -= 1;
+        if *depth == 0 {
+            guard.shared_holders.remove(&tid);
+            condvar.notify_all();
+        }
     }
 }
 
@@ -521,17 +736,68 @@ pub extern "win64" fn SignalObjectAndWait(
 pub extern "win64" fn CreateMutexA(
     _lpMutexAttributes: *const c_void,
     bInitialOwner: i32,
-    _lpName: *const i8,
+    lpName: *const i8,
 ) -> Handle {
-    nt_sync::create_mutex(bInitialOwner != 0)
+    let name = if lpName.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(lpName) }.to_str() {
+            Ok(name) => Some(name),
+            Err(_) => {
+                crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+        }
+    };
+    let (handle, _existed) = nt_sync::create_named_mutex(name, bInitialOwner != 0);
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    handle
 }
 
 pub extern "win64" fn CreateMutexW(
     _lpMutexAttributes: *const c_void,
     bInitialOwner: i32,
-    _lpName: *const u16,
+    lpName: *const u16,
 ) -> Handle {
-    nt_sync::create_mutex(bInitialOwner != 0)
+    let name = if lpName.is_null() {
+        None
+    } else {
+        match unsafe { from_wide_ptr(lpName) } {
+            Ok(name) => Some(name),
+            Err(_) => {
+                crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+        }
+    };
+    let (handle, _existed) = nt_sync::create_named_mutex(name.as_deref(), bInitialOwner != 0);
+    crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+    handle
+}
+
+pub extern "win64" fn OpenMutexW(
+    _desired_access: u32,
+    _inherit_handle: i32,
+    name: *const u16,
+) -> Handle {
+    if name.is_null() {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let Ok(name) = (unsafe { from_wide_ptr(name) }) else {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    match nt_sync::open_named_mutex(&name) {
+        Some(handle) => {
+            crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+            handle
+        }
+        None => {
+            crate::win32::kernel32::error::set_last_error(ERROR_FILE_NOT_FOUND);
+            0
+        }
+    }
 }
 
 pub extern "win64" fn ReleaseMutex(hMutex: Handle) -> i32 {
@@ -677,9 +943,52 @@ pub extern "win64" fn CreateSemaphoreW(
     _lpSemaphoreAttributes: *const c_void,
     lInitialCount: i32,
     lMaximumCount: i32,
-    _lpName: *const u16,
+    lpName: *const u16,
 ) -> Handle {
-    nt_sync::create_semaphore(lInitialCount, lMaximumCount)
+    let name = if lpName.is_null() {
+        None
+    } else {
+        match unsafe { from_wide_ptr(lpName) } {
+            Ok(name) => Some(name),
+            Err(_) => {
+                crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+        }
+    };
+    let (handle, existed) =
+        nt_sync::create_named_semaphore(name.as_deref(), lInitialCount, lMaximumCount);
+    crate::win32::kernel32::error::set_last_error(if existed {
+        ERROR_ALREADY_EXISTS
+    } else {
+        ERROR_SUCCESS
+    });
+    handle
+}
+
+pub extern "win64" fn OpenSemaphoreW(
+    _desired_access: u32,
+    _inherit_handle: i32,
+    name: *const u16,
+) -> Handle {
+    if name.is_null() {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let Ok(name) = (unsafe { from_wide_ptr(name) }) else {
+        crate::win32::kernel32::error::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    match nt_sync::open_named_semaphore(&name) {
+        Some(handle) => {
+            crate::win32::kernel32::error::set_last_error(ERROR_SUCCESS);
+            handle
+        }
+        None => {
+            crate::win32::kernel32::error::set_last_error(ERROR_FILE_NOT_FOUND);
+            0
+        }
+    }
 }
 
 pub extern "win64" fn CreateSemaphoreExW(
@@ -971,6 +1280,36 @@ mod tests {
     }
 
     #[test]
+    fn critical_section_excludes_another_thread_until_release() {
+        let _guard = serial_guard();
+        let mut storage = [0_u8; 64];
+        let ptr = storage.as_mut_ptr().cast::<c_void>();
+        InitializeCriticalSection(ptr);
+        EnterCriticalSection(ptr);
+
+        let ptr_value = ptr as usize;
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let ptr = ptr_value as *mut c_void;
+            result_tx.send(TryEnterCriticalSection(ptr)).expect("send contention result");
+            continue_rx.recv().expect("wait for release");
+            let acquired = TryEnterCriticalSection(ptr);
+            if acquired != 0 {
+                LeaveCriticalSection(ptr);
+            }
+            result_tx.send(acquired).expect("send post-release result");
+        });
+
+        assert_eq!(result_rx.recv().expect("receive contention result"), 0);
+        LeaveCriticalSection(ptr);
+        continue_tx.send(()).expect("release worker");
+        assert_eq!(result_rx.recv().expect("receive post-release result"), 1);
+        worker.join().expect("critical-section worker should finish");
+        DeleteCriticalSection(ptr);
+    }
+
+    #[test]
     fn critical_section_variants_report_success() {
         let _guard = serial_guard();
         let mut storage = [0_u8; 64];
@@ -1035,8 +1374,10 @@ mod tests {
         let _guard = serial_guard();
 
         let mut head = [0_u64; 2];
-        let mut entry1 = [0_usize; 1];
-        let mut entry2 = [0_usize; 1];
+        // Windows requires SLIST_ENTRY storage to be 16-byte aligned because
+        // the low four Header16 bits are reserved for SList metadata.
+        let mut entry1 = [0_u128; 1];
+        let mut entry2 = [0_u128; 1];
         let list_head = head.as_mut_ptr().cast::<c_void>();
 
         InitializeSListHead(list_head);
@@ -1059,5 +1400,67 @@ mod tests {
         assert_eq!(flushed, entry1.as_mut_ptr().cast::<c_void>());
         assert_eq!(QueryDepthSList(list_head), 0);
         assert!(InterlockedPopEntrySList(list_head).is_null());
+    }
+
+    #[test]
+    fn slist_operations_publish_the_windows_header() {
+        let _guard = serial_guard();
+        let mut header = [u8::MAX; 16];
+        let list_head = header.as_mut_ptr().cast::<c_void>();
+        let mut entry = [0u128; 1];
+
+        InitializeSListHead(list_head);
+        assert_eq!(unsafe { list_head.cast::<u64>().read_unaligned() }, 0);
+        assert_eq!(
+            unsafe { list_head.cast::<u8>().add(8).cast::<u64>().read_unaligned() },
+            0b11u64
+        );
+
+        InterlockedPushEntrySList(list_head, entry.as_mut_ptr().cast());
+        let packed_depth = unsafe { list_head.cast::<u64>().read_unaligned() };
+        let packed_next = unsafe { list_head.cast::<u8>().add(8).cast::<u64>().read_unaligned() };
+        assert_eq!(packed_depth as u16, 1);
+        assert_eq!(packed_next & !0xf, entry.as_ptr() as usize as u64);
+        assert_eq!(packed_next & 0xf, 0b11);
+
+        assert_eq!(InterlockedPopEntrySList(list_head), entry.as_mut_ptr().cast());
+        assert_eq!(unsafe { list_head.cast::<u64>().read_unaligned() } as u16, 0);
+        assert_eq!(
+            unsafe { list_head.cast::<u8>().add(8).cast::<u64>().read_unaligned() },
+            0b11
+        );
+    }
+
+    #[test]
+    fn try_acquire_srw_lock_tracks_exclusive_ownership() {
+        let _guard = serial_guard();
+        let mut storage = 0_usize;
+        let lock = (&mut storage as *mut usize).cast::<c_void>();
+
+        assert_eq!(TryAcquireSRWLockExclusive(lock), 1);
+        assert_eq!(TryAcquireSRWLockExclusive(lock), 0);
+        ReleaseSRWLockExclusive(lock);
+        assert_eq!(TryAcquireSRWLockExclusive(lock), 1);
+        ReleaseSRWLockExclusive(lock);
+
+        reset_srw_lock(lock);
+        assert_eq!(TryAcquireSRWLockExclusive(lock), 1);
+        ReleaseSRWLockExclusive(lock);
+    }
+
+    #[test]
+    fn condition_variable_wakes_waiter_and_reports_timeout() {
+        let _guard = serial_guard();
+        let mut storage = 0_usize;
+        let condition = (&mut storage as *mut usize).cast::<c_void>();
+
+        let condition_for_worker = condition as usize;
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            wake_condition_variable(condition_for_worker as *mut c_void, false);
+        });
+        assert!(sleep_condition_variable(condition, 1_000));
+        worker.join().expect("condition variable worker should finish");
+        assert!(!sleep_condition_variable(condition, 1));
     }
 }

@@ -73,7 +73,11 @@ extern "win64" fn ImmAssociateContextEx(_hwnd: usize, _himc: usize, _dwFlags: u3
     0
 }
 
-extern "win64" fn ImmGetConversionStatus(_himc: usize, _lpfdwConversion: *mut u32, _lpfdwSentence: *mut u32) -> i32 {
+extern "win64" fn ImmGetConversionStatus(
+    _himc: usize,
+    _lpfdwConversion: *mut u32,
+    _lpfdwSentence: *mut u32,
+) -> i32 {
     trace!("ImmGetConversionStatus — stub");
     0
 }

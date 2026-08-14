@@ -38,9 +38,9 @@ fn slot_allocator() -> &'static Mutex<Vec<bool>> {
     ALLOCATOR.get_or_init(|| Mutex::new(vec![false; TLS_SLOT_COUNT]))
 }
 
-fn tls_callbacks_cell() -> &'static Mutex<Option<RegisteredTlsCallbacks>> {
-    static CALLBACKS: OnceLock<Mutex<Option<RegisteredTlsCallbacks>>> = OnceLock::new();
-    CALLBACKS.get_or_init(|| Mutex::new(None))
+fn tls_callbacks_cell() -> &'static Mutex<Vec<RegisteredTlsCallbacks>> {
+    static CALLBACKS: OnceLock<Mutex<Vec<RegisteredTlsCallbacks>>> = OnceLock::new();
+    CALLBACKS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn static_tls_templates_cell() -> &'static Mutex<Vec<RegisteredStaticTlsTemplate>> {
@@ -95,15 +95,23 @@ pub fn tls_set_value(index: u32, value: *mut c_void) -> bool {
         return false;
     }
 
-    ensure_current_thread_teb();
-    teb::with_current_teb(|teb| {
+    let mut teb_ptr = teb::current_teb_ptr();
+    if teb_ptr.is_null() {
+        let _ = teb::attach_spawned_thread();
+        teb_ptr = teb::current_teb_ptr();
+    }
+    if teb_ptr.is_null() {
+        return false;
+    }
+    unsafe {
+        let teb = &mut *teb_ptr;
         if index < TLS_MINIMUM_AVAILABLE {
             teb.tls_slots[index] = value;
         } else {
             teb.tls_expansion_slots[index - TLS_MINIMUM_AVAILABLE] = value;
         }
-    })
-    .is_some()
+    }
+    true
 }
 
 pub fn tls_get_value(index: u32) -> *mut c_void {
@@ -112,15 +120,22 @@ pub fn tls_get_value(index: u32) -> *mut c_void {
         return std::ptr::null_mut();
     }
 
-    ensure_current_thread_teb();
-    teb::with_current_teb(|teb| {
+    let mut teb_ptr = teb::current_teb_ptr();
+    if teb_ptr.is_null() {
+        let _ = teb::attach_spawned_thread();
+        teb_ptr = teb::current_teb_ptr();
+    }
+    if teb_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let teb = &*teb_ptr;
         if index < TLS_MINIMUM_AVAILABLE {
             teb.tls_slots[index]
         } else {
             teb.tls_expansion_slots[index - TLS_MINIMUM_AVAILABLE]
         }
-    })
-    .unwrap_or(std::ptr::null_mut())
+    }
 }
 
 fn read_pointer(mapped: &MappedImage, rva: usize, is_pe64: bool) -> Option<usize> {
@@ -131,6 +146,46 @@ fn read_pointer(mapped: &MappedImage, rva: usize, is_pe64: bool) -> Option<usize
     }
 }
 
+fn tls_callback_addresses(pe: &ParsedPe, mapped: &MappedImage) -> Result<Vec<usize>, String> {
+    let Some(directory) = pe.tls_dir.filter(|dir| dir.virtual_address != 0 && dir.size > 0) else {
+        return Ok(Vec::new());
+    };
+
+    let callbacks_field_rva = if pe.is_pe64 {
+        directory.virtual_address as usize + 24
+    } else {
+        directory.virtual_address as usize + 12
+    };
+    let callbacks_va = read_pointer(mapped, callbacks_field_rva, pe.is_pe64).ok_or_else(|| {
+        format!("TLS directory callback pointer OOB at RVA 0x{callbacks_field_rva:x}")
+    })?;
+    if callbacks_va == 0 {
+        return Ok(Vec::new());
+    }
+
+    let callbacks_rva = callbacks_va.checked_sub(mapped.base_addr()).ok_or_else(|| {
+        format!(
+            "TLS callback table VA 0x{callbacks_va:x} is below image base 0x{:x}",
+            mapped.base_addr()
+        )
+    })?;
+    let ptr_size = if pe.is_pe64 { 8 } else { 4 };
+    let mut callbacks = Vec::new();
+    for index in 0..=256 {
+        let entry_rva = callbacks_rva
+            .checked_add(index * ptr_size)
+            .ok_or_else(|| "TLS callback table address overflow".to_string())?;
+        let callback = read_pointer(mapped, entry_rva, pe.is_pe64)
+            .ok_or_else(|| format!("TLS callback entry OOB at RVA 0x{entry_rva:x}"))?;
+        if callback == 0 {
+            return Ok(callbacks);
+        }
+        callbacks.push(callback);
+    }
+
+    Err("TLS callback table exceeded 256 entries without terminator".into())
+}
+
 pub fn initialize_static_tls(pe: &ParsedPe, mapped: &mut MappedImage) -> Result<(), String> {
     let Some(directory) = pe.tls_dir.filter(|dir| dir.virtual_address != 0 && dir.size > 0) else {
         return Ok(());
@@ -139,41 +194,37 @@ pub fn initialize_static_tls(pe: &ParsedPe, mapped: &mut MappedImage) -> Result<
     let directory_rva = directory.virtual_address as usize;
     let image_base = mapped.base_addr();
 
-    let (start_raw_va, end_raw_va, address_of_index_va, size_of_zero_fill) = if pe.is_pe64 {
-        let start_raw_va = mapped
-            .read_u64(directory_rva)
-            .ok_or_else(|| format!("TLS StartAddressOfRawData OOB at RVA 0x{directory_rva:x}"))?
-            as usize;
-        let end_raw_va = mapped
-            .read_u64(directory_rva + 8)
-            .ok_or_else(|| format!("TLS EndAddressOfRawData OOB at RVA 0x{:x}", directory_rva + 8))?
-            as usize;
-        let address_of_index_va = mapped
-            .read_u64(directory_rva + 16)
-            .ok_or_else(|| format!("TLS AddressOfIndex OOB at RVA 0x{:x}", directory_rva + 16))?
-            as usize;
-        let size_of_zero_fill = mapped.read_u32(directory_rva + 32).unwrap_or(0) as usize;
-        (start_raw_va, end_raw_va, address_of_index_va, size_of_zero_fill)
-    } else {
-        let start_raw_va = mapped
-            .read_u32(directory_rva)
-            .ok_or_else(|| format!("TLS StartAddressOfRawData OOB at RVA 0x{directory_rva:x}"))?
-            as usize;
-        let end_raw_va = mapped
-            .read_u32(directory_rva + 4)
-            .ok_or_else(|| format!("TLS EndAddressOfRawData OOB at RVA 0x{:x}", directory_rva + 4))?
-            as usize;
-        let address_of_index_va = mapped
-            .read_u32(directory_rva + 8)
-            .ok_or_else(|| format!("TLS AddressOfIndex OOB at RVA 0x{:x}", directory_rva + 8))?
-            as usize;
-        let size_of_zero_fill = mapped.read_u32(directory_rva + 16).unwrap_or(0) as usize;
-        (start_raw_va, end_raw_va, address_of_index_va, size_of_zero_fill)
-    };
+    let (start_raw_va, end_raw_va, address_of_index_va, size_of_zero_fill) =
+        if pe.is_pe64 {
+            let start_raw_va = mapped.read_u64(directory_rva).ok_or_else(|| {
+                format!("TLS StartAddressOfRawData OOB at RVA 0x{directory_rva:x}")
+            })? as usize;
+            let end_raw_va = mapped.read_u64(directory_rva + 8).ok_or_else(|| {
+                format!("TLS EndAddressOfRawData OOB at RVA 0x{:x}", directory_rva + 8)
+            })? as usize;
+            let address_of_index_va = mapped.read_u64(directory_rva + 16).ok_or_else(|| {
+                format!("TLS AddressOfIndex OOB at RVA 0x{:x}", directory_rva + 16)
+            })? as usize;
+            let size_of_zero_fill = mapped.read_u32(directory_rva + 32).unwrap_or(0) as usize;
+            (start_raw_va, end_raw_va, address_of_index_va, size_of_zero_fill)
+        } else {
+            let start_raw_va = mapped.read_u32(directory_rva).ok_or_else(|| {
+                format!("TLS StartAddressOfRawData OOB at RVA 0x{directory_rva:x}")
+            })? as usize;
+            let end_raw_va = mapped.read_u32(directory_rva + 4).ok_or_else(|| {
+                format!("TLS EndAddressOfRawData OOB at RVA 0x{:x}", directory_rva + 4)
+            })? as usize;
+            let address_of_index_va = mapped
+                .read_u32(directory_rva + 8)
+                .ok_or_else(|| format!("TLS AddressOfIndex OOB at RVA 0x{:x}", directory_rva + 8))?
+                as usize;
+            let size_of_zero_fill = mapped.read_u32(directory_rva + 16).unwrap_or(0) as usize;
+            (start_raw_va, end_raw_va, address_of_index_va, size_of_zero_fill)
+        };
 
-    let raw_size = end_raw_va
-        .checked_sub(start_raw_va)
-        .ok_or_else(|| format!("TLS raw range invalid: start=0x{start_raw_va:x}, end=0x{end_raw_va:x}"))?;
+    let raw_size = end_raw_va.checked_sub(start_raw_va).ok_or_else(|| {
+        format!("TLS raw range invalid: start=0x{start_raw_va:x}, end=0x{end_raw_va:x}")
+    })?;
     let total_size = raw_size.saturating_add(size_of_zero_fill);
 
     let tls_index = tls_alloc();
@@ -181,9 +232,11 @@ pub fn initialize_static_tls(pe: &ParsedPe, mapped: &mut MappedImage) -> Result<
         return Err("TLS slot allocator exhausted while initializing static TLS".into());
     }
 
-    let address_of_index_rva = address_of_index_va
-        .checked_sub(image_base)
-        .ok_or_else(|| format!("TLS AddressOfIndex VA 0x{address_of_index_va:x} is below image base 0x{image_base:x}"))?;
+    let address_of_index_rva = address_of_index_va.checked_sub(image_base).ok_or_else(|| {
+        format!(
+            "TLS AddressOfIndex VA 0x{address_of_index_va:x} is below image base 0x{image_base:x}"
+        )
+    })?;
     mapped
         .write_u32(address_of_index_rva, tls_index)
         .ok_or_else(|| format!("TLS AddressOfIndex write OOB at RVA 0x{address_of_index_rva:x}"))?;
@@ -193,17 +246,14 @@ pub fn initialize_static_tls(pe: &ParsedPe, mapped: &mut MappedImage) -> Result<
         let start_raw_rva = start_raw_va
             .checked_sub(image_base)
             .ok_or_else(|| format!("TLS StartAddressOfRawData VA 0x{start_raw_va:x} is below image base 0x{image_base:x}"))?;
-        let template = mapped
-            .slice_at(start_raw_rva, raw_size)
-            .ok_or_else(|| format!("TLS raw template OOB at RVA 0x{start_raw_rva:x}, size=0x{raw_size:x}"))?;
+        let template = mapped.slice_at(start_raw_rva, raw_size).ok_or_else(|| {
+            format!("TLS raw template OOB at RVA 0x{start_raw_rva:x}, size=0x{raw_size:x}")
+        })?;
         initial_data[..raw_size].copy_from_slice(template);
     }
 
-    let template = RegisteredStaticTlsTemplate {
-        image_base,
-        tls_index,
-        initial_data: initial_data.clone(),
-    };
+    let template =
+        RegisteredStaticTlsTemplate { image_base, tls_index, initial_data: initial_data.clone() };
     {
         let mut templates =
             static_tls_templates_cell().lock().expect("static TLS template registry poisoned");
@@ -269,10 +319,8 @@ fn assign_template_to_teb(template: &RegisteredStaticTlsTemplate, teb_ptr: *mut 
 }
 
 pub fn initialize_static_tls_for_current_thread() {
-    let templates = static_tls_templates_cell()
-        .lock()
-        .expect("static TLS template registry poisoned")
-        .clone();
+    let templates =
+        static_tls_templates_cell().lock().expect("static TLS template registry poisoned").clone();
 
     if templates.is_empty() {
         return;
@@ -300,83 +348,84 @@ pub fn initialize_static_tls_for_current_thread() {
 }
 
 pub fn register_tls_callbacks(pe: &ParsedPe, mapped: &MappedImage) -> Result<(), String> {
-    let Some(directory) = pe.tls_dir.filter(|dir| dir.virtual_address != 0 && dir.size > 0) else {
-        *tls_callbacks_cell().lock().expect("TLS callback registry poisoned") = None;
-        return Ok(());
-    };
-
-    let callbacks_field_rva = if pe.is_pe64 {
-        directory.virtual_address as usize + 24
-    } else {
-        directory.virtual_address as usize + 12
-    };
-
-    let callbacks_va = read_pointer(mapped, callbacks_field_rva, pe.is_pe64).ok_or_else(|| {
-        format!("TLS directory callback pointer OOB at RVA 0x{callbacks_field_rva:x}")
-    })?;
-
-    if callbacks_va == 0 {
-        *tls_callbacks_cell().lock().expect("TLS callback registry poisoned") = None;
+    let callbacks = tls_callback_addresses(pe, mapped)?;
+    if callbacks.is_empty() {
         return Ok(());
     }
 
     let image_base = mapped.base_addr();
-    let callbacks_rva = callbacks_va.checked_sub(image_base).ok_or_else(|| {
-        format!("TLS callback table VA 0x{callbacks_va:x} is below image base 0x{image_base:x}")
-    })?;
-
-    let ptr_size = if pe.is_pe64 { 8 } else { 4 };
-    let mut callbacks = Vec::new();
-    let mut index = 0usize;
-
-    loop {
-        let entry_rva = callbacks_rva + index * ptr_size;
-        let callback = read_pointer(mapped, entry_rva, pe.is_pe64)
-            .ok_or_else(|| format!("TLS callback entry OOB at RVA 0x{entry_rva:x}"))?;
-        if callback == 0 {
-            break;
-        }
-        callbacks.push(callback);
-        index += 1;
-        if index > 256 {
-            return Err("TLS callback table exceeded 256 entries without terminator".into());
-        }
-    }
-
-    if callbacks.is_empty() {
-        *tls_callbacks_cell().lock().expect("TLS callback registry poisoned") = None;
-        return Ok(());
-    }
-
     info!(
         count = callbacks.len(),
         image_base = format_args!("0x{image_base:x}"),
         "Registered PE TLS callbacks"
     );
-    *tls_callbacks_cell().lock().expect("TLS callback registry poisoned") =
-        Some(RegisteredTlsCallbacks { image_base, callbacks });
+    let mut registered = tls_callbacks_cell().lock().expect("TLS callback registry poisoned");
+    if let Some(existing) = registered.iter_mut().find(|entry| entry.image_base == image_base) {
+        existing.callbacks = callbacks;
+    } else {
+        registered.push(RegisteredTlsCallbacks { image_base, callbacks });
+    }
+    Ok(())
+}
+
+/// Execute callbacks belonging to a loaded PE image. Dependency callbacks
+/// cannot use the single main-image registry because loading another DLL would
+/// replace it before its PROCESS_ATTACH phase runs.
+pub fn invoke_tls_callbacks_for(
+    pe: &ParsedPe,
+    mapped: &MappedImage,
+    reason: u32,
+) -> Result<(), String> {
+    let callbacks = tls_callback_addresses(pe, mapped)?;
+    if callbacks.is_empty() {
+        return Ok(());
+    }
+
+    debug!(
+        count = callbacks.len(),
+        image_base = format_args!("0x{:x}", mapped.base_addr()),
+        "Executing PE TLS PROCESS_ATTACH callbacks"
+    );
+
+    for callback_addr in callbacks {
+        trace!(
+            callback = format_args!("0x{callback_addr:x}"),
+            reason,
+            image_base = format_args!("0x{:x}", mapped.base_addr()),
+            "Invoking PE TLS callback"
+        );
+        crate::runtime::guest_stack::invoke_status(
+            callback_addr,
+            mapped.base_addr() as *mut c_void,
+            reason,
+            std::ptr::null_mut(),
+        )
+        .map_err(|error| format!("TLS callback stack transition failed: {error}"))?;
+    }
     Ok(())
 }
 
 fn invoke_registered_tls_callbacks(reason: u32) {
     let registered = tls_callbacks_cell().lock().expect("TLS callback registry poisoned").clone();
 
-    let Some(registered) = registered else {
-        return;
-    };
-
-    for callback in registered.callbacks {
-        let callback_addr = callback;
-        trace!(callback = format_args!("0x{callback_addr:x}"), reason, "Invoking PE TLS callback");
-        let callback: TlsCallback = unsafe { std::mem::transmute(callback_addr) };
-        let result = std::panic::catch_unwind(|| unsafe {
-            callback(registered.image_base as *mut c_void, reason, std::ptr::null_mut());
-        });
-        if result.is_err() {
-            warn!(
+    for module in registered {
+        for callback_addr in module.callbacks {
+            trace!(
                 callback = format_args!("0x{callback_addr:x}"),
-                reason, "PE TLS callback panicked while executing"
+                image_base = format_args!("0x{:x}", module.image_base),
+                reason,
+                "Invoking PE TLS callback"
             );
+            let callback: TlsCallback = unsafe { std::mem::transmute(callback_addr) };
+            let result = std::panic::catch_unwind(|| unsafe {
+                callback(module.image_base as *mut c_void, reason, std::ptr::null_mut());
+            });
+            if result.is_err() {
+                warn!(
+                    callback = format_args!("0x{callback_addr:x}"),
+                    reason, "PE TLS callback panicked while executing"
+                );
+            }
         }
     }
 }
@@ -390,7 +439,7 @@ pub fn invoke_thread_attach_callbacks() {
 }
 
 pub fn clear_registered_tls_callbacks() {
-    *tls_callbacks_cell().lock().expect("TLS callback registry poisoned") = None;
+    tls_callbacks_cell().lock().expect("TLS callback registry poisoned").clear();
 }
 
 #[cfg(test)]

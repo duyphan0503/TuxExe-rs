@@ -19,6 +19,7 @@ pub const STATUS_OBJECT_PATH_NOT_FOUND: NtStatus = 0xC000003A;
 pub const STATUS_OBJECT_NAME_NOT_FOUND: NtStatus = 0xC0000034;
 pub const STATUS_OBJECT_NAME_COLLISION: NtStatus = 0xC0000035;
 pub const STATUS_ACCESS_DENIED: NtStatus = 0xC0000022;
+pub const STATUS_FILE_IS_A_DIRECTORY: NtStatus = 0xC00000BA;
 pub const STATUS_NOT_A_DIRECTORY: NtStatus = 0xC0000103;
 pub const STATUS_INVALID_PARAMETER: NtStatus = 0xC000000D;
 
@@ -101,7 +102,46 @@ fn resolve_windows_path(windows_path: &str, create: bool) -> Result<PathBuf, NtS
         return Ok(translated);
     }
 
-    resolve_case_insensitive(&translated).ok_or(STATUS_OBJECT_PATH_NOT_FOUND)
+    if let Some(case_resolved) = resolve_case_insensitive(&translated) {
+        return Ok(case_resolved);
+    }
+
+    // Fallback for relative paths in Unity games (e.g. boot.config, app.info)
+    if !create
+        && !windows_path.contains(':')
+        && !windows_path.starts_with('\\')
+        && !windows_path.starts_with('/')
+    {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(entries) = std::fs::read_dir(&cwd) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir()
+                        && path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.ends_with("_Data"))
+                    {
+                        let candidate = path.join(windows_path);
+                        if candidate.exists() {
+                            return Ok(candidate);
+                        }
+                        if let Some(case_resolved) = resolve_case_insensitive(&candidate) {
+                            return Ok(case_resolved);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(parent) = translated.parent() {
+        if parent.exists() || resolve_case_insensitive(parent).is_some() {
+            return Err(STATUS_OBJECT_NAME_NOT_FOUND);
+        }
+    }
+
+    Err(STATUS_OBJECT_PATH_NOT_FOUND)
 }
 
 fn open_flags(read: bool, write: bool, disposition: CreateDisposition) -> i32 {
@@ -360,6 +400,50 @@ pub fn nt_read_file(
 
         if let Some(fd) = fd {
             let read_sz = unsafe { libc::read(fd, buffer, length as libc::size_t) };
+            if read_sz >= 0 {
+                if let Some(br) = bytes_read {
+                    *br = read_sz as u32;
+                }
+                status = STATUS_SUCCESS;
+            } else {
+                status =
+                    errno_to_status(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+            }
+        }
+    });
+
+    status
+}
+
+/// Synchronous positional read used to implement Win32 `ReadFile` with an
+/// `OVERLAPPED` structure.  `pread` is important here: overlapped I/O must
+/// not consume or race the handle's shared file pointer.
+pub fn nt_read_file_at(
+    handle: Handle,
+    buffer: *mut c_void,
+    length: u32,
+    offset: u64,
+    bytes_read: Option<&mut u32>,
+) -> NtStatus {
+    init_global_table();
+    let mut status = STATUS_INVALID_HANDLE;
+
+    global_table().with(handle, |obj| {
+        let fd = obj
+            .as_any()
+            .downcast_ref::<StdioHandle>()
+            .map(|h| h.fd)
+            .or_else(|| obj.as_any().downcast_ref::<FileHandle>().map(|h| h.fd));
+
+        if let Some(fd) = fd {
+            let read_sz = unsafe {
+                libc::pread(
+                    fd,
+                    buffer,
+                    length as libc::size_t,
+                    offset as libc::off_t,
+                )
+            };
             if read_sz >= 0 {
                 if let Some(br) = bytes_read {
                     *br = read_sz as u32;

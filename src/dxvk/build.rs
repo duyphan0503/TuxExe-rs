@@ -7,7 +7,6 @@ pub struct DxvkBuildConfig {
     pub build_dir: PathBuf,
     pub install_dir: PathBuf,
     pub build_type: String,
-    pub target_cpu_family: String,
 }
 
 impl Default for DxvkBuildConfig {
@@ -15,9 +14,11 @@ impl Default for DxvkBuildConfig {
         Self {
             source_dir: PathBuf::from("external/dxvk"),
             build_dir: PathBuf::from("build/dxvk"),
-            install_dir: PathBuf::from("build/dxvk-install"),
+            // This is the tree shipped next to TuxExe. It deliberately does
+            // not use /tmp, which made the renderer disappear after a reboot
+            // or on a different machine.
+            install_dir: PathBuf::from("runtime/dxvk"),
             build_type: "release".to_string(),
-            target_cpu_family: "x86_64".to_string(),
         }
     }
 }
@@ -39,7 +40,7 @@ impl BuildStep {
 }
 
 pub fn required_output_libraries() -> Vec<&'static str> {
-    vec!["d3d9.dll.so", "d3d10core.dll.so", "d3d11.dll.so", "dxgi.dll.so"]
+    vec!["libdxvk_d3d11.so.0", "libdxvk_dxgi.so.0"]
 }
 
 pub fn plan_build_steps(config: &DxvkBuildConfig) -> Vec<BuildStep> {
@@ -55,9 +56,22 @@ pub fn plan_build_steps(config: &DxvkBuildConfig) -> Vec<BuildStep> {
                 build_dir,
                 source_dir,
                 format!("--buildtype={}", config.build_type),
-                format!("-Dcpu_family={}", config.target_cpu_family),
-                "-Denable_tests=false".to_string(),
-                format!("--prefix={install_dir}"),
+                // Only the MS-ABI TuxExe WSI build is valid for PE callers.
+                // Stock DXVK Native uses the host SysV ABI and is unsafe here.
+                "-Dnative_tuxexe=enabled".to_string(),
+                "-Dnative_glfw=disabled".to_string(),
+                "-Dnative_sdl2=disabled".to_string(),
+                "-Dnative_sdl3=disabled".to_string(),
+                "-Denable_d3d8=false".to_string(),
+                "-Denable_d3d9=false".to_string(),
+                "-Denable_d3d10=false".to_string(),
+                "-Denable_d3d11=true".to_string(),
+                "-Denable_dxgi=true".to_string(),
+                // Install into a relocatable DESTDIR tree. `--libdir=lib`
+                // gives the runtime loader one stable lookup location across
+                // distributions.
+                "--prefix=/".to_string(),
+                "--libdir=lib".to_string(),
             ],
         },
         BuildStep {
@@ -70,6 +84,8 @@ pub fn plan_build_steps(config: &DxvkBuildConfig) -> Vec<BuildStep> {
                 "install".to_string(),
                 "-C".to_string(),
                 config.build_dir.display().to_string(),
+                "--destdir".to_string(),
+                install_dir,
             ],
         },
     ]
@@ -95,8 +111,8 @@ pub fn validate_install_tree(install_dir: &Path) -> Vec<PathBuf> {
 
     for library in required_output_libraries() {
         let unix_style = install_dir.join("lib").join(library);
-        let proton_style = install_dir.join("x64").join(library);
-        if !unix_style.exists() && !proton_style.exists() {
+        let multiarch_style = install_dir.join("lib").join("x86_64-linux-gnu").join(library);
+        if !unix_style.exists() && !multiarch_style.exists() {
             missing.push(PathBuf::from(library));
         }
     }
@@ -116,6 +132,8 @@ mod tests {
         assert_eq!(steps[0].program, "meson");
         assert_eq!(steps[1].program, "ninja");
         assert_eq!(steps[2].program, "meson");
+        assert!(steps[0].args.contains(&"-Dnative_tuxexe=enabled".to_string()));
+        assert!(steps[2].args.contains(&"--destdir".to_string()));
     }
 
     #[test]

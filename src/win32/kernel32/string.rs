@@ -54,6 +54,18 @@ pub struct CpInfo {
     pub lead_byte: [u8; 12],
 }
 
+/// CPINFOEXW uses the same 18-byte prefix as CPINFO followed by a WCHAR,
+/// DWORD and a fixed 260-WCHAR display name.
+#[repr(C)]
+pub struct CpInfoExW {
+    pub max_char_size: u32,
+    pub default_char: [u8; 2],
+    pub lead_byte: [u8; 12],
+    pub unicode_default_char: u16,
+    pub code_page: u32,
+    pub code_page_name: [u16; 260],
+}
+
 fn is_supported_code_page(code_page: u32) -> bool {
     matches!(
         code_page,
@@ -139,6 +151,68 @@ pub extern "win64" fn GetCPInfo(code_page: u32, cp_info: *mut CpInfo) -> i32 {
     1
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "win64" fn GetCPInfoExW(code_page: u32, _flags: u32, cp_info: *mut CpInfoExW) -> i32 {
+    if cp_info.is_null() || !is_supported_code_page(code_page) {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let resolved_code_page = match code_page {
+        0 => SYSTEM_ACP,
+        1 => SYSTEM_OEMCP,
+        _ => code_page,
+    };
+    let max_char_size = if resolved_code_page == 65001 { 4 } else { 2 };
+    let label = if resolved_code_page == 65001 { "Unicode (UTF-8)" } else { "Unicode" };
+    let mut name = [0u16; 260];
+    for (slot, character) in name.iter_mut().zip(label.encode_utf16()) {
+        *slot = character;
+    }
+    unsafe {
+        *cp_info = CpInfoExW {
+            max_char_size,
+            default_char: [b'?', 0],
+            lead_byte: [0; 12],
+            unicode_default_char: b'?' as u16,
+            code_page: resolved_code_page,
+            code_page_name: name,
+        };
+    }
+    set_last_error(0);
+    1
+}
+
+pub extern "win64" fn VerLanguageNameW(language: u32, buffer: *mut u16, size: u32) -> u32 {
+    if buffer.is_null() || size == 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let name = match language & 0xffff {
+        0x0409 => "English (United States)",
+        0x0809 => "English (United Kingdom)",
+        0x0411 => "Japanese",
+        0x0412 => "Korean",
+        0x0804 => "Chinese (Simplified)",
+        0x0404 => "Chinese (Traditional)",
+        _ => "English (United States)",
+    };
+    let wide: Vec<u16> = name.encode_utf16().collect();
+    let copied = wide.len().min((size as usize).saturating_sub(1));
+    unsafe {
+        if copied > 0 {
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), buffer, copied);
+        }
+        *buffer.add(copied) = 0;
+    }
+    if copied < wide.len() {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        0
+    } else {
+        set_last_error(0);
+        copied as u32
+    }
+}
+
 pub extern "win64" fn MultiByteToWideChar(
     code_page: u32,
     _flags: u32,
@@ -158,25 +232,32 @@ pub extern "win64" fn MultiByteToWideChar(
         return 0;
     }
 
-    let src_bytes: Vec<u8> = if mb_len == -1 {
+    let (src_bytes, includes_terminator): (Vec<u8>, bool) = if mb_len == -1 {
         let mut len = 0usize;
         // SAFETY: caller provides NUL-terminated input when cbMultiByte == -1.
         unsafe {
             while *mb_str.add(len) != 0 {
                 len += 1;
             }
-            std::slice::from_raw_parts(mb_str, len).to_vec()
+            (std::slice::from_raw_parts(mb_str, len).to_vec(), true)
         }
     } else {
         // SAFETY: caller-provided length for source bytes.
-        unsafe { std::slice::from_raw_parts(mb_str, mb_len as usize).to_vec() }
+        (unsafe { std::slice::from_raw_parts(mb_str, mb_len as usize).to_vec() }, false)
     };
 
     let Ok(decoded) = std::str::from_utf8(&src_bytes) else {
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     };
-    let wide: Vec<u16> = decoded.encode_utf16().collect();
+    let mut wide: Vec<u16> = decoded.encode_utf16().collect();
+    // Windows includes the terminating NUL in both the required size and the
+    // output when cbMultiByte is -1. Omitting it corrupted Unity's generated
+    // wide mode strings (for example "rb") and triggered its CRT fail-fast
+    // invalid-parameter path.
+    if includes_terminator {
+        wide.push(0);
+    }
 
     if wide_str.is_null() || wide_len == 0 {
         set_last_error(0);
@@ -220,18 +301,18 @@ pub extern "win64" fn WideCharToMultiByte(
         return 0;
     }
 
-    let wide_slice: Vec<u16> = if wide_len == -1 {
+    let (wide_slice, includes_terminator): (Vec<u16>, bool) = if wide_len == -1 {
         let mut len = 0usize;
         // SAFETY: caller provides NUL-terminated wide string for cchWideChar == -1.
         unsafe {
             while *wide_str.add(len) != 0 {
                 len += 1;
             }
-            std::slice::from_raw_parts(wide_str, len).to_vec()
+            (std::slice::from_raw_parts(wide_str, len).to_vec(), true)
         }
     } else {
         // SAFETY: caller-provided length for source UTF-16 data.
-        unsafe { std::slice::from_raw_parts(wide_str, wide_len as usize).to_vec() }
+        (unsafe { std::slice::from_raw_parts(wide_str, wide_len as usize).to_vec() }, false)
     };
 
     let Ok(decoded) = String::from_utf16(&wide_slice) else {
@@ -239,7 +320,10 @@ pub extern "win64" fn WideCharToMultiByte(
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     };
-    let bytes = decoded.as_bytes();
+    let mut bytes = decoded.into_bytes();
+    if includes_terminator {
+        bytes.push(0);
+    }
 
     if mb_str.is_null() || mb_len == 0 {
         set_last_error(0);
@@ -685,7 +769,8 @@ mod tests {
     use super::LCMapStringW;
     use super::{
         CpInfo, EnumSystemLocalesA, EnumSystemLocalesW, GetACP, GetCPInfo, GetDateFormatW,
-        GetOEMCP, GetStringTypeW, GetTimeFormatW, IsValidCodePage,
+        GetOEMCP, GetStringTypeW, GetTimeFormatW, IsValidCodePage, MultiByteToWideChar,
+        WideCharToMultiByte,
     };
     use std::ffi::CStr;
 
@@ -713,6 +798,36 @@ mod tests {
 
         assert_eq!(GetCPInfo(65001, &mut info), 1);
         assert_eq!(info.max_char_size, 4);
+    }
+
+    #[test]
+    fn multi_byte_to_wide_char_includes_terminator_for_negative_length() {
+        let source = b"rb\0";
+        let mut wide = [0xFFFFu16; 3];
+
+        assert_eq!(MultiByteToWideChar(65001, 0, source.as_ptr(), -1, wide.as_mut_ptr(), 3), 3);
+        assert_eq!(wide, [b'r' as u16, b'b' as u16, 0]);
+    }
+
+    #[test]
+    fn wide_char_to_multi_byte_includes_terminator_for_negative_length() {
+        let source = [b'r' as u16, b'b' as u16, 0];
+        let mut bytes = [0xFFu8; 3];
+
+        assert_eq!(
+            WideCharToMultiByte(
+                65001,
+                0,
+                source.as_ptr(),
+                -1,
+                bytes.as_mut_ptr(),
+                3,
+                std::ptr::null(),
+                std::ptr::null_mut()
+            ),
+            3
+        );
+        assert_eq!(bytes, *b"rb\0");
     }
 
     #[test]

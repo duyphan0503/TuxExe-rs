@@ -1,5 +1,6 @@
 //! x64 table-based stack unwinding via .pdata RUNTIME_FUNCTION entries.
 
+use std::ffi::c_void;
 use std::sync::{OnceLock, RwLock};
 
 use tracing::{debug, info};
@@ -26,9 +27,88 @@ struct RuntimeFunctionTable {
     entries: Vec<RuntimeFunction>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DynamicRuntimeFunctionTable {
+    identifier: u64,
+    image_base: usize,
+    length: usize,
+    callback: usize,
+    context: usize,
+}
+
 fn runtime_table_cell() -> &'static RwLock<Option<RuntimeFunctionTable>> {
     static TABLE: OnceLock<RwLock<Option<RuntimeFunctionTable>>> = OnceLock::new();
     TABLE.get_or_init(|| RwLock::new(None))
+}
+
+fn dynamic_runtime_tables() -> &'static RwLock<Vec<DynamicRuntimeFunctionTable>> {
+    static TABLES: OnceLock<RwLock<Vec<DynamicRuntimeFunctionTable>>> = OnceLock::new();
+    TABLES.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+pub fn install_dynamic_runtime_function_table(
+    identifier: u64,
+    image_base: usize,
+    length: usize,
+    callback: usize,
+    context: *mut c_void,
+) -> bool {
+    if identifier == 0 || image_base == 0 || length == 0 || callback == 0 {
+        return false;
+    }
+    let end = match image_base.checked_add(length) {
+        Some(end) => end,
+        None => return false,
+    };
+    if end <= image_base {
+        return false;
+    }
+    let mut tables = dynamic_runtime_tables().write().expect("dynamic unwind table poisoned");
+    tables.retain(|table| table.identifier != identifier);
+    tables.push(DynamicRuntimeFunctionTable {
+        identifier,
+        image_base,
+        length,
+        callback,
+        context: context as usize,
+    });
+    info!(
+        identifier = format_args!("0x{identifier:x}"),
+        image_base = format_args!("0x{image_base:x}"),
+        length,
+        "Installed dynamic x64 unwind table"
+    );
+    true
+}
+
+pub fn delete_dynamic_runtime_function_table(identifier: usize) -> bool {
+    let mut tables = dynamic_runtime_tables().write().expect("dynamic unwind table poisoned");
+    let before = tables.len();
+    tables.retain(|table| table.identifier != identifier as u64);
+    before != tables.len()
+}
+
+fn lookup_dynamic_runtime_function(virtual_address: usize) -> Option<RuntimeFunctionMatch> {
+    let table = dynamic_runtime_tables()
+        .read()
+        .expect("dynamic unwind table poisoned")
+        .iter()
+        .copied()
+        .find(|table| {
+            table
+                .image_base
+                .checked_add(table.length)
+                .is_some_and(|end| virtual_address >= table.image_base && virtual_address < end)
+        })?;
+    let callback: extern "win64" fn(u64, *mut c_void) -> *const RuntimeFunction =
+        unsafe { std::mem::transmute(table.callback) };
+    let entry = callback(virtual_address as u64, table.context as *mut c_void);
+    if entry.is_null() {
+        return None;
+    }
+    let function = unsafe { std::ptr::read(entry) };
+    (function.begin_address_rva < function.end_address_rva)
+        .then_some(RuntimeFunctionMatch { image_base: table.image_base, function })
 }
 
 fn parse_runtime_function_entries(bytes: &[u8]) -> Vec<RuntimeFunction> {
@@ -85,12 +165,15 @@ pub fn register_runtime_function_table(pe: &ParsedPe, mapped: &MappedImage) -> R
     Ok(())
 }
 
-/// Lookup the runtime function containing `virtual_address`.
-pub fn lookup_runtime_function(virtual_address: usize) -> Option<RuntimeFunctionMatch> {
+/// Lookup a runtime function in the statically parsed main-image table.
+///
+/// This helper is signal-safe with respect to guest code: it never invokes a
+/// callback supplied by a mapped PE module.
+pub fn lookup_static_runtime_function(virtual_address: usize) -> Option<RuntimeFunctionMatch> {
     let guard = runtime_table_cell().read().expect("runtime table poisoned");
     let table = guard.as_ref()?;
 
-    let rva = virtual_address.checked_sub(table.image_base)? as u32;
+    let rva = u32::try_from(virtual_address.checked_sub(table.image_base)?).ok()?;
     let idx = table.entries.partition_point(|e| e.begin_address_rva <= rva);
     if idx == 0 {
         return None;
@@ -109,9 +192,19 @@ pub fn lookup_runtime_function(virtual_address: usize) -> Option<RuntimeFunction
     }
 }
 
+/// Lookup the runtime function containing `virtual_address`.
+///
+/// Dynamic callback tables are only evaluated from normal guest execution;
+/// invoking mapped guest code from a Linux signal handler is not safe.
+pub fn lookup_runtime_function(virtual_address: usize) -> Option<RuntimeFunctionMatch> {
+    lookup_static_runtime_function(virtual_address)
+        .or_else(|| lookup_dynamic_runtime_function(virtual_address))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::serial_guard;
 
     #[test]
     fn parses_runtime_function_entries() {
@@ -149,5 +242,33 @@ mod tests {
         let hit = lookup_runtime_function(0x1400_1100).expect("match");
         assert_eq!(hit.function.unwind_info_rva, 0x3000);
         assert!(lookup_runtime_function(0x1400_2000).is_none());
+    }
+
+    #[test]
+    fn lookup_uses_dynamic_callback_outside_static_image() {
+        let _guard = serial_guard();
+        const IDENTIFIER: u64 = 0x7000_0000_0003;
+        const IMAGE_BASE: usize = 0x7000_0000_0000;
+        static FUNCTION: RuntimeFunction =
+            RuntimeFunction { begin_address_rva: 0, end_address_rva: 0x100, unwind_info_rva: 0x80 };
+
+        extern "win64" fn callback(
+            _control_pc: u64,
+            _context: *mut c_void,
+        ) -> *const RuntimeFunction {
+            &FUNCTION
+        }
+
+        assert!(install_dynamic_runtime_function_table(
+            IDENTIFIER,
+            IMAGE_BASE,
+            0x1000,
+            callback as usize,
+            std::ptr::null_mut(),
+        ));
+        let hit = lookup_runtime_function(IMAGE_BASE + 0x20).expect("dynamic table match");
+        assert_eq!(hit.image_base, IMAGE_BASE);
+        assert_eq!(hit.function, FUNCTION);
+        assert!(delete_dynamic_runtime_function_table(IDENTIFIER as usize));
     }
 }
