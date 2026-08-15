@@ -581,11 +581,40 @@ pub extern "win64" fn MoveWindow(
     nHeight: i32,
     bRepaint: i32,
 ) -> i32 {
+    let (cur_x, cur_y) = window_origin(hWnd).unwrap_or((0, 0));
+    let (cur_left, cur_top, cur_right, cur_bottom) = window_rect(hWnd).unwrap_or((0, 0, 1280, 720));
+    let cur_w = cur_right - cur_left;
+    let cur_h = cur_bottom - cur_top;
+
     if !update_window_rect(hWnd, X, Y, nWidth, nHeight) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
     let _ = crate::platform::x11::configure_x11_window(hWnd, X, Y, nWidth, nHeight);
+
+    if X != cur_x || Y != cur_y {
+        let move_lparam = ((X as i16 as u16 as usize) | ((Y as i16 as u16 as usize) << 16)) as isize;
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: 0x0003, // WM_MOVE
+            wParam: 0,
+            lParam: move_lparam,
+            time: 0,
+            ..Default::default()
+        });
+    }
+
+    if nWidth != cur_w || nHeight != cur_h {
+        let size_lparam = ((nWidth as i16 as u16 as usize) | ((nHeight as i16 as u16 as usize) << 16)) as isize;
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: 0x0005, // WM_SIZE
+            wParam: 0,
+            lParam: size_lparam,
+            time: 0,
+            ..Default::default()
+        });
+    }
 
     if bRepaint != 0 {
         enqueue_message(Msg {
@@ -609,13 +638,71 @@ pub extern "win64" fn SetWindowPos(
     Y: i32,
     cx: i32,
     cy: i32,
-    _uFlags: u32,
+    uFlags: u32,
 ) -> i32 {
-    if !update_window_rect(hWnd, X, Y, cx, cy) {
+    let (cur_x, cur_y) = window_origin(hWnd).unwrap_or((0, 0));
+    let (cur_left, cur_top, cur_right, cur_bottom) = window_rect(hWnd).unwrap_or((0, 0, 1280, 720));
+    let cur_w = cur_right - cur_left;
+    let cur_h = cur_bottom - cur_top;
+
+    let new_x = if (uFlags & 0x0002 /* SWP_NOMOVE */) != 0 { cur_x } else { X };
+    let new_y = if (uFlags & 0x0002 /* SWP_NOMOVE */) != 0 { cur_y } else { Y };
+    let new_w = if (uFlags & 0x0001 /* SWP_NOSIZE */) != 0 { cur_w } else { cx };
+    let new_h = if (uFlags & 0x0001 /* SWP_NOSIZE */) != 0 { cur_h } else { cy };
+
+    if (uFlags & 0x0040 /* SWP_SHOWWINDOW */) != 0 {
+        set_window_visibility(hWnd, true);
+        let _ = crate::platform::x11::set_x11_window_visible(hWnd, true);
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_SHOWWINDOW,
+            wParam: 1,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+    } else if (uFlags & 0x0080 /* SWP_HIDEWINDOW */) != 0 {
+        set_window_visibility(hWnd, false);
+        let _ = crate::platform::x11::set_x11_window_visible(hWnd, false);
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: WM_SHOWWINDOW,
+            wParam: 0,
+            lParam: 0,
+            time: 0,
+            ..Default::default()
+        });
+    }
+
+    if !update_window_rect(hWnd, new_x, new_y, new_w, new_h) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
-    let _ = crate::platform::x11::configure_x11_window(hWnd, X, Y, cx, cy);
+    let _ = crate::platform::x11::configure_x11_window(hWnd, new_x, new_y, new_w, new_h);
+
+    if (uFlags & 0x0002 /* SWP_NOMOVE */) == 0 && (new_x != cur_x || new_y != cur_y) {
+        let move_lparam = ((new_x as i16 as u16 as usize) | ((new_y as i16 as u16 as usize) << 16)) as isize;
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: 0x0003, // WM_MOVE
+            wParam: 0,
+            lParam: move_lparam,
+            time: 0,
+            ..Default::default()
+        });
+    }
+
+    if (uFlags & 0x0001 /* SWP_NOSIZE */) == 0 && (new_w != cur_w || new_h != cur_h) {
+        let size_lparam = ((new_w as i16 as u16 as usize) | ((new_h as i16 as u16 as usize) << 16)) as isize;
+        enqueue_message(Msg {
+            hwnd: hWnd,
+            message: 0x0005, // WM_SIZE
+            wParam: 0,
+            lParam: size_lparam,
+            time: 0,
+            ..Default::default()
+        });
+    }
 
     set_last_error(ERROR_SUCCESS);
     1
@@ -701,13 +788,20 @@ pub extern "win64" fn EnumWindows(_lp_enum_func: Option<WndEnumProc>, _l_param: 
     1
 }
 
+fn get_primary_monitor_rects() -> (Rect, Rect) {
+    let (w, h) = crate::platform::x11::get_screen_size().unwrap_or((1920, 1080));
+    let monitor = Rect { left: 0, top: 0, right: w, bottom: h };
+    let work = Rect { left: 0, top: 0, right: w, bottom: (h - 40).max(1) };
+    (monitor, work)
+}
+
 pub extern "win64" fn EnumDisplayMonitors(
     hdc: usize,
     _lprc_clip: *const Rect,
     lpfn_enum: Option<MonitorEnumProc>,
     dw_data: isize,
 ) -> i32 {
-    let monitor_rect = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+    let (monitor_rect, _) = get_primary_monitor_rects();
 
     if let Some(callback) = lpfn_enum {
         tracing::info!(callback = callback as usize, hdc, data = dw_data, "EnumDisplayMonitors invoking guest callback");
@@ -783,10 +877,11 @@ pub extern "win64" fn GetMonitorInfoW(_hMonitor: usize, lpmi: *mut c_void) -> i3
         return 0;
     }
 
+    let (rc_monitor, rc_work) = get_primary_monitor_rects();
     let monitor_info = lpmi.cast::<MonitorInfo>();
     unsafe {
-        (*monitor_info).rc_monitor = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
-        (*monitor_info).rc_work = Rect { left: 0, top: 0, right: 1920, bottom: 1040 };
+        (*monitor_info).rc_monitor = rc_monitor;
+        (*monitor_info).rc_work = rc_work;
         (*monitor_info).dw_flags = MONITORINFOF_PRIMARY;
     }
 
@@ -817,10 +912,11 @@ pub extern "win64" fn GetMonitorInfoA(_hMonitor: usize, lpmi: *mut c_void) -> i3
         return 0;
     }
 
+    let (rc_monitor, rc_work) = get_primary_monitor_rects();
     let monitor_info = lpmi.cast::<MonitorInfo>();
     unsafe {
-        (*monitor_info).rc_monitor = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
-        (*monitor_info).rc_work = Rect { left: 0, top: 0, right: 1920, bottom: 1040 };
+        (*monitor_info).rc_monitor = rc_monitor;
+        (*monitor_info).rc_work = rc_work;
         (*monitor_info).dw_flags = MONITORINFOF_PRIMARY;
     }
 
@@ -868,8 +964,9 @@ pub extern "win64" fn MonitorFromRect(lprc: *const Rect, dwFlags: u32) -> usize 
     }
 
     let rect = unsafe { *lprc };
+    let (monitor_rect, _) = get_primary_monitor_rects();
     let intersects_primary =
-        rect.right > 0 && rect.bottom > 0 && rect.left < 1920 && rect.top < 1080;
+        rect.right > monitor_rect.left && rect.bottom > monitor_rect.top && rect.left < monitor_rect.right && rect.top < monitor_rect.bottom;
     if intersects_primary {
         return PRIMARY_MONITOR_HANDLE;
     }
@@ -987,14 +1084,14 @@ pub extern "win64" fn UpdateWindow(hWnd: usize) -> i32 {
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "win64" fn AdjustWindowRect(lp_rect: *mut Rect, _dw_style: u32, b_menu: i32) -> i32 {
-    AdjustWindowRectEx(lp_rect, 0, b_menu, 0)
+pub extern "win64" fn AdjustWindowRect(lp_rect: *mut Rect, dw_style: u32, b_menu: i32) -> i32 {
+    AdjustWindowRectEx(lp_rect, dw_style, b_menu, 0)
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "win64" fn AdjustWindowRectEx(
     lp_rect: *mut Rect,
-    _dw_style: u32,
+    dw_style: u32,
     b_menu: i32,
     _dw_ex_style: u32,
 ) -> i32 {
@@ -1003,9 +1100,19 @@ pub extern "win64" fn AdjustWindowRectEx(
         return 0;
     }
 
-    // Minimal non-client inflation for compatibility with window sizing logic.
-    let border = 8;
-    let caption = 31;
+    let has_caption = (dw_style & 0x00C0_0000 /* WS_CAPTION */) == 0x00C0_0000;
+    let has_thick_frame = (dw_style & 0x0004_0000 /* WS_THICKFRAME */) != 0;
+    let is_popup = (dw_style & 0x8000_0000 /* WS_POPUP */) != 0;
+
+    let border = if has_thick_frame {
+        8
+    } else if has_caption || (!is_popup && dw_style != 0) {
+        1
+    } else {
+        0
+    };
+
+    let caption = if has_caption { 31 } else { 0 };
     let menu_height = if b_menu != 0 { 20 } else { 0 };
 
     unsafe {
@@ -1427,10 +1534,23 @@ unsafe fn populate_dev_mode_blob(blob: *mut u8, dm_size: u16, is_wide: bool, wid
 }
 
 const SUPPORTED_DISPLAY_MODES: &[(u32, u32)] = &[
-    (1920, 1080),
-    (1600, 900),
-    (1366, 768),
-    (1280, 720),
+    (3840, 2160), // 4K 16:9
+    (3440, 1440), // UWQHD 21:9
+    (2560, 1440), // 1440p 16:9
+    (2560, 1080), // UWFHD 21:9
+    (2560, 1600), // WQXGA 16:10
+    (1920, 1200), // WUXGA 16:10
+    (1920, 1080), // 1080p 16:9
+    (1680, 1050), // WSXGA+ 16:10
+    (1600, 900),  // 900p 16:9
+    (1440, 900),  // WXGA+ 16:10
+    (1366, 768),  // WXGA 16:9
+    (1280, 1024), // SXGA 5:4
+    (1280, 800),  // WXGA 16:10
+    (1280, 720),  // 720p 16:9
+    (1024, 768),  // XGA 4:3
+    (800, 600),   // SVGA 4:3
+    (640, 480),   // VGA 4:3
 ];
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -1444,8 +1564,12 @@ pub extern "win64" fn EnumDisplaySettingsW(
         return 0;
     }
 
+    let (current_w, current_h) = crate::platform::x11::get_screen_size()
+        .map(|(w, h)| (w as u32, h as u32))
+        .unwrap_or((1920, 1080));
+
     let (width, height) = match i_mode_num {
-        ENUM_CURRENT_SETTINGS | 0xFFFF_FFFE /* ENUM_REGISTRY_SETTINGS */ => (1920, 1080),
+        ENUM_CURRENT_SETTINGS | 0xFFFF_FFFE /* ENUM_REGISTRY_SETTINGS */ => (current_w, current_h),
         idx if (idx as usize) < SUPPORTED_DISPLAY_MODES.len() => SUPPORTED_DISPLAY_MODES[idx as usize],
         _ => {
             set_last_error(ERROR_SUCCESS);
@@ -1474,8 +1598,12 @@ pub extern "win64" fn EnumDisplaySettingsA(
         return 0;
     }
 
+    let (current_w, current_h) = crate::platform::x11::get_screen_size()
+        .map(|(w, h)| (w as u32, h as u32))
+        .unwrap_or((1920, 1080));
+
     let (width, height) = match i_mode_num {
-        ENUM_CURRENT_SETTINGS | 0xFFFF_FFFE => (1920, 1080),
+        ENUM_CURRENT_SETTINGS | 0xFFFF_FFFE => (current_w, current_h),
         idx if (idx as usize) < SUPPORTED_DISPLAY_MODES.len() => SUPPORTED_DISPLAY_MODES[idx as usize],
         _ => {
             set_last_error(ERROR_SUCCESS);
@@ -1835,8 +1963,9 @@ pub extern "win64" fn SystemParametersInfoW(
                 set_last_error(ERROR_INVALID_PARAMETER);
                 return 0;
             }
+            let (_, rc_work) = get_primary_monitor_rects();
             unsafe {
-                *pv_param.cast::<Rect>() = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+                *pv_param.cast::<Rect>() = rc_work;
             }
         }
         SPI_GETMOUSE => {
@@ -1994,10 +2123,16 @@ pub extern "win64" fn SetCursorPos(x: i32, y: i32) -> i32 {
 }
 
 pub extern "win64" fn GetSystemMetrics(n_index: i32) -> i32 {
+    let (screen_w, screen_h) = crate::platform::x11::get_screen_size().unwrap_or((1920, 1080));
+    let (virt_x, virt_y, virt_w, virt_h) = crate::platform::x11::get_virtual_screen_size();
+    let num_monitors = crate::platform::x11::get_monitors().len() as i32;
     let value = match n_index {
-        SM_CXSCREEN | SM_CXFULLSCREEN | SM_CXVIRTUALSCREEN | SM_CXMAXIMIZED => 1920,
-        SM_CYSCREEN | SM_CYFULLSCREEN | SM_CYVIRTUALSCREEN | SM_CYMAXIMIZED => 1080,
-        SM_XVIRTUALSCREEN | SM_YVIRTUALSCREEN => 0,
+        SM_CXSCREEN | SM_CXFULLSCREEN | SM_CXMAXIMIZED => screen_w,
+        SM_CYSCREEN | SM_CYFULLSCREEN | SM_CYMAXIMIZED => screen_h,
+        SM_XVIRTUALSCREEN => virt_x,
+        SM_YVIRTUALSCREEN => virt_y,
+        SM_CXVIRTUALSCREEN => virt_w,
+        SM_CYVIRTUALSCREEN => virt_h,
         SM_CYCAPTION => 23,
         SM_CXCURSOR | SM_CYCURSOR => 32,
         SM_CXBORDER | SM_CYBORDER => 1,
@@ -2005,7 +2140,7 @@ pub extern "win64" fn GetSystemMetrics(n_index: i32) -> i32 {
         SM_CXDLGFRAME | SM_CYDLGFRAME => 3,
         SM_MOUSEPRESENT => 1,
         SM_SWAPBUTTON => 0,
-        SM_CMONITORS => 1,
+        SM_CMONITORS => num_monitors.max(1),
         SM_REMOTESESSION => 0,
         _ => 0,
     };
@@ -2136,8 +2271,9 @@ pub extern "win64" fn GetWindowRect(hWnd: usize, lpRect: *mut Rect) -> i32 {
         return 0;
     }
     if hWnd == 0 || is_desktop_window(hWnd) {
+        let (screen_w, screen_h) = crate::platform::x11::get_screen_size().unwrap_or((1920, 1080));
         unsafe {
-            *lpRect = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+            *lpRect = Rect { left: 0, top: 0, right: screen_w, bottom: screen_h };
         }
         set_last_error(ERROR_SUCCESS);
         return 1;
@@ -2164,8 +2300,9 @@ pub extern "win64" fn GetClientRect(hWnd: usize, lpRect: *mut Rect) -> i32 {
         return 0;
     }
     if hWnd == 0 || is_desktop_window(hWnd) {
+        let (screen_w, screen_h) = crate::platform::x11::get_screen_size().unwrap_or((1920, 1080));
         unsafe {
-            *lpRect = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+            *lpRect = Rect { left: 0, top: 0, right: screen_w, bottom: screen_h };
         }
         set_last_error(ERROR_SUCCESS);
         return 1;
@@ -2556,12 +2693,12 @@ pub extern "win64" fn MsgWaitForMultipleObjectsEx(
         }
 
         loop_count = loop_count.saturating_add(1);
-        if loop_count < 16 {
+        if loop_count < 32 {
             std::hint::spin_loop();
-        } else if loop_count < 32 {
+        } else if loop_count < 128 {
             std::thread::yield_now();
         } else {
-            std::thread::sleep(Duration::from_micros(100));
+            std::thread::sleep(Duration::from_micros(50));
         }
     }
 }
@@ -2862,7 +2999,7 @@ mod tests {
         let _guard = serial_guard();
         let mut rect = Rect { left: 0, top: 0, right: 640, bottom: 480 };
 
-        assert_eq!(AdjustWindowRectEx(&mut rect as *mut Rect, 0, 1, 0), 1);
+        assert_eq!(AdjustWindowRectEx(&mut rect as *mut Rect, 0x00CF_0000, 1, 0), 1);
         assert!(rect.left < 0);
         assert!(rect.top < 0);
         assert!(rect.right > 640);
@@ -3018,8 +3155,11 @@ mod tests {
 
         let width = u32::from_ne_bytes(blob[172..176].try_into().expect("width bytes"));
         let height = u32::from_ne_bytes(blob[176..180].try_into().expect("height bytes"));
-        assert_eq!(width, 1920);
-        assert_eq!(height, 1080);
+        let (expected_w, expected_h) = crate::platform::x11::get_screen_size()
+            .map(|(w, h)| (w as u32, h as u32))
+            .unwrap_or((1920, 1080));
+        assert_eq!(width, expected_w);
+        assert_eq!(height, expected_h);
     }
 
     #[test]

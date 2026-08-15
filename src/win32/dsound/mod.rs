@@ -11,7 +11,7 @@ use std::{
         Mutex,
     },
 };
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 const ERROR_SUCCESS: i32 = 0;
 const ERROR_INVALID_PARAMETER: i32 = 87;
@@ -25,6 +25,8 @@ const DSBCAPS_PRIMARYBUFFER: u32 = 0x0000_0001;
 const DSBPLAY_LOOPING: u32 = 0x0000_0001;
 const DSBSTATUS_PLAYING: u32 = 0x0000_0001;
 const DSBSTATUS_LOOPING: u32 = 0x0000_0004;
+const DSBLOCK_FROMWRITECURSOR: u32 = 0x0000_0001;
+const DSBLOCK_ENTIREBUFFER: u32 = 0x0000_0002;
 const WAVE_FORMAT_PCM: u16 = 1;
 
 // DirectSoundEnumerate always reports the default/primary driver with a
@@ -139,6 +141,8 @@ struct DirectSoundBufferCom {
     playing: AtomicBool,
     looping: AtomicBool,
     cursor: AtomicU32,
+    play_start_time: Mutex<Option<std::time::Instant>>,
+    play_start_offset: AtomicU32,
 }
 
 fn set_last_error(value: i32) {
@@ -181,12 +185,22 @@ pub fn detect_audio_backend() -> AudioBackend {
 fn parse_format(format: *const u8) -> Option<SoundFormat> {
     if format.is_null() { return None; }
     unsafe {
-        let tag = format.cast::<u16>().read_unaligned();
+        let mut tag = format.cast::<u16>().read_unaligned();
         let channels = format.add(2).cast::<u16>().read_unaligned();
         let rate = format.add(4).cast::<u32>().read_unaligned();
         let average_bytes_per_second = format.add(8).cast::<u32>().read_unaligned();
         let block_align = format.add(12).cast::<u16>().read_unaligned();
         let bits = format.add(14).cast::<u16>().read_unaligned();
+        if tag == 0xFFFE /* WAVE_FORMAT_EXTENSIBLE */ {
+            let cb_size = format.add(16).cast::<u16>().read_unaligned();
+            if cb_size >= 22 {
+                // SubFormat GUID Data1 (offset 24)
+                let sub_tag = format.add(24).cast::<u16>().read_unaligned();
+                if sub_tag != 0 {
+                    tag = sub_tag;
+                }
+            }
+        }
         (channels != 0 && rate != 0 && block_align != 0).then_some(SoundFormat { tag, channels, rate, average_bytes_per_second, block_align, bits })
     }
 }
@@ -228,6 +242,7 @@ extern "win64" fn device_create_sound_buffer(this: *mut c_void, desc: *const u8,
         vtbl: &DIRECT_SOUND_BUFFER_VTBL, refs: AtomicU32::new(1), flags,
         format: Mutex::new(format), bytes: Mutex::new(vec![0; size as usize]), stream: Mutex::new(None),
         playing: AtomicBool::new(false), looping: AtomicBool::new(false), cursor: AtomicU32::new(0),
+        play_start_time: Mutex::new(None), play_start_offset: AtomicU32::new(0),
     });
     let raw = Box::into_raw(object).cast::<c_void>();
     unsafe { output.write(raw); }
@@ -242,6 +257,46 @@ extern "win64" fn device_get_caps(_this: *mut c_void, caps: *mut u8) -> i32 {
         if size < 4 { return DSERR_INVALIDPARAM; }
         ptr::write_bytes(caps, 0, size as usize);
         caps.cast::<u32>().write_unaligned(size);
+        if size >= 8 {
+            let flags = 0x0000_0001 /* DSCAPS_PRIMARYMONO */
+                | 0x0000_0002 /* DSCAPS_PRIMARYSTEREO */
+                | 0x0000_0004 /* DSCAPS_PRIMARY8BIT */
+                | 0x0000_0008 /* DSCAPS_PRIMARY16BIT */
+                | 0x0000_0010 /* DSCAPS_CONTINUOUSRATE */
+                | 0x0000_0040 /* DSCAPS_CERTIFIED */
+                | 0x0000_0100 /* DSCAPS_SECONDARYMONO */
+                | 0x0000_0200 /* DSCAPS_SECONDARYSTEREO */
+                | 0x0000_0400 /* DSCAPS_SECONDARY8BIT */
+                | 0x0000_0800 /* DSCAPS_SECONDARY16BIT */;
+            caps.add(4).cast::<u32>().write_unaligned(flags);
+        }
+        if size >= 12 {
+            caps.add(8).cast::<u32>().write_unaligned(100);
+        }
+        if size >= 16 {
+            caps.add(12).cast::<u32>().write_unaligned(192_000);
+        }
+        if size >= 20 {
+            caps.add(16).cast::<u32>().write_unaligned(1);
+        }
+        if size >= 24 {
+            caps.add(20).cast::<u32>().write_unaligned(1);
+        }
+        if size >= 28 {
+            caps.add(24).cast::<u32>().write_unaligned(1);
+        }
+        if size >= 32 {
+            caps.add(28).cast::<u32>().write_unaligned(1);
+        }
+        if size >= 36 {
+            caps.add(32).cast::<u32>().write_unaligned(1);
+        }
+        if size >= 40 {
+            caps.add(36).cast::<u32>().write_unaligned(1);
+        }
+        if size >= 44 {
+            caps.add(40).cast::<u32>().write_unaligned(1);
+        }
     }
     S_OK
 }
@@ -253,26 +308,229 @@ extern "win64" fn device_set_speaker_config(_this: *mut c_void, _config: u32) ->
 extern "win64" fn device_initialize(_this: *mut c_void, _guid: *const c_void) -> i32 { S_OK }
 extern "win64" fn device_verify_certification(_this: *mut c_void, output: *mut u32) -> i32 { if output.is_null() { return DSERR_INVALIDPARAM; } unsafe { output.write(0) }; S_OK }
 
-extern "win64" fn buffer_query_interface(this: *mut c_void, _iid: *const u8, output: *mut *mut c_void) -> i32 { if output.is_null() { return DSERR_INVALIDPARAM; } unsafe { output.write(this) }; buffer_add_ref(this); S_OK }
-extern "win64" fn buffer_add_ref(this: *mut c_void) -> u32 { buffer_from_this(this).map(|b| b.refs.fetch_add(1, Ordering::Relaxed) + 1).unwrap_or(0) }
-extern "win64" fn buffer_release(this: *mut c_void) -> u32 { let Some(buffer) = buffer_from_this(this) else { return 0; }; let current = buffer.refs.load(Ordering::Acquire); if current == 0 { 0 } else { buffer.refs.fetch_sub(1, Ordering::Release) - 1 } }
-extern "win64" fn buffer_get_caps(this: *mut c_void, caps: *mut u8) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; if caps.is_null() { return DSERR_INVALIDPARAM; } unsafe { let size = caps.cast::<u32>().read_unaligned(); if size < 12 { return DSERR_INVALIDPARAM; } ptr::write_bytes(caps, 0, size as usize); caps.cast::<u32>().write_unaligned(size); caps.add(4).cast::<u32>().write_unaligned(buffer.flags); caps.add(8).cast::<u32>().write_unaligned(buffer.bytes.lock().expect("buffer bytes poisoned").len() as u32); } S_OK }
-extern "win64" fn buffer_get_current_position(this: *mut c_void, play: *mut u32, write: *mut u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; let cursor = buffer.cursor.load(Ordering::Relaxed); if !play.is_null() { unsafe { play.write(cursor) }; } if !write.is_null() { unsafe { write.write(cursor) }; } S_OK }
-extern "win64" fn buffer_get_format(this: *mut c_void, output: *mut u8, bytes: u32, written: *mut u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; const FORMAT_SIZE: u32 = 18; if !written.is_null() { unsafe { written.write(FORMAT_SIZE) }; } if output.is_null() { return S_OK; } if bytes < 16 { return DSERR_INVALIDPARAM; } let f = *buffer.format.lock().expect("buffer format poisoned"); unsafe { output.cast::<u16>().write_unaligned(f.tag); output.add(2).cast::<u16>().write_unaligned(f.channels); output.add(4).cast::<u32>().write_unaligned(f.rate); output.add(8).cast::<u32>().write_unaligned(f.average_bytes_per_second); output.add(12).cast::<u16>().write_unaligned(f.block_align); output.add(14).cast::<u16>().write_unaligned(f.bits); if bytes >= FORMAT_SIZE { output.add(16).cast::<u16>().write_unaligned(0); } } S_OK }
-extern "win64" fn buffer_get_volume(_this: *mut c_void, output: *mut i32) -> i32 { if output.is_null() { return DSERR_INVALIDPARAM; } unsafe { output.write(0) }; S_OK }
-extern "win64" fn buffer_get_pan(_this: *mut c_void, output: *mut i32) -> i32 { if output.is_null() { return DSERR_INVALIDPARAM; } unsafe { output.write(0) }; S_OK }
-extern "win64" fn buffer_get_frequency(this: *mut c_void, output: *mut u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; if output.is_null() { return DSERR_INVALIDPARAM; } unsafe { output.write(buffer.format.lock().expect("buffer format poisoned").rate) }; S_OK }
-extern "win64" fn buffer_get_status(this: *mut c_void, output: *mut u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; if output.is_null() { return DSERR_INVALIDPARAM; } let mut state = 0; if buffer.playing.load(Ordering::Acquire) { state |= DSBSTATUS_PLAYING; } if buffer.looping.load(Ordering::Acquire) { state |= DSBSTATUS_LOOPING; } unsafe { output.write(state) }; S_OK }
+extern "win64" fn buffer_query_interface(this: *mut c_void, _iid: *const u8, output: *mut *mut c_void) -> i32 {
+    info!(this = ?this, output = ?output, "DirectSoundBuffer::QueryInterface");
+    if output.is_null() { return DSERR_INVALIDPARAM; }
+    unsafe { output.write(this) };
+    buffer_add_ref(this);
+    S_OK
+}
+extern "win64" fn buffer_add_ref(this: *mut c_void) -> u32 {
+    buffer_from_this(this).map(|b| b.refs.fetch_add(1, Ordering::Relaxed) + 1).unwrap_or(0)
+}
+extern "win64" fn buffer_release(this: *mut c_void) -> u32 {
+    info!(this = ?this, "DirectSoundBuffer::Release");
+    let Some(buffer) = buffer_from_this(this) else { return 0; };
+    let current = buffer.refs.load(Ordering::Acquire);
+    if current == 0 { 0 } else { buffer.refs.fetch_sub(1, Ordering::Release) - 1 }
+}
+extern "win64" fn buffer_get_caps(this: *mut c_void, caps: *mut u8) -> i32 {
+    info!(this = ?this, "DirectSoundBuffer::GetCaps");
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    if caps.is_null() { return DSERR_INVALIDPARAM; }
+    unsafe {
+        let size = caps.cast::<u32>().read_unaligned();
+        if size < 12 { return DSERR_INVALIDPARAM; }
+        ptr::write_bytes(caps, 0, size as usize);
+        caps.cast::<u32>().write_unaligned(size);
+        caps.add(4).cast::<u32>().write_unaligned(buffer.flags);
+        caps.add(8).cast::<u32>().write_unaligned(buffer.bytes.lock().expect("buffer bytes poisoned").len() as u32);
+    }
+    S_OK
+}
+
+fn calculate_current_play_position(buffer: &DirectSoundBufferCom) -> u32 {
+    let len = buffer.bytes.lock().expect("buffer bytes poisoned").len() as u32;
+    if len == 0 {
+        return 0;
+    }
+    if !buffer.playing.load(Ordering::Acquire) {
+        return buffer.cursor.load(Ordering::Relaxed) % len;
+    }
+    let start_time_guard = buffer.play_start_time.lock().expect("play_start_time poisoned");
+    let Some(start_time) = *start_time_guard else {
+        return buffer.cursor.load(Ordering::Relaxed) % len;
+    };
+    let format = *buffer.format.lock().expect("format poisoned");
+    let bytes_per_sec = format.average_bytes_per_second.max(1) as u64;
+    let elapsed = start_time.elapsed();
+    let bytes_elapsed = (elapsed.as_secs() * bytes_per_sec) + (elapsed.subsec_nanos() as u64 * bytes_per_sec / 1_000_000_000);
+    let start_offset = buffer.play_start_offset.load(Ordering::Relaxed) as u64;
+    ((start_offset + bytes_elapsed) % (len as u64)) as u32
+}
+
+extern "win64" fn buffer_get_current_position(this: *mut c_void, play: *mut u32, write: *mut u32) -> i32 {
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    let len = buffer.bytes.lock().expect("buffer bytes poisoned").len() as u32;
+    let play_pos = calculate_current_play_position(buffer);
+    let format = *buffer.format.lock().expect("format poisoned");
+    let write_margin = (format.average_bytes_per_second / 50).clamp(512, (len / 4).max(512));
+    let write_pos = if len == 0 { 0 } else { (play_pos + write_margin) % len };
+    if !play.is_null() { unsafe { play.write(play_pos) }; }
+    if !write.is_null() { unsafe { write.write(write_pos) }; }
+    S_OK
+}
+extern "win64" fn buffer_get_format(this: *mut c_void, output: *mut u8, bytes: u32, written: *mut u32) -> i32 {
+    info!(this = ?this, "DirectSoundBuffer::GetFormat");
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    const FORMAT_SIZE: u32 = 18;
+    if !written.is_null() { unsafe { written.write(FORMAT_SIZE) }; }
+    if output.is_null() { return S_OK; }
+    if bytes < 16 { return DSERR_INVALIDPARAM; }
+    let f = *buffer.format.lock().expect("buffer format poisoned");
+    unsafe {
+        output.cast::<u16>().write_unaligned(f.tag);
+        output.add(2).cast::<u16>().write_unaligned(f.channels);
+        output.add(4).cast::<u32>().write_unaligned(f.rate);
+        output.add(8).cast::<u32>().write_unaligned(f.average_bytes_per_second);
+        output.add(12).cast::<u16>().write_unaligned(f.block_align);
+        output.add(14).cast::<u16>().write_unaligned(f.bits);
+        if bytes >= FORMAT_SIZE { output.add(16).cast::<u16>().write_unaligned(0); }
+    }
+    S_OK
+}
+extern "win64" fn buffer_get_volume(_this: *mut c_void, output: *mut i32) -> i32 {
+    if output.is_null() { return DSERR_INVALIDPARAM; }
+    unsafe { output.write(0) };
+    S_OK
+}
+extern "win64" fn buffer_get_pan(_this: *mut c_void, output: *mut i32) -> i32 {
+    if output.is_null() { return DSERR_INVALIDPARAM; }
+    unsafe { output.write(0) };
+    S_OK
+}
+extern "win64" fn buffer_get_frequency(this: *mut c_void, output: *mut u32) -> i32 {
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    if output.is_null() { return DSERR_INVALIDPARAM; }
+    unsafe { output.write(buffer.format.lock().expect("buffer format poisoned").rate) };
+    S_OK
+}
+extern "win64" fn buffer_get_status(this: *mut c_void, output: *mut u32) -> i32 {
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    if output.is_null() { return DSERR_INVALIDPARAM; }
+    let mut state = 0;
+    if buffer.playing.load(Ordering::Acquire) { state |= DSBSTATUS_PLAYING; }
+    if buffer.looping.load(Ordering::Acquire) { state |= DSBSTATUS_LOOPING; }
+    unsafe { output.write(state) };
+    S_OK
+}
 extern "win64" fn buffer_initialize(_this: *mut c_void, _device: *mut c_void, _desc: *const u8) -> i32 { S_OK }
-extern "win64" fn buffer_lock(this: *mut c_void, offset: u32, requested: u32, first: *mut *mut c_void, first_size: *mut u32, second: *mut *mut c_void, second_size: *mut u32, _flags: u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; if first.is_null() || first_size.is_null() || second.is_null() || second_size.is_null() { return DSERR_INVALIDPARAM; } let bytes = buffer.bytes.lock().expect("buffer bytes poisoned"); let len = bytes.len(); if len == 0 { return DSERR_INVALIDPARAM; } let offset = offset as usize % len; let requested = if requested == 0 { len - offset } else { (requested as usize).min(len) }; let first_len = requested.min(len - offset); let second_len = requested - first_len; let base = bytes.as_ptr() as *mut u8; unsafe { first.write(base.add(offset).cast()); first_size.write(first_len as u32); second.write(if second_len == 0 { ptr::null_mut() } else { base.cast() }); second_size.write(second_len as u32); } S_OK }
-extern "win64" fn buffer_play(this: *mut c_void, _reserved1: u32, _priority: u32, flags: u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; buffer.playing.store(true, Ordering::Release); buffer.looping.store(flags & DSBPLAY_LOOPING != 0, Ordering::Release); S_OK }
-extern "win64" fn buffer_set_current_position(this: *mut c_void, position: u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; let len = buffer.bytes.lock().expect("buffer bytes poisoned").len() as u32; buffer.cursor.store(if len == 0 { 0 } else { position % len }, Ordering::Release); S_OK }
-extern "win64" fn buffer_set_format(this: *mut c_void, format: *const u8) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; let Some(format) = parse_format(format) else { return DSERR_BADFORMAT; }; *buffer.format.lock().expect("buffer format poisoned") = format; *buffer.stream.lock().expect("buffer stream poisoned") = None; S_OK }
+extern "win64" fn buffer_lock(
+    this: *mut c_void,
+    mut offset: u32,
+    mut requested: u32,
+    first: *mut *mut c_void,
+    first_size: *mut u32,
+    second: *mut *mut c_void,
+    second_size: *mut u32,
+    flags: u32,
+) -> i32 {
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    if first.is_null() || first_size.is_null() || second.is_null() || second_size.is_null() { return DSERR_INVALIDPARAM; }
+    let bytes = buffer.bytes.lock().expect("buffer bytes poisoned");
+    let len = bytes.len();
+    if len == 0 { return DSERR_INVALIDPARAM; }
+
+    if flags & DSBLOCK_FROMWRITECURSOR != 0 {
+        let play_pos = calculate_current_play_position(buffer);
+        let format = *buffer.format.lock().expect("format poisoned");
+        let write_margin = (format.average_bytes_per_second / 50).clamp(512, (len as u32 / 4).max(512));
+        offset = (play_pos + write_margin) % (len as u32);
+    }
+    if flags & DSBLOCK_ENTIREBUFFER != 0 {
+        requested = len as u32;
+    }
+
+    let offset = (offset as usize) % len;
+    let requested = if requested == 0 { len - offset } else { (requested as usize).min(len) };
+    let first_len = requested.min(len - offset);
+    let second_len = requested - first_len;
+    let base = bytes.as_ptr() as *mut u8;
+    unsafe {
+        first.write(base.add(offset).cast());
+        first_size.write(first_len as u32);
+        second.write(if second_len == 0 { ptr::null_mut() } else { base.cast() });
+        second_size.write(second_len as u32);
+    }
+    S_OK
+}
+extern "win64" fn buffer_play(this: *mut c_void, _reserved1: u32, _priority: u32, flags: u32) -> i32 {
+    info!(this = ?this, flags, "DirectSoundBuffer::Play");
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    buffer.playing.store(true, Ordering::Release);
+    buffer.looping.store(flags & DSBPLAY_LOOPING != 0, Ordering::Release);
+    *buffer.play_start_time.lock().expect("play_start_time poisoned") = Some(std::time::Instant::now());
+    buffer.play_start_offset.store(buffer.cursor.load(Ordering::Relaxed), Ordering::Release);
+    let format = *buffer.format.lock().expect("buffer format poisoned");
+    let mut stream = buffer.stream.lock().expect("buffer stream poisoned");
+    if stream.is_none() {
+        *stream = crate::win32::winmm::DesktopAudioStream::open(format.tag, format.channels, format.rate, format.bits);
+        info!(opened = stream.is_some(), ?format, "DirectSound buffer_play opened DesktopAudioStream");
+    }
+    S_OK
+}
+extern "win64" fn buffer_set_current_position(this: *mut c_void, position: u32) -> i32 {
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    let len = buffer.bytes.lock().expect("buffer bytes poisoned").len() as u32;
+    let pos = if len == 0 { 0 } else { position % len };
+    buffer.cursor.store(pos, Ordering::Release);
+    buffer.play_start_offset.store(pos, Ordering::Release);
+    *buffer.play_start_time.lock().expect("play_start_time poisoned") = Some(std::time::Instant::now());
+    S_OK
+}
+extern "win64" fn buffer_set_format(this: *mut c_void, format: *const u8) -> i32 {
+    info!(this = ?this, format = ?format, "DirectSoundBuffer::SetFormat");
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    let Some(format) = parse_format(format) else { return DSERR_BADFORMAT; };
+    *buffer.format.lock().expect("buffer format poisoned") = format;
+    *buffer.stream.lock().expect("buffer stream poisoned") = None;
+    S_OK
+}
 extern "win64" fn buffer_set_volume(_this: *mut c_void, _value: i32) -> i32 { S_OK }
 extern "win64" fn buffer_set_pan(_this: *mut c_void, _value: i32) -> i32 { S_OK }
-extern "win64" fn buffer_set_frequency(this: *mut c_void, value: u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; if value == 0 { return DSERR_INVALIDPARAM; } buffer.format.lock().expect("buffer format poisoned").rate = value; *buffer.stream.lock().expect("buffer stream poisoned") = None; S_OK }
-extern "win64" fn buffer_stop(this: *mut c_void) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; buffer.playing.store(false, Ordering::Release); buffer.looping.store(false, Ordering::Release); S_OK }
-extern "win64" fn buffer_unlock(this: *mut c_void, _first: *mut c_void, _first_size: u32, _second: *mut c_void, _second_size: u32) -> i32 { let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; }; if !buffer.playing.load(Ordering::Acquire) { return S_OK; } let data = buffer.bytes.lock().expect("buffer bytes poisoned").clone(); let format = *buffer.format.lock().expect("buffer format poisoned"); let mut stream = buffer.stream.lock().expect("buffer stream poisoned"); if stream.is_none() { *stream = crate::win32::winmm::DesktopAudioStream::open(format.tag, format.channels, format.rate, format.bits); if stream.is_none() { warn!(?format, "DirectSound could not open PulseAudio output"); return DSERR_NODRIVER; } } if !stream.as_mut().expect("stream was checked").write(&data) { return DSERR_NODRIVER; } let next = (buffer.cursor.load(Ordering::Relaxed) as usize + data.len()) % data.len().max(1); buffer.cursor.store(next as u32, Ordering::Release); S_OK }
+extern "win64" fn buffer_set_frequency(this: *mut c_void, value: u32) -> i32 {
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    if value == 0 { return DSERR_INVALIDPARAM; }
+    buffer.format.lock().expect("buffer format poisoned").rate = value;
+    *buffer.stream.lock().expect("buffer stream poisoned") = None;
+    S_OK
+}
+extern "win64" fn buffer_stop(this: *mut c_void) -> i32 {
+    info!(this = ?this, "DirectSoundBuffer::Stop");
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    let current_pos = calculate_current_play_position(buffer);
+    buffer.cursor.store(current_pos, Ordering::Release);
+    buffer.playing.store(false, Ordering::Release);
+    buffer.looping.store(false, Ordering::Release);
+    *buffer.play_start_time.lock().expect("play_start_time poisoned") = None;
+    S_OK
+}
+extern "win64" fn buffer_unlock(this: *mut c_void, first: *mut c_void, first_size: u32, second: *mut c_void, second_size: u32) -> i32 {
+    let Some(buffer) = buffer_from_this(this) else { return DSERR_INVALIDPARAM; };
+    let format = *buffer.format.lock().expect("buffer format poisoned");
+    let mut stream = buffer.stream.lock().expect("buffer stream poisoned");
+    if stream.is_none() {
+        *stream = crate::win32::winmm::DesktopAudioStream::open(format.tag, format.channels, format.rate, format.bits);
+        info!(opened = stream.is_some(), ?format, "DirectSound buffer_unlock opened DesktopAudioStream");
+    }
+    let mut written_bytes = 0usize;
+    if let Some(stream_ref) = stream.as_mut() {
+        if !first.is_null() && first_size > 0 {
+            let slice = unsafe { std::slice::from_raw_parts(first.cast::<u8>(), first_size as usize) };
+            let _ = stream_ref.write(slice);
+            written_bytes += first_size as usize;
+        }
+        if !second.is_null() && second_size > 0 {
+            let slice = unsafe { std::slice::from_raw_parts(second.cast::<u8>(), second_size as usize) };
+            let _ = stream_ref.write(slice);
+            written_bytes += second_size as usize;
+        }
+    }
+    let buf_len = buffer.bytes.lock().expect("buffer bytes poisoned").len().max(1);
+    let next = (buffer.cursor.load(Ordering::Relaxed) as usize + written_bytes) % buf_len;
+    buffer.cursor.store(next as u32, Ordering::Release);
+    S_OK
+}
 extern "win64" fn buffer_restore(_this: *mut c_void) -> i32 { S_OK }
 extern "win64" fn buffer_set_fx(_this: *mut c_void, _count: u32, _fx: *const c_void, results: *mut u32) -> i32 { if !results.is_null() { unsafe { results.write(0) }; } S_OK }
 extern "win64" fn buffer_acquire_resources(_this: *mut c_void, _flags: u32, _count: u32, results: *mut u32) -> i32 { if !results.is_null() { unsafe { results.write(0) }; } S_OK }

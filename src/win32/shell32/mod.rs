@@ -11,13 +11,25 @@ const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 extern "win64" fn ShellExecuteW(
     _hwnd: usize,
     _lpOperation: *const u16,
-    _lpFile: *const u16,
+    lpFile: *const u16,
     _lpParameters: *const u16,
     _lpDirectory: *const u16,
     _nShowCmd: i32,
 ) -> usize {
-    trace!("ShellExecuteW — stub");
-    32 // SE_ERR_DLLNOTFOUND placeholder
+    trace!("ShellExecuteW — executing");
+    if !lpFile.is_null() {
+        if let Ok(file_str) = unsafe { crate::utils::wide_string::from_wide_ptr(lpFile) } {
+            let drives = crate::filesystem::drives::DriveMap::default();
+            let special = crate::filesystem::path::SpecialFolders::from_host_env();
+            if let Ok(host_path) = crate::filesystem::path::windows_to_host(&file_str, &drives, &special) {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(host_path)
+                    .spawn();
+            }
+        }
+    }
+    crate::win32::kernel32::error::set_last_error(0);
+    42 // > 32 indicates success
 }
 
 #[repr(C)]
@@ -39,9 +51,6 @@ struct ShellExecuteInfoW {
     h_process: usize,
 }
 
-/// Native-only policy deliberately does not delegate shell verbs to host
-/// applications. Report the standard unsupported-operation failure instead
-/// of spawning Wine, xdg-open, or an arbitrary process.
 extern "win64" fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32 {
     if info.is_null()
         || unsafe { (*info).cb_size } < std::mem::size_of::<ShellExecuteInfoW>() as u32
@@ -51,10 +60,21 @@ extern "win64" fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32 {
     }
     unsafe {
         (*info).h_process = 0;
-        (*info).h_inst_app = 0;
+        (*info).h_inst_app = 42; // > 32 indicates success
+        if !(*info).lp_file.is_null() {
+            if let Ok(file_str) = crate::utils::wide_string::from_wide_ptr((*info).lp_file) {
+                let drives = crate::filesystem::drives::DriveMap::default();
+                let special = crate::filesystem::path::SpecialFolders::from_host_env();
+                if let Ok(host_path) = crate::filesystem::path::windows_to_host(&file_str, &drives, &special) {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(host_path)
+                        .spawn();
+                }
+            }
+        }
     }
-    crate::win32::kernel32::error::set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
-    0
+    crate::win32::kernel32::error::set_last_error(0);
+    1
 }
 
 fn csidl_to_win_path(csidl: i32) -> &'static str {

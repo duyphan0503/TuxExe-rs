@@ -122,7 +122,10 @@ fn current_system_time(local: bool) -> Option<SystemTime> {
 }
 
 pub extern "win64" fn sleep(dw_milliseconds: u32) {
-    trace!("Sleep({})", dw_milliseconds);
+    if dw_milliseconds == 0 {
+        thread::yield_now();
+        return;
+    }
     thread::sleep(Duration::from_millis(dw_milliseconds as u64));
 }
 

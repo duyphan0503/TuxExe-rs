@@ -338,15 +338,23 @@ pub fn resolve_export(func_name: &str) -> Option<usize> {
     static EXPORTS: OnceLock<HashMap<&'static str, usize>> = OnceLock::new();
     let map = EXPORTS.get_or_init(get_exports);
     if let Some(&addr) = map.get(func_name) {
-        Some(addr)
-    } else {
-        if func_name.contains("GetISteam") || func_name.contains("CreateInterface") || func_name.contains("Interface") {
-            debug!("Unhandled steam_api64 interface getter '{}' -> returning ReturnDummyInterface", func_name);
-            Some(ReturnDummyInterface as usize)
-        } else {
-            debug!("Unhandled steam_api64 function '{}' -> returning GenericSteamApiStub (0)", func_name);
-            Some(GenericSteamApiStub as usize)
+        return Some(addr);
+    }
+    let with_prefix = format!("SteamAPI_{func_name}");
+    if let Some(&addr) = map.get(with_prefix.as_str()) {
+        return Some(addr);
+    }
+    if let Some(stripped) = func_name.strip_prefix("SteamAPI_") {
+        if let Some(&addr) = map.get(stripped) {
+            return Some(addr);
         }
+    }
+    if func_name.contains("GetISteam") || func_name.contains("CreateInterface") || func_name.contains("Interface") {
+        debug!("Unhandled steam_api64 interface getter '{}' -> returning ReturnDummyInterface", func_name);
+        Some(ReturnDummyInterface as usize)
+    } else {
+        debug!("Unhandled steam_api64 function '{}' -> returning GenericSteamApiStub (0)", func_name);
+        Some(GenericSteamApiStub as usize)
     }
 }
 

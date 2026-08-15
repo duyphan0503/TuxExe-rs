@@ -43,14 +43,18 @@ fn global_cache() -> &'static CaseFoldCache {
     CACHE.get_or_init(CaseFoldCache::new)
 }
 
-/// Resolve a path using case-insensitive file name matching.
+/// Resolve a path using case-insensitive file and directory matching.
 ///
 /// If the exact path exists, returns it directly.
-/// Otherwise scans the parent directory for a case-insensitive filename match,
-/// caching all entries in that directory for fast subsequent lookups.
+/// Otherwise traverses from the root component by component, matching directory and
+/// Resolve a path using case-insensitive file and directory matching.
+///
+/// If the exact path exists, returns it directly.
+/// Otherwise traverses from the root component by component, matching directory and
+/// file names case-insensitively while caching directory entries for sub-microsecond lookups.
 pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
-    if path.exists() {
-        return Some(path.to_path_buf());
+    if path.as_os_str().is_empty() {
+        return None;
     }
 
     let key = cache_key(path);
@@ -58,38 +62,54 @@ pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
         return cached;
     }
 
-    let parent = path.parent()?;
-    let file_name = path.file_name()?.to_string_lossy().to_string();
+    if path.exists() {
+        let path_buf = path.to_path_buf();
+        global_cache().insert_batch(vec![(key, path_buf.clone())]);
+        return Some(path_buf);
+    }
 
-    let Ok(dir_entries) = std::fs::read_dir(parent) else {
-        global_cache().insert_miss(key);
-        return None;
-    };
+    // Resolve parent directory (fast via cache or single lookup)
+    if let Some(parent) = path.parent() {
+        let resolved_parent = if parent.as_os_str().is_empty() {
+            Some(PathBuf::from("."))
+        } else if parent.exists() {
+            Some(parent.to_path_buf())
+        } else {
+            resolve_case_insensitive(parent)
+        };
 
-    let mut batch = Vec::new();
-    let mut matched = None;
-
-    for entry in dir_entries.flatten() {
-        let entry_path = entry.path();
-        let entry_name = entry.file_name();
-        let entry_name_str = entry_name.to_string_lossy();
-        
-        let entry_key = cache_key(&entry_path);
-        if entry_name_str.eq_ignore_ascii_case(&file_name) {
-            matched = Some(entry_path.clone());
+        if let Some(actual_parent) = resolved_parent {
+            if let Some(file_name) = path.file_name() {
+                let file_name_str = file_name.to_string_lossy();
+                if let Ok(dir_entries) = std::fs::read_dir(&actual_parent) {
+                    let mut matched = None;
+                    let mut batch = Vec::new();
+                    for entry in dir_entries.flatten() {
+                        let entry_path = entry.path();
+                        let entry_name = entry.file_name();
+                        let entry_name_str = entry_name.to_string_lossy();
+                        let entry_key = cache_key(&entry_path);
+                        if entry_name_str.eq_ignore_ascii_case(&file_name_str) {
+                            matched = Some(entry_path.clone());
+                        }
+                        batch.push((entry_key, entry_path));
+                    }
+                    if !batch.is_empty() {
+                        global_cache().insert_batch(batch);
+                    }
+                    if let Some(found) = matched {
+                        global_cache().insert_batch(vec![(key, found.clone())]);
+                        return Some(found);
+                    }
+                }
+            }
+            global_cache().insert_miss(key);
+            return None;
         }
-        batch.push((entry_key, entry_path));
     }
 
-    if !batch.is_empty() {
-        global_cache().insert_batch(batch);
-    }
-
-    if matched.is_none() {
-        global_cache().insert_miss(key);
-    }
-
-    matched
+    global_cache().insert_miss(key);
+    None
 }
 
 #[cfg(test)]
@@ -105,6 +125,20 @@ mod tests {
         std::fs::write(&real_file, b"ok").expect("write");
 
         let lookup = temp.path().join("readme.txt");
+        let resolved = resolve_case_insensitive(&lookup).expect("resolved");
+        assert_eq!(resolved, real_file);
+    }
+
+    #[test]
+    fn finds_multi_level_case_insensitive_match() {
+        let _guard = serial_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sub_dir = temp.path().join("StreamingAssets").join("DLC");
+        std::fs::create_dir_all(&sub_dir).expect("create_dir_all");
+        let real_file = sub_dir.join("dlc_00");
+        std::fs::write(&real_file, b"dlc content").expect("write");
+
+        let lookup = temp.path().join("streamingassets").join("dlc").join("DLC_00");
         let resolved = resolve_case_insensitive(&lookup).expect("resolved");
         assert_eq!(resolved, real_file);
     }

@@ -48,8 +48,15 @@ pub fn windows_to_host(
         return Ok(mapped);
     }
 
-    let normalized = trimmed.replace('\\', "/");
-    let normalized = normalized.strip_prefix("//?/").unwrap_or(&normalized);
+    let mut normalized = trimmed.replace('\\', "/");
+    while let Some(stripped) = normalized
+        .strip_prefix("//?/")
+        .or_else(|| normalized.strip_prefix("/??/"))
+        .or_else(|| normalized.strip_prefix("//./"))
+        .or_else(|| normalized.strip_prefix("/?./"))
+    {
+        normalized = stripped.to_string();
+    }
 
     // Host-absolute fallback for internal/runtime callers that already resolved a Linux path.
     if normalized.starts_with('/') {
@@ -66,7 +73,25 @@ pub fn windows_to_host(
         let root = drives.resolve(drive).ok_or_else(|| format!("Drive {drive}: not configured"))?;
 
         let tail = normalized[2..].trim_start_matches('/');
-        return Ok(root.join(tail));
+        let mapped = root.join(tail);
+        if mapped.exists() {
+            return Ok(mapped);
+        }
+
+        // Fallback checks for Linux / Windows partition mounts
+        let direct_root = PathBuf::from("/").join(tail);
+        if direct_root.exists() {
+            return Ok(direct_root);
+        }
+
+        if let Ok(cwd) = std::env::current_dir() {
+            let direct_cwd = cwd.join(tail);
+            if direct_cwd.exists() {
+                return Ok(direct_cwd);
+            }
+        }
+
+        return Ok(mapped);
     }
 
     // Fallback for relative paths: resolve against current working directory.

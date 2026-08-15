@@ -200,7 +200,20 @@ impl DesktopAudioStream {
             (WAVE_FORMAT_PCM, 8) => PA_SAMPLE_U8,
             (WAVE_FORMAT_PCM, 16) => PA_SAMPLE_S16LE,
             (WAVE_FORMAT_IEEE_FLOAT, 32) => PA_SAMPLE_FLOAT32LE,
-            _ => return None,
+            (WAVE_FORMAT_EXTENSIBLE, 8) => PA_SAMPLE_U8,
+            (WAVE_FORMAT_EXTENSIBLE, 16) => PA_SAMPLE_S16LE,
+            (WAVE_FORMAT_EXTENSIBLE, 32) => PA_SAMPLE_FLOAT32LE,
+            _ => {
+                if bits == 16 {
+                    PA_SAMPLE_S16LE
+                } else if bits == 32 {
+                    PA_SAMPLE_FLOAT32LE
+                } else if bits == 8 {
+                    PA_SAMPLE_U8
+                } else {
+                    return None;
+                }
+            }
         };
         let bytes_per_sample = u32::from(bits / 8);
         let block_align = u32::from(channels).checked_mul(bytes_per_sample)?;

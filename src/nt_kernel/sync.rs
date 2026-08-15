@@ -85,7 +85,9 @@ fn wait_on_mutex_state(state: Arc<(Mutex<MutexState>, Condvar)>, timeout_ms: u32
     let mut guard = lock.lock().expect("mutex state poisoned");
     let current_tid = thread::current_os_thread_id();
 
-    let acquired = if timeout_ms == INFINITE {
+    let acquired = if timeout_ms == 0 {
+        !matches!(guard.owner_tid, Some(owner) if owner != current_tid)
+    } else if timeout_ms == INFINITE {
         while matches!(guard.owner_tid, Some(owner) if owner != current_tid) {
             guard = condvar.wait(guard).expect("mutex state poisoned");
         }
@@ -169,7 +171,9 @@ fn wait_on_event_state(state: Arc<(Mutex<EventState>, Condvar)>, timeout_ms: u32
     let (lock, condvar) = &*state;
     let mut guard = lock.lock().expect("event state poisoned");
 
-    let signaled = if timeout_ms == INFINITE {
+    let signaled = if timeout_ms == 0 {
+        guard.signaled
+    } else if timeout_ms == INFINITE {
         while !guard.signaled {
             guard = condvar.wait(guard).expect("event state poisoned");
         }
@@ -252,7 +256,11 @@ impl SemaphoreHandleObject {
         }
 
         guard.count += release_count;
-        condvar.notify_all();
+        if release_count == 1 {
+            condvar.notify_one();
+        } else {
+            condvar.notify_all();
+        }
         1
     }
 }
@@ -269,7 +277,9 @@ fn wait_on_semaphore_state(state: Arc<(Mutex<SemaphoreState>, Condvar)>, timeout
     let (lock, condvar) = &*state;
     let mut guard = lock.lock().expect("semaphore state poisoned");
 
-    let acquired = if timeout_ms == INFINITE {
+    let acquired = if timeout_ms == 0 {
+        guard.count > 0
+    } else if timeout_ms == INFINITE {
         while guard.count <= 0 {
             guard = condvar.wait(guard).expect("semaphore state poisoned");
         }

@@ -4,7 +4,7 @@
 
 use std::ffi::CString;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use x11::glx::*;
 use x11::xlib::*;
@@ -106,6 +106,156 @@ fn init_x11() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorGeometry {
+    pub is_primary: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+fn cached_monitors() -> &'static RwLock<Option<Vec<MonitorGeometry>>> {
+    static CACHED: OnceLock<RwLock<Option<Vec<MonitorGeometry>>>> = OnceLock::new();
+    CACHED.get_or_init(|| RwLock::new(None))
+}
+
+/// Query all connected monitors with their position and dimensions.
+pub fn get_monitors() -> Vec<MonitorGeometry> {
+    if let Ok(guard) = cached_monitors().read() {
+        if let Some(ref list) = *guard {
+            return list.clone();
+        }
+    }
+
+    if !init_x11() {
+        return vec![MonitorGeometry {
+            is_primary: true,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
+    }
+
+    let state_guard = x11_state().lock().ok();
+    let Some(state_guard) = state_guard else {
+        return vec![MonitorGeometry {
+            is_primary: true,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
+    };
+    let Some(state) = state_guard.as_ref() else {
+        return vec![MonitorGeometry {
+            is_primary: true,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
+    };
+
+    let monitors = unsafe {
+        // Try XRRGetMonitors first (XRandR)
+        let mut count = 0;
+        let monitors_ptr = x11::xrandr::XRRGetMonitors(state.display, state.root_window, 1, &mut count);
+        if !monitors_ptr.is_null() && count > 0 {
+            let mut list = Vec::with_capacity(count as usize);
+            let slice = std::slice::from_raw_parts(monitors_ptr, count as usize);
+            for m in slice {
+                list.push(MonitorGeometry {
+                    is_primary: m.primary != 0,
+                    x: m.x,
+                    y: m.y,
+                    width: m.width,
+                    height: m.height,
+                });
+            }
+            x11::xrandr::XRRFreeMonitors(monitors_ptr);
+            // If none was marked primary, mark the first one as primary
+            if !list.is_empty() && !list.iter().any(|m| m.is_primary) {
+                list[0].is_primary = true;
+            }
+            list
+        } else {
+            // Fallback: Xinerama
+            let mut xin_count = 0;
+            let xin_ptr = x11::xinerama::XineramaQueryScreens(state.display, &mut xin_count);
+            if !xin_ptr.is_null() && xin_count > 0 {
+                let mut list = Vec::with_capacity(xin_count as usize);
+                let slice = std::slice::from_raw_parts(xin_ptr, xin_count as usize);
+                for (idx, s) in slice.iter().enumerate() {
+                    list.push(MonitorGeometry {
+                        is_primary: idx == 0,
+                        x: s.x_org as i32,
+                        y: s.y_org as i32,
+                        width: s.width as i32,
+                        height: s.height as i32,
+                    });
+                }
+                x11::xlib::XFree(xin_ptr.cast());
+                list
+            } else {
+                // Fallback: Default screen size
+                let w = XDisplayWidth(state.display, state.screen);
+                let h = XDisplayHeight(state.display, state.screen);
+                vec![MonitorGeometry {
+                    is_primary: true,
+                    x: 0,
+                    y: 0,
+                    width: if w > 0 { w as i32 } else { 1920 },
+                    height: if h > 0 { h as i32 } else { 1080 },
+                }]
+            }
+        }
+    };
+
+    if let Ok(mut guard) = cached_monitors().write() {
+        *guard = Some(monitors.clone());
+    }
+
+    monitors
+}
+
+/// Query the primary display monitor.
+pub fn get_primary_monitor() -> MonitorGeometry {
+    let monitors = get_monitors();
+    monitors
+        .iter()
+        .find(|m| m.is_primary)
+        .copied()
+        .or_else(|| monitors.first().copied())
+        .unwrap_or(MonitorGeometry {
+            is_primary: true,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        })
+}
+
+/// Query the primary display monitor's resolution (width, height).
+pub fn get_screen_size() -> Option<(i32, i32)> {
+    let primary = get_primary_monitor();
+    Some((primary.width, primary.height))
+}
+
+/// Query the virtual desktop bounding box across all monitors (x, y, width, height).
+pub fn get_virtual_screen_size() -> (i32, i32, i32, i32) {
+    let monitors = get_monitors();
+    if monitors.is_empty() {
+        return (0, 0, 1920, 1080);
+    }
+    let min_x = monitors.iter().map(|m| m.x).min().unwrap_or(0);
+    let min_y = monitors.iter().map(|m| m.y).min().unwrap_or(0);
+    let max_x = monitors.iter().map(|m| m.x + m.width).max().unwrap_or(1920);
+    let max_y = monitors.iter().map(|m| m.y + m.height).max().unwrap_or(1080);
+    (min_x, min_y, (max_x - min_x).max(1), (max_y - min_y).max(1))
+}
+
 // ─── Window Records ───
 
 #[derive(Debug)]
@@ -128,15 +278,24 @@ pub fn create_x11_window(title: &str, x: i32, y: i32, width: i32, height: i32) -
         return None;
     }
 
+    let primary = get_primary_monitor();
     let state = x11_state().lock().expect("x11 state poisoned");
     let state = state.as_ref()?;
 
     let title_c = CString::new(title).ok()?;
 
-    let win_x = if x == i32::MIN || x < 0 { 100 } else { x };
-    let win_y = if y == i32::MIN || y < 0 { 100 } else { y };
     let win_width = if width <= 0 || width == i32::MIN { 1280 } else { width };
     let win_height = if height <= 0 || height == i32::MIN { 720 } else { height };
+    let win_x = if x == i32::MIN || x < 0 {
+        primary.x + ((primary.width - win_width) / 2).max(0)
+    } else {
+        x
+    };
+    let win_y = if y == i32::MIN || y < 0 {
+        primary.y + ((primary.height - win_height) / 2).max(0)
+    } else {
+        y
+    };
 
     unsafe {
         let mut attributes = XSetWindowAttributes {
@@ -668,7 +827,7 @@ pub fn pump_x11_events() {
                     if vk != 0 {
                         crate::win32::user32::input::set_key_down(vk);
                     }
-                    let lparam = ((btn.x as u16 as usize) | ((btn.y as u16 as usize) << 16)) as isize;
+                    let lparam = ((btn.x as i16 as u16 as usize) | ((btn.y as i16 as u16 as usize) << 16)) as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: msg_id,
@@ -691,7 +850,7 @@ pub fn pump_x11_events() {
                     if vk != 0 {
                         crate::win32::user32::input::set_key_up(vk);
                     }
-                    let lparam = ((btn.x as u16 as usize) | ((btn.y as u16 as usize) << 16)) as isize;
+                    let lparam = ((btn.x as i16 as u16 as usize) | ((btn.y as i16 as u16 as usize) << 16)) as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: msg_id,
@@ -723,7 +882,7 @@ pub fn pump_x11_events() {
                         wparam |= 0x0010; // MK_MBUTTON
                     }
 
-                    let lparam = ((mot.x as u16 as usize) | ((mot.y as u16 as usize) << 16)) as isize;
+                    let lparam = ((mot.x as i16 as u16 as usize) | ((mot.y as i16 as u16 as usize) << 16)) as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: 0x0200, // WM_MOUSEMOVE
