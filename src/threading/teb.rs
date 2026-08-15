@@ -248,8 +248,19 @@ fn ensure_process_environment(image_base: usize) -> &'static ProcessEnvironment 
     process_environment_cell().get_or_init(|| build_process_environment(image_base))
 }
 
+thread_local! {
+    static CURRENT_CACHED_TEB: std::cell::Cell<*mut Teb> = const { std::cell::Cell::new(ptr::null_mut()) };
+    static CURRENT_CACHED_TID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn current_thread_id() -> usize {
-    unsafe { libc::syscall(libc::SYS_gettid) as usize }
+    let tid = CURRENT_CACHED_TID.get();
+    if tid != 0 {
+        return tid;
+    }
+    let new_tid = unsafe { libc::syscall(libc::SYS_gettid) as usize };
+    CURRENT_CACHED_TID.set(new_tid);
+    new_tid
 }
 
 fn stack_bounds() -> (*mut u8, *mut u8) {
@@ -283,6 +294,7 @@ fn stack_bounds() -> (*mut u8, *mut u8) {
 }
 
 fn apply_gs_base(teb: *mut Teb) -> Result<(), String> {
+    CURRENT_CACHED_TEB.set(teb);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         const ARCH_SET_GS: libc::c_int = 0x1001;
@@ -346,6 +358,11 @@ pub fn replace_current_stack_bounds(
 }
 
 pub fn current_teb_ptr() -> *mut Teb {
+    let cached = CURRENT_CACHED_TEB.get();
+    if !cached.is_null() {
+        return cached;
+    }
+
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         let mut gs_base: usize = 0;
@@ -354,6 +371,7 @@ pub fn current_teb_ptr() -> *mut Teb {
         if res == 0 && gs_base != 0 {
             let teb = gs_base as *mut Teb;
             if unsafe { !(*teb).peb.is_null() && (*teb).client_id_unique_thread == current_thread_id() } {
+                CURRENT_CACHED_TEB.set(teb);
                 return teb;
             }
         }
@@ -410,10 +428,14 @@ pub fn attach_spawned_thread() -> Result<(), String> {
 
 pub fn destroy_current_teb() {
     let teb_ptr = current_teb_ptr();
+    CURRENT_CACHED_TEB.set(ptr::null_mut());
     if !teb_ptr.is_null() {
-        const ARCH_SET_GS: libc::c_int = 0x1001;
-        unsafe {
-            let _ = libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, 0usize);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            const ARCH_SET_GS: libc::c_int = 0x1001;
+            unsafe {
+                let _ = libc::syscall(libc::SYS_arch_prctl, ARCH_SET_GS, 0usize);
+            }
         }
         unregister_managed_teb(teb_ptr);
         unsafe {

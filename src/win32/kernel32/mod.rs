@@ -43,6 +43,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetConsoleTitleW", console::set_console_title_w as usize);
     exports.insert("GetConsoleTitleA", console::get_console_title_a as usize);
     exports.insert("GetConsoleTitleW", console::get_console_title_w as usize);
+    exports.insert("GetConsoleScreenBufferInfo", console::get_console_screen_buffer_info as usize);
+    exports.insert("GetConsoleScreenBufferInfoW", console::get_console_screen_buffer_info as usize);
+    exports.insert("SetConsoleTextAttribute", console::set_console_text_attribute as usize);
+    exports.insert("SetConsoleTextAttributeW", console::set_console_text_attribute as usize);
 
     // File
     exports.insert("WriteFile", file::write_file as usize);

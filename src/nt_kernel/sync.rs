@@ -549,6 +549,7 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
     };
 
     if wait_all {
+        let mut loop_count = 0u32;
         loop {
             let mut all_signaled = true;
             for handle in handles {
@@ -581,10 +582,18 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(1));
+            loop_count = loop_count.saturating_add(1);
+            if loop_count < 16 {
+                std::hint::spin_loop();
+            } else if loop_count < 32 {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(Duration::from_micros(50));
+            }
         }
     }
 
+    let mut loop_count = 0u32;
     loop {
         for (index, handle) in handles.iter().enumerate() {
             if wait_for_single_object(*handle, 0) == WAIT_OBJECT_0 {
@@ -598,7 +607,14 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
             }
         }
 
-        std::thread::sleep(Duration::from_millis(1));
+        loop_count = loop_count.saturating_add(1);
+        if loop_count < 16 {
+            std::hint::spin_loop();
+        } else if loop_count < 32 {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(Duration::from_micros(50));
+        }
     }
 }
 

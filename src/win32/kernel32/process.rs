@@ -1031,10 +1031,18 @@ pub extern "win64" fn get_exit_code_process(h_process: *mut c_void, lp_exit_code
     1
 }
 
+thread_local! {
+    static CACHED_PROCESS_TID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 pub extern "win64" fn get_current_thread_id() -> u32 {
-    let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
-    trace!("GetCurrentThreadId() -> {}", tid);
-    tid
+    let tid = CACHED_PROCESS_TID.get();
+    if tid != 0 {
+        return tid;
+    }
+    let new_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    CACHED_PROCESS_TID.set(new_tid);
+    new_tid
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]

@@ -30,3 +30,4 @@ pub mod winmm;
 pub mod ws2_32;
 pub mod vulkan;
 pub mod steam_api64;
+pub mod ntdll;

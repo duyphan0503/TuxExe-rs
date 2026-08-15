@@ -148,8 +148,18 @@ unsafe fn read_slist_header(list_head: *mut c_void) -> SListState {
     }
 }
 
+thread_local! {
+    static CACHED_SYNC_TID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn current_thread_id() -> u32 {
-    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+    let tid = CACHED_SYNC_TID.get();
+    if tid != 0 {
+        return tid;
+    }
+    let new_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    CACHED_SYNC_TID.set(new_tid);
+    new_tid
 }
 
 #[derive(Debug, Clone, Copy)]

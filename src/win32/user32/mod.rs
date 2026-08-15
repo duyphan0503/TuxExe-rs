@@ -253,7 +253,7 @@ pub(crate) fn create_window_with_parent_and_handle(
         visible: false,
         native_window_id,
         parent_hwnd,
-        creator_thread_id: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
+        creator_thread_id: crate::win32::kernel32::process::get_current_thread_id(),
     };
 
     window_registry().write().expect("window registry poisoned").insert(hwnd, record);
@@ -351,6 +351,17 @@ pub(crate) fn update_window_rect(hwnd: usize, x: i32, y: i32, width: i32, height
     window.y = y;
     window.width = width;
     window.height = height;
+    true
+}
+
+pub(crate) fn update_window_pos(hwnd: usize, x: i32, y: i32) -> bool {
+    let mut windows = window_registry().write().expect("window registry poisoned");
+    let Some(window) = windows.get_mut(&hwnd) else {
+        return false;
+    };
+
+    window.x = x;
+    window.y = y;
     true
 }
 

@@ -241,6 +241,9 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SteamInternal_CreateInterface", ReturnDummyInterface as usize);
     exports.insert("SteamInternal_FindOrCreateUserInterface", ReturnDummyInterface2 as usize);
     exports.insert("SteamInternal_FindOrCreateGlobalInterface", ReturnDummyInterface as usize);
+    exports.insert("SteamAPI_SetWarningMessageHook", GenericSteamApiStub as usize);
+    exports.insert("SteamAPI_ISteamClient_SetWarningMessageHook", GenericSteamApiStub as usize);
+    exports.insert("SteamAPI_ISteamUtils_SetWarningMessageHook", GenericSteamApiStub as usize);
 
     exports.insert("SteamClient", ReturnDummyInterface as usize);
     exports.insert("SteamAPI_SteamClient_v020", ReturnDummyInterface as usize);

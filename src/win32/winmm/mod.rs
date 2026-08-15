@@ -183,7 +183,9 @@ impl Drop for PulseStream {
 /// Minimal playback sink shared with the DirectSound facade.  Keeping the
 /// Pulse loader in WinMM means DirectSound and waveOut select the exact same
 /// PipeWire-Pulse/PulseAudio endpoint and avoids a second dynamic ABI shim.
-pub(crate) struct DesktopAudioStream(PulseStream);
+pub(crate) struct DesktopAudioStream {
+    sender: std::sync::mpsc::Sender<Vec<u8>>,
+}
 
 impl DesktopAudioStream {
     /// Opens a host playback stream for the PCM formats DirectSound games
@@ -202,17 +204,30 @@ impl DesktopAudioStream {
         };
         let bytes_per_sample = u32::from(bits / 8);
         let block_align = u32::from(channels).checked_mul(bytes_per_sample)?;
-        Some(Self(PulseStream::open(WaveFormat {
+        let pulse = PulseStream::open(WaveFormat {
             pulse_format,
             rate,
             channels: channels as u8,
             average_bytes_per_second: rate.checked_mul(block_align)?,
             block_align: block_align as u16,
-        })?))
+        })?;
+
+        let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::Builder::new()
+            .name("tuxexe-audio-sink".to_string())
+            .spawn(move || {
+                let mut pulse = pulse;
+                while let Ok(buffer) = receiver.recv() {
+                    pulse.write(&buffer);
+                }
+            })
+            .ok()?;
+
+        Some(Self { sender })
     }
 
     pub(crate) fn write(&mut self, bytes: &[u8]) -> bool {
-        self.0.write(bytes)
+        self.sender.send(bytes.to_vec()).is_ok()
     }
 }
 

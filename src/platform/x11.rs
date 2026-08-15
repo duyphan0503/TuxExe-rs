@@ -49,6 +49,11 @@ unsafe extern "C" fn x11_error_handler(
     0
 }
 
+unsafe extern "C" fn x11_io_error_handler(_display: *mut Display) -> std::os::raw::c_int {
+    tracing::warn!("Suppressed non-fatal X11 IO error");
+    0
+}
+
 fn init_x11() -> bool {
     let mut state = x11_state().lock().expect("x11 state poisoned");
     if state.is_some() {
@@ -58,13 +63,15 @@ fn init_x11() -> bool {
     eprintln!("[TuxExe] Initializing X11...");
 
     unsafe {
+        XInitThreads();
+        XSetErrorHandler(Some(x11_error_handler));
+        XSetIOErrorHandler(Some(x11_io_error_handler));
+
         let display = XOpenDisplay(std::ptr::null());
         if display.is_null() {
             eprintln!("[TuxExe] XOpenDisplay failed");
             return false;
         }
-
-        XSetErrorHandler(Some(x11_error_handler));
 
         eprintln!("[TuxExe] X11 display opened successfully");
 
@@ -455,7 +462,24 @@ fn xkeysym_to_vk(keysym: u64) -> u32 {
     }
 }
 
+static LAST_QUERY_POINTER_MS: AtomicUsize = AtomicUsize::new(0);
+
 pub fn query_pointer_root() -> Option<(i32, i32)> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as usize)
+        .unwrap_or(0);
+
+    let last = LAST_QUERY_POINTER_MS.load(Ordering::Relaxed);
+    if now_ms > last && now_ms - last < 16 {
+        let pos = crate::win32::user32::window::cursor_position()
+            .lock()
+            .map(|p| (p.x, p.y))
+            .ok();
+        return pos;
+    }
+    LAST_QUERY_POINTER_MS.store(now_ms, Ordering::Relaxed);
+
     let state = x11_state().lock().expect("x11 state poisoned");
     let state = state.as_ref()?;
     let display = state.display;
@@ -551,12 +575,38 @@ pub fn pump_x11_events() {
                 }
                 ConfigureNotify => {
                     let cfg = event.configure;
-                    let lparam = (cfg.width & 0xFFFF) as isize | (((cfg.height & 0xFFFF) as isize) << 16);
+                    let mut root_x = cfg.x;
+                    let mut root_y = cfg.y;
+                    let mut child: Window = 0;
+                    let _ = XTranslateCoordinates(
+                        display,
+                        x11_win,
+                        state.root_window,
+                        0,
+                        0,
+                        &mut root_x,
+                        &mut root_y,
+                        &mut child,
+                    );
+
+                    crate::win32::user32::update_window_rect(hwnd, root_x, root_y, cfg.width, cfg.height);
+
+                    let move_lparam = ((root_x as u16 as usize) | ((root_y as u16 as usize) << 16)) as isize;
+                    crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
+                        hwnd,
+                        message: 0x0003, // WM_MOVE
+                        wParam: 0,
+                        lParam: move_lparam,
+                        time: 0,
+                        ..Default::default()
+                    });
+
+                    let size_lparam = ((cfg.width as u16 as usize) | ((cfg.height as u16 as usize) << 16)) as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: 0x0005, // WM_SIZE
                         wParam: 0,
-                        lParam: lparam,
+                        lParam: size_lparam,
                         time: 0,
                         ..Default::default()
                     });
@@ -605,6 +655,7 @@ pub fn pump_x11_events() {
                 }
                 ButtonPress => {
                     let btn = event.button;
+                    crate::win32::user32::update_window_pos(hwnd, btn.x_root - btn.x, btn.y_root - btn.y);
                     crate::win32::user32::window::SetCursorPos(btn.x_root, btn.y_root);
                     let (msg_id, vk, wparam) = match btn.button {
                         1 => (0x0201, 0x01, 0x0001), // WM_LBUTTONDOWN, VK_LBUTTON, MK_LBUTTON
@@ -617,7 +668,7 @@ pub fn pump_x11_events() {
                     if vk != 0 {
                         crate::win32::user32::input::set_key_down(vk);
                     }
-                    let lparam = (btn.x & 0xFFFF) as isize | (((btn.y & 0xFFFF) as isize) << 16);
+                    let lparam = ((btn.x as u16 as usize) | ((btn.y as u16 as usize) << 16)) as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: msg_id,
@@ -629,6 +680,7 @@ pub fn pump_x11_events() {
                 }
                 ButtonRelease => {
                     let btn = event.button;
+                    crate::win32::user32::update_window_pos(hwnd, btn.x_root - btn.x, btn.y_root - btn.y);
                     crate::win32::user32::window::SetCursorPos(btn.x_root, btn.y_root);
                     let (msg_id, vk) = match btn.button {
                         1 => (0x0202, 0x01), // WM_LBUTTONUP, VK_LBUTTON
@@ -639,7 +691,7 @@ pub fn pump_x11_events() {
                     if vk != 0 {
                         crate::win32::user32::input::set_key_up(vk);
                     }
-                    let lparam = (btn.x & 0xFFFF) as isize | (((btn.y & 0xFFFF) as isize) << 16);
+                    let lparam = ((btn.x as u16 as usize) | ((btn.y as u16 as usize) << 16)) as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: msg_id,
@@ -651,12 +703,31 @@ pub fn pump_x11_events() {
                 }
                 MotionNotify => {
                     let mot = event.motion;
+                    crate::win32::user32::update_window_pos(hwnd, mot.x_root - mot.x, mot.y_root - mot.y);
                     crate::win32::user32::window::SetCursorPos(mot.x_root, mot.y_root);
-                    let lparam = (mot.x & 0xFFFF) as isize | (((mot.y & 0xFFFF) as isize) << 16);
+
+                    let mut wparam = 0usize;
+                    if (mot.state & (1 << 8)) != 0 {
+                        wparam |= 0x0001; // MK_LBUTTON
+                    }
+                    if (mot.state & (1 << 10)) != 0 {
+                        wparam |= 0x0002; // MK_RBUTTON
+                    }
+                    if (mot.state & (1 << 0)) != 0 {
+                        wparam |= 0x0004; // MK_SHIFT
+                    }
+                    if (mot.state & (1 << 2)) != 0 {
+                        wparam |= 0x0008; // MK_CONTROL
+                    }
+                    if (mot.state & (1 << 9)) != 0 {
+                        wparam |= 0x0010; // MK_MBUTTON
+                    }
+
+                    let lparam = ((mot.x as u16 as usize) | ((mot.y as u16 as usize) << 16)) as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: 0x0200, // WM_MOUSEMOVE
-                        wParam: 0,
+                        wParam: wparam,
                         lParam: lparam,
                         time: mot.time as u32,
                         pt: crate::win32::user32::Point { x: mot.x_root, y: mot.y_root },

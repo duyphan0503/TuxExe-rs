@@ -250,7 +250,7 @@ fn window_longs() -> &'static Mutex<std::collections::HashMap<(usize, i32), isiz
     WINDOW_LONGS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-fn cursor_position() -> &'static Mutex<super::Point> {
+pub(crate) fn cursor_position() -> &'static Mutex<super::Point> {
     static CURSOR_POS: OnceLock<Mutex<super::Point>> = OnceLock::new();
     CURSOR_POS.get_or_init(|| Mutex::new(super::Point { x: 0, y: 0 }))
 }
@@ -1975,19 +1975,6 @@ pub extern "win64" fn GetCursorPos(lp_point: *mut super::Point) -> i32 {
         return 0;
     }
 
-    let has_visible_window = super::window_registry()
-        .read()
-        .map(|reg| reg.values().any(|w| w.visible))
-        .unwrap_or(false);
-
-    if has_visible_window {
-        if let Some((root_x, root_y)) = crate::platform::x11::query_pointer_root() {
-            let mut pos = cursor_position().lock().expect("cursor position poisoned");
-            pos.x = root_x;
-            pos.y = root_y;
-        }
-    }
-
     let pos = *cursor_position().lock().expect("cursor position poisoned");
     unsafe {
         *lp_point = pos;
@@ -2529,15 +2516,21 @@ pub extern "win64" fn MsgWaitForMultipleObjectsEx(
 
     let wait_all = (flags & MWMO_WAITALL) != 0;
     let alertable = (flags & MWMO_ALERTABLE) != 0;
-    let current_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    let current_tid = crate::win32::kernel32::process::get_current_thread_id();
 
     let deadline = (milliseconds != u32::MAX)
         .then(|| Instant::now() + Duration::from_millis(milliseconds as u64));
 
+    let mut loop_count = 0u32;
     loop {
         if alertable && crate::win32::kernel32::process::execute_queued_apc(current_tid) {
             set_last_error(ERROR_SUCCESS);
             return WAIT_IO_COMPLETION;
+        }
+
+        if !message_queue().0.lock().expect("message queue poisoned").is_empty() {
+            set_last_error(ERROR_SUCCESS);
+            return WAIT_OBJECT_0 + n_count;
         }
 
         crate::platform::x11::pump_x11_events();
@@ -2561,7 +2554,15 @@ pub extern "win64" fn MsgWaitForMultipleObjectsEx(
             set_last_error(ERROR_SUCCESS);
             return WAIT_TIMEOUT;
         }
-        std::thread::sleep(Duration::from_millis(1));
+
+        loop_count = loop_count.saturating_add(1);
+        if loop_count < 16 {
+            std::hint::spin_loop();
+        } else if loop_count < 32 {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(Duration::from_micros(100));
+        }
     }
 }
 
@@ -3326,7 +3327,7 @@ mod tests {
             APC_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+        let tid = crate::win32::kernel32::process::get_current_thread_id();
         let ev = crate::nt_kernel::sync::create_event(false, false);
 
         // Queue APC for current thread

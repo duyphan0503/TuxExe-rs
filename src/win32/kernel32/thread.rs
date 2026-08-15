@@ -90,14 +90,19 @@ pub extern "win64" fn CreateThread(
     dwCreationFlags: u32,
     lpThreadId: *mut u32,
 ) -> Handle {
-    nt_thread::create_thread(
+    let handle = nt_thread::create_thread(
         lpThreadAttributes,
         dwStackSize,
         lpStartAddress,
         lpParameter,
         dwCreationFlags,
         lpThreadId,
-    )
+    );
+    if handle == crate::utils::handle::INVALID_HANDLE_VALUE {
+        0
+    } else {
+        handle
+    }
 }
 
 pub extern "win64" fn ExitThread(dwExitCode: u32) -> ! {

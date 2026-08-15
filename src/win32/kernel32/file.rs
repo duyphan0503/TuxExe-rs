@@ -91,11 +91,17 @@ fn next_temp_unique() -> u32 {
 }
 
 fn normalize_host_path(path: &str) -> String {
-    let (drives, special) = (
-        crate::filesystem::drives::DriveMap::default(),
-        crate::filesystem::path::SpecialFolders::from_host_env(),
-    );
-    crate::filesystem::path::windows_to_host(path, &drives, &special)
+    static DRIVES_AND_FOLDERS: std::sync::OnceLock<(
+        crate::filesystem::drives::DriveMap,
+        crate::filesystem::path::SpecialFolders,
+    )> = std::sync::OnceLock::new();
+    let (drives, special) = DRIVES_AND_FOLDERS.get_or_init(|| {
+        (
+            crate::filesystem::drives::DriveMap::default(),
+            crate::filesystem::path::SpecialFolders::from_host_env(),
+        )
+    });
+    crate::filesystem::path::windows_to_host(path, drives, special)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.replace('\\', "/"))
 }
@@ -1797,27 +1803,19 @@ pub extern "win64" fn flush_file_buffers(handle: Handle) -> i32 {
         return 1;
     }
 
-    let mut result = None;
-    global_table().with(handle, |obj| {
-        if let Some(file) = obj.as_any().downcast_ref::<crate::nt_kernel::file::FileHandle>() {
-            let rc = unsafe { libc::fsync(file.fd) };
-            result = Some(rc == 0);
-        }
-    });
+    let is_valid = global_table()
+        .with(handle, |obj| {
+            obj.as_any().is::<crate::nt_kernel::file::FileHandle>()
+                || obj.as_any().is::<crate::utils::handle::StdioHandle>()
+        })
+        .unwrap_or(false);
 
-    match result {
-        Some(true) => {
-            set_last_error(ERROR_SUCCESS);
-            1
-        }
-        Some(false) => {
-            set_last_error(ERROR_INVALID_PARAMETER);
-            0
-        }
-        None => {
-            set_last_error(ERROR_INVALID_HANDLE);
-            0
-        }
+    if is_valid {
+        set_last_error(ERROR_SUCCESS);
+        1
+    } else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        0
     }
 }
 
@@ -1864,7 +1862,7 @@ pub extern "win64" fn get_file_attributes_a(lp_file_name: *const i8) -> u32 {
         set_last_error(ERROR_INVALID_PARAMETER);
         return FILE_ATTRIBUTE_INVALID;
     };
-    tracing::info!(path = %path, "GetFileAttributesA");
+    tracing::trace!(path = %path, "GetFileAttributesA");
 
     match nt_query_information_by_path(&path) {
         Ok(info) => {

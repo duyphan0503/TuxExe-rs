@@ -138,6 +138,9 @@ fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Opt
             "__wine_dbg_header" => return Some(__wine_dbg_header as usize),
             "__wine_dbg_get_channel_flags" => return Some(__wine_dbg_get_channel_flags as usize),
             _ => {
+                if let Some(addr) = resolve_export_name(&crate::win32::ntdll::get_exports(), func_name) {
+                    return Some(addr);
+                }
                 if let Some(addr) = resolve_export_name(&msvcrt::get_exports(), func_name) {
                     return Some(addr);
                 }

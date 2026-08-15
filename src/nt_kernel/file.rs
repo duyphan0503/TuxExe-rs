@@ -85,14 +85,15 @@ fn errno_to_status(errno: i32) -> NtStatus {
     }
 }
 
-fn default_drives_and_folders() -> (DriveMap, SpecialFolders) {
-    (DriveMap::default(), SpecialFolders::from_host_env())
+fn default_drives_and_folders() -> &'static (DriveMap, SpecialFolders) {
+    static DRIVES_AND_FOLDERS: std::sync::OnceLock<(DriveMap, SpecialFolders)> = std::sync::OnceLock::new();
+    DRIVES_AND_FOLDERS.get_or_init(|| (DriveMap::default(), SpecialFolders::from_host_env()))
 }
 
 fn resolve_windows_path(windows_path: &str, create: bool) -> Result<PathBuf, NtStatus> {
     let (drives, special) = default_drives_and_folders();
     let translated =
-        windows_to_host(windows_path, &drives, &special).map_err(|_| STATUS_INVALID_PARAMETER)?;
+        windows_to_host(windows_path, drives, special).map_err(|_| STATUS_INVALID_PARAMETER)?;
 
     if create {
         return Ok(translated);

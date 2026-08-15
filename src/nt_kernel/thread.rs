@@ -187,8 +187,18 @@ impl HandleObject for ThreadHandleObject {
 #[derive(Debug)]
 struct ThreadExitSignal(u32);
 
+thread_local! {
+    static CACHED_NT_TID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn current_thread_id() -> u32 {
-    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+    let tid = CACHED_NT_TID.get();
+    if tid != 0 {
+        return tid;
+    }
+    let new_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    CACHED_NT_TID.set(new_tid);
+    new_tid
 }
 
 fn wait_for_start(control: &Arc<(Mutex<ThreadControl>, Condvar)>) {
@@ -280,7 +290,7 @@ pub fn create_thread(
     let start_address = start as usize;
     let parameter = parameter as usize;
     let control_clone = Arc::clone(&control);
-    let actual_stack_size = if stack_size > 0 { stack_size.max(4 * 1024 * 1024) } else { 4 * 1024 * 1024 };
+    let actual_stack_size = if stack_size > 0 { stack_size.max(512 * 1024) } else { 2 * 1024 * 1024 };
     let builder = thread::Builder::new().stack_size(actual_stack_size);
 
     let join_handle = match builder.spawn(move || {

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
 
@@ -23,9 +24,9 @@ pub struct RegistryValue {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RegistryStore {
-    db_path: PathBuf,
+    conn: Mutex<Connection>,
 }
 
 impl RegistryStore {
@@ -37,42 +38,45 @@ impl RegistryStore {
             PathBuf::from("file:tuxexe_reg?mode=memory&cache=shared"),
         ];
 
-        let mut last_err = None;
         for path in candidates {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let store = Self { db_path: path };
-            match store.init_schema() {
-                Ok(()) => return Ok(store),
-                Err(e) => {
-                    last_err = Some(e);
-                }
+            let conn_res = if path.to_string_lossy().starts_with("file:") {
+                Connection::open_with_flags(
+                    &path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                        | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+                )
+            } else {
+                Connection::open(&path)
+            };
+
+            if let Ok(conn) = conn_res {
+                let _ = conn.execute_batch(
+                    r#"
+                    PRAGMA synchronous = OFF;
+                    PRAGMA journal_mode = MEMORY;
+                    PRAGMA temp_store = MEMORY;
+                    CREATE TABLE IF NOT EXISTS reg (
+                        path TEXT NOT NULL COLLATE NOCASE,
+                        name TEXT NOT NULL COLLATE NOCASE,
+                        type INT NOT NULL,
+                        data BLOB NOT NULL,
+                        PRIMARY KEY(path, name)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_reg_path ON reg(path);
+                    "#,
+                );
+                return Ok(Self { conn: Mutex::new(conn) });
             }
         }
 
-        Err(last_err.unwrap_or_else(|| RegistryError::Sqlite(rusqlite::Error::InvalidPath(db_path))))
-    }
-
-    fn connect(&self) -> Result<Connection, RegistryError> {
-        let path_str = self.db_path.to_string_lossy();
-        if path_str.starts_with("file:") {
-            Connection::open_with_flags(
-                &self.db_path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-            )
-            .map_err(RegistryError::from)
-        } else {
-            Connection::open(&self.db_path).map_err(RegistryError::from)
-        }
-    }
-
-    fn init_schema(&self) -> Result<(), RegistryError> {
-        let conn = self.connect()?;
-        conn.execute_batch(
+        let in_mem = Connection::open_in_memory()?;
+        let _ = in_mem.execute_batch(
             r#"
+            PRAGMA synchronous = OFF;
             CREATE TABLE IF NOT EXISTS reg (
                 path TEXT NOT NULL COLLATE NOCASE,
                 name TEXT NOT NULL COLLATE NOCASE,
@@ -82,15 +86,15 @@ impl RegistryStore {
             );
             CREATE INDEX IF NOT EXISTS idx_reg_path ON reg(path);
             "#,
-        )?;
-        Ok(())
+        );
+        Ok(Self { conn: Mutex::new(in_mem) })
     }
 
     /// RegOpenKeyEx-like existence check.
     pub fn open_key_exists(&self, path: &str) -> Result<bool, RegistryError> {
         let path = normalize_path(path);
-        let conn = self.connect()?;
-        let mut stmt = conn.prepare("SELECT 1 FROM reg WHERE path = ?1 OR path LIKE ?2 LIMIT 1")?;
+        let conn = self.conn.lock().expect("registry lock poisoned");
+        let mut stmt = conn.prepare_cached("SELECT 1 FROM reg WHERE path = ?1 OR path LIKE ?2 LIMIT 1")?;
         let mut rows = stmt.query(params![path, format!("{path}\\%")])?;
         Ok(rows.next()?.is_some())
     }
@@ -103,8 +107,8 @@ impl RegistryStore {
     ) -> Result<Option<RegistryValue>, RegistryError> {
         let path = normalize_path(path);
         let name = normalize_name(name);
-        let conn = self.connect()?;
-        let mut stmt = conn.prepare("SELECT type, data FROM reg WHERE path = ?1 AND name = ?2")?;
+        let conn = self.conn.lock().expect("registry lock poisoned");
+        let mut stmt = conn.prepare_cached("SELECT type, data FROM reg WHERE path = ?1 AND name = ?2")?;
         let mut rows = stmt.query(params![path, name])?;
         if let Some(row) = rows.next()? {
             Ok(Some(RegistryValue { reg_type: row.get::<_, i64>(0)? as u32, data: row.get(1)? }))
@@ -123,19 +127,17 @@ impl RegistryStore {
     ) -> Result<(), RegistryError> {
         let path = normalize_path(path);
         let name = normalize_name(name);
-        let conn = self.connect()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO reg(path, name, type, data) VALUES (?1, ?2, ?3, ?4)",
-            params![path, name, reg_type as i64, data],
-        )?;
+        let conn = self.conn.lock().expect("registry lock poisoned");
+        let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO reg(path, name, type, data) VALUES (?1, ?2, ?3, ?4)")?;
+        stmt.execute(params![path, name, reg_type as i64, data])?;
         Ok(())
     }
 
     /// RegEnumKeyExA/W-like immediate subkey listing.
     pub fn enum_subkeys(&self, path: &str) -> Result<Vec<String>, RegistryError> {
         let path = normalize_path(path);
-        let conn = self.connect()?;
-        let mut stmt = conn.prepare("SELECT DISTINCT path FROM reg WHERE path LIKE ?1")?;
+        let conn = self.conn.lock().expect("registry lock poisoned");
+        let mut stmt = conn.prepare_cached("SELECT DISTINCT path FROM reg WHERE path LIKE ?1")?;
         let mut rows = stmt.query(params![format!("{path}\\%")])?;
 
         let mut subkeys = BTreeSet::new();
@@ -155,11 +157,9 @@ impl RegistryStore {
     /// RegDeleteKeyA/W-like delete branch.
     pub fn delete_key(&self, path: &str) -> Result<usize, RegistryError> {
         let path = normalize_path(path);
-        let conn = self.connect()?;
-        let affected = conn.execute(
-            "DELETE FROM reg WHERE path = ?1 OR path LIKE ?2",
-            params![path, format!("{path}\\%")],
-        )?;
+        let conn = self.conn.lock().expect("registry lock poisoned");
+        let mut stmt = conn.prepare_cached("DELETE FROM reg WHERE path = ?1 OR path LIKE ?2")?;
+        let affected = stmt.execute(params![path, format!("{path}\\%")])?;
         Ok(affected)
     }
 
@@ -167,11 +167,9 @@ impl RegistryStore {
     pub fn delete_value(&self, path: &str, name: Option<&str>) -> Result<usize, RegistryError> {
         let path = normalize_path(path);
         let name = normalize_name(name);
-        let conn = self.connect()?;
-        let affected = conn.execute(
-            "DELETE FROM reg WHERE path = ?1 AND name = ?2",
-            params![path, name],
-        )?;
+        let conn = self.conn.lock().expect("registry lock poisoned");
+        let mut stmt = conn.prepare_cached("DELETE FROM reg WHERE path = ?1 AND name = ?2")?;
+        let affected = stmt.execute(params![path, name])?;
         Ok(affected)
     }
 
@@ -183,8 +181,8 @@ impl RegistryStore {
     /// RegEnumValueA/W-like value listing for a specific key.
     pub fn enum_values(&self, path: &str) -> Result<Vec<(String, RegistryValue)>, RegistryError> {
         let path = normalize_path(path);
-        let conn = self.connect()?;
-        let mut stmt = conn.prepare("SELECT name, type, data FROM reg WHERE path = ?1 ORDER BY name ASC")?;
+        let conn = self.conn.lock().expect("registry lock poisoned");
+        let mut stmt = conn.prepare_cached("SELECT name, type, data FROM reg WHERE path = ?1 ORDER BY name ASC")?;
         let mut rows = stmt.query(params![path])?;
         let mut results = Vec::new();
         while let Some(row) = rows.next()? {
@@ -223,7 +221,7 @@ fn normalize_path(path: &str) -> String {
 }
 
 fn normalize_name(name: Option<&str>) -> String {
-    name.unwrap_or("").trim().to_string()
+    name.unwrap_or_default().trim().to_string()
 }
 
 #[cfg(test)]
@@ -233,7 +231,6 @@ mod tests {
     fn create_store() -> RegistryStore {
         let temp = tempfile::tempdir().expect("tempdir");
         let db_path = temp.path().join("registry.db");
-        // Keep tempdir alive by leaking for this short-lived test process.
         let _leaked = Box::leak(Box::new(temp));
         RegistryStore::new(db_path).expect("registry store")
     }

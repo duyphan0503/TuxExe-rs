@@ -1,53 +1,36 @@
-//! Case-insensitive file lookup — scan directory for case-folded match, cache results.
+//! High-performance concurrent case-insensitive file lookup with directory caching.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{OnceLock, RwLock};
 
-const DEFAULT_CACHE_CAPACITY: usize = 512;
-
-#[derive(Debug)]
-struct LruCache {
-    capacity: usize,
-    order: VecDeque<String>,
-    entries: HashMap<String, PathBuf>,
+struct CaseFoldCache {
+    entries: RwLock<HashMap<String, Option<PathBuf>>>,
 }
 
-impl LruCache {
-    fn new(capacity: usize) -> Self {
-        Self { capacity, order: VecDeque::new(), entries: HashMap::new() }
-    }
-
-    fn get(&mut self, key: &str) -> Option<PathBuf> {
-        let value = self.entries.get(key).cloned()?;
-        self.touch(key);
-        Some(value)
-    }
-
-    fn insert(&mut self, key: String, value: PathBuf) {
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key.clone(), value);
-            self.touch(&key);
-            return;
+impl CaseFoldCache {
+    fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::with_capacity(4096)),
         }
+    }
 
-        self.entries.insert(key.clone(), value);
-        self.order.push_back(key.clone());
+    fn get(&self, key: &str) -> Option<Option<PathBuf>> {
+        self.entries.read().ok()?.get(key).cloned()
+    }
 
-        while self.entries.len() > self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            } else {
-                break;
+    fn insert_batch(&self, batch: Vec<(String, PathBuf)>) {
+        if let Ok(mut guard) = self.entries.write() {
+            for (key, path) in batch {
+                guard.insert(key, Some(path));
             }
         }
     }
 
-    fn touch(&mut self, key: &str) {
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            self.order.remove(pos);
+    fn insert_miss(&self, key: String) {
+        if let Ok(mut guard) = self.entries.write() {
+            guard.insert(key, None);
         }
-        self.order.push_back(key.to_string());
     }
 }
 
@@ -55,47 +38,58 @@ fn cache_key(path: &Path) -> String {
     path.to_string_lossy().to_ascii_lowercase()
 }
 
-fn global_cache() -> &'static Mutex<LruCache> {
-    static CACHE: OnceLock<Mutex<LruCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(LruCache::new(DEFAULT_CACHE_CAPACITY)))
+fn global_cache() -> &'static CaseFoldCache {
+    static CACHE: OnceLock<CaseFoldCache> = OnceLock::new();
+    CACHE.get_or_init(CaseFoldCache::new)
 }
 
 /// Resolve a path using case-insensitive file name matching.
 ///
 /// If the exact path exists, returns it directly.
-/// Otherwise scans the parent directory for a case-insensitive filename match.
+/// Otherwise scans the parent directory for a case-insensitive filename match,
+/// caching all entries in that directory for fast subsequent lookups.
 pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
     if path.exists() {
         return Some(path.to_path_buf());
     }
 
     let key = cache_key(path);
-    if let Ok(mut cache) = global_cache().lock() {
-        if let Some(cached) = cache.get(&key) {
-            if cached.exists() {
-                return Some(cached);
-            }
-        }
+    if let Some(cached) = global_cache().get(&key) {
+        return cached;
     }
 
     let parent = path.parent()?;
     let file_name = path.file_name()?.to_string_lossy().to_string();
 
-    let candidate = std::fs::read_dir(parent).ok()?.filter_map(Result::ok).find_map(|entry| {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.eq_ignore_ascii_case(&file_name) {
-            Some(entry.path())
-        } else {
-            None
-        }
-    })?;
+    let Ok(dir_entries) = std::fs::read_dir(parent) else {
+        global_cache().insert_miss(key);
+        return None;
+    };
 
-    if let Ok(mut cache) = global_cache().lock() {
-        cache.insert(key, candidate.clone());
+    let mut batch = Vec::new();
+    let mut matched = None;
+
+    for entry in dir_entries.flatten() {
+        let entry_path = entry.path();
+        let entry_name = entry.file_name();
+        let entry_name_str = entry_name.to_string_lossy();
+        
+        let entry_key = cache_key(&entry_path);
+        if entry_name_str.eq_ignore_ascii_case(&file_name) {
+            matched = Some(entry_path.clone());
+        }
+        batch.push((entry_key, entry_path));
     }
 
-    Some(candidate)
+    if !batch.is_empty() {
+        global_cache().insert_batch(batch);
+    }
+
+    if matched.is_none() {
+        global_cache().insert_miss(key);
+    }
+
+    matched
 }
 
 #[cfg(test)]

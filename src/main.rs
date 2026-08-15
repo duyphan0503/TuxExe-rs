@@ -99,6 +99,48 @@ fn main() -> Result<()> {
                         let _ = std::env::set_current_dir(parent);
                     }
 
+                    // Set optimized DXVK and graphics performance variables if not overridden
+                    if std::env::var("DXVK_ASYNC").is_err() {
+                        std::env::set_var("DXVK_ASYNC", "1");
+                    }
+                    if std::env::var("DXVK_STATE_CACHE").is_err() {
+                        std::env::set_var("DXVK_STATE_CACHE", "1");
+                    }
+                    if std::env::var("DXVK_HUD").is_err() {
+                        std::env::set_var("DXVK_HUD", "fps,frametimes");
+                    }
+                    if std::env::var("DXVK_LOG_LEVEL").is_err() {
+                        std::env::set_var("DXVK_LOG_LEVEL", "none");
+                    }
+                    if std::env::var("DXVK_CONFIG").is_err() {
+                        std::env::set_var(
+                            "DXVK_CONFIG",
+                            "dxgi.syncInterval=0;dxgi.maxFrameLatency=3;d3d11.relaxedBarriers=True;dxvk.useRawSsbo=True;dxvk.enableAsync=true;dxvk.numCompilerThreads=6;d3d11.constantBufferRangeCheck=False;d3d11.zeroInit=False",
+                        );
+                    }
+                    if std::env::var("__GL_SYNC_TO_VBLANK").is_err() {
+                        std::env::set_var("__GL_SYNC_TO_VBLANK", "0");
+                    }
+                    if std::env::var("vblank_mode").is_err() {
+                        std::env::set_var("vblank_mode", "0");
+                    }
+
+                    // Auto-select dedicated NVIDIA GPU if available for hardware-accelerated 3D
+                    if std::path::Path::new("/usr/share/vulkan/icd.d/nvidia_icd.json").exists() {
+                        if std::env::var("__NV_PRIME_RENDER_OFFLOAD").is_err() {
+                            std::env::set_var("__NV_PRIME_RENDER_OFFLOAD", "1");
+                        }
+                        if std::env::var("__GLX_VENDOR_LIBRARY_NAME").is_err() {
+                            std::env::set_var("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
+                        }
+                        if std::env::var("__VK_LAYER_NV_optimus").is_err() {
+                            std::env::set_var("__VK_LAYER_NV_optimus", "NVIDIA_only");
+                        }
+                        if std::env::var("VK_DRIVER_FILES").is_err() {
+                            std::env::set_var("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/nvidia_icd.json");
+                        }
+                    }
+
                     if let Some(warning) = tuxexe_rs::wow64::enforce_native_x86_backend() {
                         warn!("{warning}");
                         eprintln!("warning: {warning}");

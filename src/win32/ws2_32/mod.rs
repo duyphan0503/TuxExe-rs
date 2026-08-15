@@ -723,26 +723,296 @@ pub extern "win64" fn select(
     ret
 }
 
+#[repr(C)]
+pub struct WinAddrInfoA {
+    pub ai_flags: c_int,
+    pub ai_family: c_int,
+    pub ai_socktype: c_int,
+    pub ai_protocol: c_int,
+    pub ai_addrlen: usize,
+    pub ai_canonname: *mut c_char,
+    pub ai_addr: *mut libc::sockaddr,
+    pub ai_next: *mut WinAddrInfoA,
+}
+
+#[repr(C)]
+pub struct WinAddrInfoW {
+    pub ai_flags: c_int,
+    pub ai_family: c_int,
+    pub ai_socktype: c_int,
+    pub ai_protocol: c_int,
+    pub ai_addrlen: usize,
+    pub ai_canonname: *mut u16,
+    pub ai_addr: *mut libc::sockaddr,
+    pub ai_next: *mut WinAddrInfoW,
+}
+
 pub extern "win64" fn getaddrinfo(
     node: *const c_char,
     service: *const c_char,
-    hints: *const libc::addrinfo,
-    res: *mut *mut libc::addrinfo,
+    hints: *const WinAddrInfoA,
+    res: *mut *mut WinAddrInfoA,
 ) -> i32 {
-    let ret = unsafe { libc::getaddrinfo(node, service, hints, res) };
-    if ret == 0 {
-        set_wsa_last_error(0);
-        return 0;
+    if res.is_null() {
+        set_wsa_last_error(WSAEINVAL);
+        return libc::EAI_FAIL;
+    }
+    unsafe { *res = ptr::null_mut(); }
+
+    let host_hints = if !hints.is_null() {
+        let h = unsafe { &*hints };
+        let mut hh: libc::addrinfo = unsafe { std::mem::zeroed() };
+        hh.ai_flags = h.ai_flags;
+        hh.ai_family = match h.ai_family {
+            WINDOWS_AF_INET6 => libc::AF_INET6,
+            other => other,
+        };
+        hh.ai_socktype = h.ai_socktype;
+        hh.ai_protocol = h.ai_protocol;
+        Some(hh)
+    } else {
+        None
+    };
+
+    let hints_ptr = host_hints.as_ref().map(|h| h as *const _).unwrap_or(ptr::null());
+    let mut host_res: *mut libc::addrinfo = ptr::null_mut();
+    let ret = unsafe { libc::getaddrinfo(node, service, hints_ptr, &mut host_res) };
+    if ret != 0 {
+        set_wsa_last_error(if ret == libc::EAI_NONAME { WSANO_DATA } else { WSAEINVAL });
+        return ret;
     }
 
-    // getaddrinfo uses EAI_* return values, not errno.
-    set_wsa_last_error(if ret == libc::EAI_NONAME { WSANO_DATA } else { WSAEINVAL });
-    ret
+    let mut head: *mut WinAddrInfoA = ptr::null_mut();
+    let mut tail: *mut WinAddrInfoA = ptr::null_mut();
+
+    let mut cur = host_res;
+    while !cur.is_null() {
+        let entry = unsafe { &*cur };
+
+        let canonname = if !entry.ai_canonname.is_null() {
+            unsafe { libc::strdup(entry.ai_canonname) }
+        } else {
+            ptr::null_mut()
+        };
+
+        let addr = if !entry.ai_addr.is_null() && entry.ai_addrlen > 0 {
+            let p = unsafe { libc::malloc(entry.ai_addrlen as usize) as *mut libc::sockaddr };
+            if !p.is_null() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        entry.ai_addr as *const u8,
+                        p as *mut u8,
+                        entry.ai_addrlen as usize,
+                    );
+                }
+            }
+            p
+        } else {
+            ptr::null_mut()
+        };
+
+        let node = Box::into_raw(Box::new(WinAddrInfoA {
+            ai_flags: entry.ai_flags,
+            ai_family: if entry.ai_family == libc::AF_INET6 {
+                WINDOWS_AF_INET6
+            } else {
+                entry.ai_family
+            },
+            ai_socktype: entry.ai_socktype,
+            ai_protocol: entry.ai_protocol,
+            ai_addrlen: entry.ai_addrlen as usize,
+            ai_canonname: canonname,
+            ai_addr: addr,
+            ai_next: ptr::null_mut(),
+        }));
+
+        if head.is_null() {
+            head = node;
+            tail = node;
+        } else {
+            unsafe {
+                (*tail).ai_next = node;
+            }
+            tail = node;
+        }
+
+        cur = entry.ai_next;
+    }
+
+    unsafe {
+        libc::freeaddrinfo(host_res);
+        *res = head;
+    }
+
+    set_wsa_last_error(0);
+    0
 }
 
-pub extern "win64" fn freeaddrinfo(res: *mut libc::addrinfo) {
+pub extern "win64" fn freeaddrinfo(res: *mut WinAddrInfoA) {
+    let mut cur = res;
+    while !cur.is_null() {
+        let next = unsafe { (*cur).ai_next };
+        unsafe {
+            if !(*cur).ai_canonname.is_null() {
+                libc::free((*cur).ai_canonname.cast());
+            }
+            if !(*cur).ai_addr.is_null() {
+                libc::free((*cur).ai_addr.cast());
+            }
+            drop(Box::from_raw(cur));
+        }
+        cur = next;
+    }
+}
+
+pub extern "win64" fn GetAddrInfoW(
+    node: *const u16,
+    service: *const u16,
+    hints: *const WinAddrInfoW,
+    res: *mut *mut WinAddrInfoW,
+) -> i32 {
+    if res.is_null() {
+        set_wsa_last_error(WSAEINVAL);
+        return libc::EAI_FAIL;
+    }
+    unsafe { *res = ptr::null_mut(); }
+
+    let node_utf8 = if !node.is_null() {
+        match unsafe { crate::utils::wide_string::from_wide_ptr(node) } {
+            Ok(s) => match std::ffi::CString::new(s) {
+                Ok(cs) => Some(cs),
+                Err(_) => return libc::EAI_FAIL,
+            },
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let service_utf8 = if !service.is_null() {
+        match unsafe { crate::utils::wide_string::from_wide_ptr(service) } {
+            Ok(s) => match std::ffi::CString::new(s) {
+                Ok(cs) => Some(cs),
+                Err(_) => return libc::EAI_FAIL,
+            },
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let a_hints = if !hints.is_null() {
+        let h = unsafe { &*hints };
+        Some(WinAddrInfoA {
+            ai_flags: h.ai_flags,
+            ai_family: h.ai_family,
+            ai_socktype: h.ai_socktype,
+            ai_protocol: h.ai_protocol,
+            ai_addrlen: h.ai_addrlen,
+            ai_canonname: ptr::null_mut(),
+            ai_addr: ptr::null_mut(),
+            ai_next: ptr::null_mut(),
+        })
+    } else {
+        None
+    };
+
+    let mut a_res: *mut WinAddrInfoA = ptr::null_mut();
+    let ret = getaddrinfo(
+        node_utf8.as_ref().map(|s| s.as_ptr()).unwrap_or(ptr::null()),
+        service_utf8.as_ref().map(|s| s.as_ptr()).unwrap_or(ptr::null()),
+        a_hints.as_ref().map(|h| h as *const _).unwrap_or(ptr::null()),
+        &mut a_res,
+    );
+
+    if ret != 0 {
+        return ret;
+    }
+
+    let mut head: *mut WinAddrInfoW = ptr::null_mut();
+    let mut tail: *mut WinAddrInfoW = ptr::null_mut();
+
+    let mut cur = a_res;
+    while !cur.is_null() {
+        let entry = unsafe { &*cur };
+
+        let canonname = if !entry.ai_canonname.is_null() {
+            let s = unsafe { std::ffi::CStr::from_ptr(entry.ai_canonname) }.to_string_lossy();
+            let mut u16_vec: Vec<u16> = s.encode_utf16().collect();
+            u16_vec.push(0);
+            let ptr = unsafe { libc::malloc(u16_vec.len() * 2) as *mut u16 };
+            if !ptr.is_null() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(u16_vec.as_ptr(), ptr, u16_vec.len());
+                }
+            }
+            ptr
+        } else {
+            ptr::null_mut()
+        };
+
+        let addr = if !entry.ai_addr.is_null() && entry.ai_addrlen > 0 {
+            let p = unsafe { libc::malloc(entry.ai_addrlen) as *mut libc::sockaddr };
+            if !p.is_null() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        entry.ai_addr as *const u8,
+                        p as *mut u8,
+                        entry.ai_addrlen,
+                    );
+                }
+            }
+            p
+        } else {
+            ptr::null_mut()
+        };
+
+        let node = Box::into_raw(Box::new(WinAddrInfoW {
+            ai_flags: entry.ai_flags,
+            ai_family: entry.ai_family,
+            ai_socktype: entry.ai_socktype,
+            ai_protocol: entry.ai_protocol,
+            ai_addrlen: entry.ai_addrlen,
+            ai_canonname: canonname,
+            ai_addr: addr,
+            ai_next: ptr::null_mut(),
+        }));
+
+        if head.is_null() {
+            head = node;
+            tail = node;
+        } else {
+            unsafe {
+                (*tail).ai_next = node;
+            }
+            tail = node;
+        }
+
+        cur = entry.ai_next;
+    }
+
+    freeaddrinfo(a_res);
     unsafe {
-        libc::freeaddrinfo(res);
+        *res = head;
+    }
+
+    0
+}
+
+pub extern "win64" fn FreeAddrInfoW(res: *mut WinAddrInfoW) {
+    let mut cur = res;
+    while !cur.is_null() {
+        let next = unsafe { (*cur).ai_next };
+        unsafe {
+            if !(*cur).ai_canonname.is_null() {
+                libc::free((*cur).ai_canonname.cast());
+            }
+            if !(*cur).ai_addr.is_null() {
+                libc::free((*cur).ai_addr.cast());
+            }
+            drop(Box::from_raw(cur));
+        }
+        cur = next;
     }
 }
 
@@ -1513,6 +1783,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("select", select as usize);
     exports.insert("getaddrinfo", getaddrinfo as usize);
     exports.insert("freeaddrinfo", freeaddrinfo as usize);
+    exports.insert("GetAddrInfoA", getaddrinfo as usize);
+    exports.insert("FreeAddrInfoA", freeaddrinfo as usize);
+    exports.insert("GetAddrInfoW", GetAddrInfoW as usize);
+    exports.insert("FreeAddrInfoW", FreeAddrInfoW as usize);
     exports.insert("WSAConnect", WSAConnect as usize);
     exports.insert("WSARecvDisconnect", WSARecvDisconnect as usize);
     exports.insert("WSADuplicateSocketW", WSADuplicateSocketW as usize);
@@ -1627,7 +1901,7 @@ mod tests {
     fn getaddrinfo_localhost_succeeds() {
         let _guard = crate::test_support::serial_guard();
         let host = CStr::from_bytes_with_nul(b"localhost\0").expect("cstr");
-        let mut res: *mut libc::addrinfo = ptr::null_mut();
+        let mut res: *mut WinAddrInfoA = ptr::null_mut();
         let ret = getaddrinfo(host.as_ptr(), ptr::null(), ptr::null(), &raw mut res);
         assert_eq!(ret, 0);
         assert!(!res.is_null());

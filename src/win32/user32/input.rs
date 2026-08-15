@@ -214,15 +214,6 @@ pub fn set_key_up(vk: u32) {
 }
 
 pub extern "win64" fn GetAsyncKeyState(v_key: i32) -> i16 {
-    let has_visible_window = crate::win32::user32::window_registry()
-        .read()
-        .map(|reg| reg.values().any(|w| w.visible))
-        .unwrap_or(false);
-
-    if has_visible_window {
-        let _ = crate::platform::x11::query_pointer_root();
-    }
-
     if v_key >= 0 && (v_key as usize) < KEY_STATE.len() {
         let state = KEY_STATE[v_key as usize].load(std::sync::atomic::Ordering::Relaxed);
         if (state & 0x80) != 0 {

@@ -118,11 +118,16 @@ pub extern "win64" fn PeekMessageA(
         return 0;
     }
 
-    crate::platform::x11::pump_x11_events();
     let remove = wRemoveMsg & PM_REMOVE != 0;
-    let Some(message) = peek_or_pop_filtered(hWnd, wMsgFilterMin, wMsgFilterMax, remove) else {
-        set_last_error(ERROR_SUCCESS);
-        return 0;
+    let message = if let Some(msg) = peek_or_pop_filtered(hWnd, wMsgFilterMin, wMsgFilterMax, remove) {
+        msg
+    } else {
+        crate::platform::x11::pump_x11_events();
+        let Some(msg) = peek_or_pop_filtered(hWnd, wMsgFilterMin, wMsgFilterMax, remove) else {
+            set_last_error(ERROR_SUCCESS);
+            return 0;
+        };
+        msg
     };
 
     unsafe {

@@ -129,7 +129,7 @@ pub extern "win64" fn free_console() -> i32 {
 }
 
 pub extern "win64" fn get_console_window() -> usize {
-    0
+    0x0001_0001
 }
 
 pub extern "win64" fn set_console_ctrl_handler(_handler_routine: *const c_void, _add: i32) -> i32 {
@@ -309,6 +309,63 @@ pub extern "win64" fn get_console_title_w(lp_console_title: *mut u16, n_size: u3
     super::error::set_last_error(0);
     0
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Coord {
+    pub x: i16,
+    pub y: i16,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SmallRect {
+    pub left: i16,
+    pub top: i16,
+    pub right: i16,
+    pub bottom: i16,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConsoleScreenBufferInfo {
+    pub dwSize: Coord,
+    pub dwCursorPosition: Coord,
+    pub wAttributes: u16,
+    pub srWindow: SmallRect,
+    pub dwMaximumWindowSize: Coord,
+}
+
+pub extern "win64" fn get_console_screen_buffer_info(
+    _hConsoleOutput: Handle,
+    lpConsoleScreenBufferInfo: *mut ConsoleScreenBufferInfo,
+) -> i32 {
+    if lpConsoleScreenBufferInfo.is_null() {
+        super::error::set_last_error(87);
+        return 0;
+    }
+    unsafe {
+        *lpConsoleScreenBufferInfo = ConsoleScreenBufferInfo {
+            dwSize: Coord { x: 80, y: 25 },
+            dwCursorPosition: Coord { x: 0, y: 0 },
+            wAttributes: 0x0007,
+            srWindow: SmallRect { left: 0, top: 0, right: 79, bottom: 24 },
+            dwMaximumWindowSize: Coord { x: 80, y: 25 },
+        };
+    }
+    super::error::set_last_error(0);
+    1
+}
+
+pub extern "win64" fn set_console_text_attribute(
+    _hConsoleOutput: Handle,
+    _wAttributes: u16,
+) -> i32 {
+    super::error::set_last_error(0);
+    1
+}
+
+
 
 #[cfg(test)]
 mod tests {

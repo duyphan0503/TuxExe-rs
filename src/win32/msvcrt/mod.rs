@@ -828,8 +828,10 @@ pub extern "win64" fn __p__commode() -> *mut i32 {
 }
 
 pub extern "win64" fn fflush(_stream: *mut c_void) -> i32 {
-    // Flush all streams. This is enough for current console-oriented smoke tests.
-    unsafe { libc::fflush(std::ptr::null_mut()) }
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    0
 }
 
 pub extern "win64" fn atoi(s: *const c_char) -> i32 {
