@@ -67,6 +67,9 @@ fn canonicalize_module_name(name: &str) -> String {
 
 fn normalize_api_set_name(canonical: &str) -> String {
     let lower = canonical.to_ascii_lowercase();
+    if lower == "kernelbase.dll" || lower == "kernelbase" {
+        return "kernel32.dll".to_string();
+    }
     if lower.starts_with("api-ms-win-crt-") {
         return "msvcrt.dll".to_string();
     }
@@ -98,6 +101,7 @@ fn is_reimplemented(canonical: &str) -> bool {
     matches!(
         canonical,
         "kernel32.dll"
+            | "kernelbase.dll"
             | "msvcrt.dll"
             | "ws2_32.dll"
             | "user32.dll"
@@ -131,6 +135,10 @@ fn is_reimplemented(canonical: &str) -> bool {
             | "vulkan-1.dll"
             | "steam_api64.dll"
             | "steam_api.dll"
+            | "comdlg32.dll"
+            | "winspool.drv"
+            | "winspool.dll"
+            | "shcore.dll"
     )
 }
 
@@ -481,6 +489,8 @@ pub fn load_library(module_name: &str) -> Result<usize, String> {
                 );
             }
 
+            let base_addr = native.mapped.base_addr();
+            let size = native.mapped.size();
             let mut guard = registry().write().expect("dll registry poisoned");
             if let Some(module) = guard.get_mut(&canonical) {
                 module.source = ModuleSource::Native(Box::new(native));
@@ -491,6 +501,8 @@ pub fn load_library(module_name: &str) -> Result<usize, String> {
                 module = %canonical,
                 path = %path.display(),
                 handle = format_args!("0x{handle:x}"),
+                base_addr = format_args!("0x{base_addr:x}"),
+                size = format_args!("0x{size:x}"),
                 "Loaded native module"
             );
             Ok(handle)

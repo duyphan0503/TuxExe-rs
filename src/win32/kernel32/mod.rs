@@ -105,6 +105,13 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetFileAttributesExW", file::get_file_attributes_ex_w as usize);
     exports.insert("GetFullPathNameA", file::get_full_path_name_a as usize);
     exports.insert("GetFullPathNameW", file::get_full_path_name_w as usize);
+    exports.insert("GetLongPathNameA", file::get_long_path_name_a as usize);
+    exports.insert("GetLongPathNameW", file::get_long_path_name_w as usize);
+    exports.insert("GetShortPathNameW", file::get_short_path_name_w as usize);
+    exports.insert("GetVolumePathNameW", file::get_volume_path_name_w as usize);
+    exports.insert("GetFinalPathNameByHandleW", file::get_final_path_name_by_handle_w as usize);
+    exports.insert("PathCchCombineEx", file::path_cch_combine_ex as usize);
+    exports.insert("PathCchSkipRoot", file::path_cch_skip_root as usize);
     exports.insert("GetFileInformationByHandle", file::get_file_information_by_handle as usize);
     exports.insert("PeekNamedPipe", file::peek_named_pipe as usize);
     exports.insert("FlushFileBuffers", file::flush_file_buffers as usize);
@@ -352,11 +359,14 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("VerLanguageNameW", string::VerLanguageNameW as usize);
     exports.insert("GetStringTypeW", string::GetStringTypeW as usize);
     exports.insert("LCMapStringW", string::LCMapStringW as usize);
+    exports.insert("CompareStringA", string::CompareStringW as usize);
     exports.insert("CompareStringW", string::CompareStringW as usize);
+    exports.insert("CompareStringOrdinal", string::CompareStringOrdinal as usize);
     exports.insert("GetDateFormatA", string::GetDateFormatA as usize);
     exports.insert("GetDateFormatW", string::GetDateFormatW as usize);
     exports.insert("GetTimeFormatA", string::GetTimeFormatA as usize);
     exports.insert("GetTimeFormatW", string::GetTimeFormatW as usize);
+    exports.insert("GetLocaleInfoA", string::GetLocaleInfoA as usize);
     exports.insert("GetLocaleInfoW", string::GetLocaleInfoW as usize);
     exports.insert("EnumSystemLocalesA", string::EnumSystemLocalesA as usize);
     exports.insert("EnumSystemLocalesW", string::EnumSystemLocalesW as usize);
@@ -461,7 +471,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     );
     exports.insert("GetLocaleInfoEx", process::get_locale_info_ex as usize);
     exports.insert("CompareStringEx", process::compare_string_ex as usize);
-    exports.insert("LCMapStringEx", process::lc_map_string_ex as usize);
+    exports.insert("LCMapStringEx", string::lc_map_string_ex as usize);
     exports.insert("AreFileApisANSI", process::are_file_apis_ansi as usize);
     exports.insert("SetThreadDescription", process::set_thread_description as usize);
     exports.insert("FlushProcessWriteBuffers", process::flush_process_write_buffers as usize);
@@ -469,7 +479,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("CreateSymbolicLinkW", process::create_symbolic_link_w as usize);
     exports.insert(
         "GetFileInformationByHandleEx",
-        process::get_file_information_by_handle_ex as usize,
+        file::get_file_information_by_handle_ex as usize,
     );
     exports.insert("SetFileInformationByHandle", process::set_file_information_by_handle as usize);
     exports.insert("CreateThreadpoolTimer", process::create_threadpool_timer as usize);

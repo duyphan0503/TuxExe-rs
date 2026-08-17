@@ -13,6 +13,9 @@ thread_local! {
 }
 
 pub extern "win64" fn get_last_error() -> u32 {
+    if let Some(err) = crate::threading::teb::with_current_teb(|teb| teb.last_error_value) {
+        return err;
+    }
     let err = LAST_ERROR.with(|e| e.get());
     trace!("GetLastError() -> {}", err);
     err
@@ -21,6 +24,9 @@ pub extern "win64" fn get_last_error() -> u32 {
 pub extern "win64" fn set_last_error(err_code: u32) {
     trace!("SetLastError({})", err_code);
     LAST_ERROR.with(|e| e.set(err_code));
+    let _ = crate::threading::teb::with_current_teb(|teb| {
+        teb.last_error_value = err_code;
+    });
 }
 
 static UNHANDLED_EXCEPTION_FILTER: AtomicUsize = AtomicUsize::new(0);

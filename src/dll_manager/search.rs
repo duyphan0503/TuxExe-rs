@@ -77,21 +77,32 @@ fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
 fn default_search_roots(mode: DllSearchMode) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
+    if let Some(user_dir) = user_dll_directory() {
+        push_unique_root(&mut roots, user_dir);
+    }
+
     if let Some(exe_dir) = configured_executable_directory() {
         push_unique_root(&mut roots, exe_dir.clone());
+        push_unique_root(&mut roots, exe_dir.join("lib").join("py3-windows-x86_64"));
+        push_unique_root(&mut roots, exe_dir.join("lib").join("windows-x86_64"));
+        push_unique_root(&mut roots, exe_dir.join("lib").join("py2-windows-x86_64"));
+        push_unique_root(&mut roots, exe_dir.join("lib").join("x86_64"));
+        push_unique_root(&mut roots, exe_dir.join("lib"));
+        push_unique_root(&mut roots, exe_dir.join("bin"));
         if let Ok(entries) = std::fs::read_dir(&exe_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() && path.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.ends_with("_Data")) {
+                if path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map_or(false, |n| n.ends_with("_Data"))
+                {
                     push_unique_root(&mut roots, path.join("Plugins").join("x86_64"));
                     push_unique_root(&mut roots, path.join("Plugins"));
                 }
             }
         }
-    }
-
-    if let Some(user_dir) = user_dll_directory() {
-        push_unique_root(&mut roots, user_dir);
     }
 
     if let Ok(cwd) = std::env::current_dir() {

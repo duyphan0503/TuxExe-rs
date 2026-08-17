@@ -1,6 +1,4 @@
-#![allow(non_snake_case)]
-
-// use std::ffi::c_void;
+use std::ffi::c_void;
 use crate::win32::kernel32::error::set_last_error;
 
 const ERROR_INVALID_PARAMETER: u32 = 87;
@@ -389,7 +387,31 @@ pub extern "win64" fn GetStringTypeW(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "win64" fn LCMapStringW(
     _locale: u32,
-    _dw_map_flags: u32,
+    dw_map_flags: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_dest_str: *mut u16,
+    cch_dest: i32,
+) -> i32 {
+    lc_map_string_impl(dw_map_flags, lp_src_str, cch_src, lp_dest_str, cch_dest)
+}
+
+pub extern "win64" fn lc_map_string_ex(
+    _lp_locale_name: *const u16,
+    dw_map_flags: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_dest_str: *mut u16,
+    cch_dest: i32,
+    _lp_version_information: *mut c_void,
+    _lp_reserved: *mut c_void,
+    _sort_handle: usize,
+) -> i32 {
+    lc_map_string_impl(dw_map_flags, lp_src_str, cch_src, lp_dest_str, cch_dest)
+}
+
+fn lc_map_string_impl(
+    dw_map_flags: u32,
     lp_src_str: *const u16,
     cch_src: i32,
     lp_dest_str: *mut u16,
@@ -400,7 +422,7 @@ pub extern "win64" fn LCMapStringW(
         return 0;
     }
 
-    let src_len = if cch_src == -1 {
+    let src_slice = if cch_src == -1 {
         let mut len = 0usize;
         loop {
             let ch = unsafe { *lp_src_str.add(len) };
@@ -409,26 +431,43 @@ pub extern "win64" fn LCMapStringW(
                 break;
             }
         }
-        len
+        unsafe { std::slice::from_raw_parts(lp_src_str, len) }
     } else {
-        cch_src as usize
+        unsafe { std::slice::from_raw_parts(lp_src_str, cch_src as usize) }
     };
 
-    if lp_dest_str.is_null() || cch_dest == 0 {
-        super::error::set_last_error(0);
-        return src_len as i32;
+    let s = String::from_utf16_lossy(src_slice);
+    let mapped = if dw_map_flags & 0x0000_0100 != 0 {
+        // LCMAP_LOWERCASE
+        s.to_lowercase()
+    } else if dw_map_flags & 0x0000_0200 != 0 {
+        // LCMAP_UPPERCASE
+        s.to_uppercase()
+    } else {
+        s
+    };
+
+    let mut wide: Vec<u16> = mapped.encode_utf16().collect();
+    if cch_src == -1 && !wide.ends_with(&[0]) {
+        wide.push(0);
     }
 
-    if (cch_dest as usize) < src_len {
+    let needed = wide.len() as i32;
+    if lp_dest_str.is_null() || cch_dest == 0 {
+        super::error::set_last_error(0);
+        return needed;
+    }
+
+    if cch_dest < needed {
         super::error::set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
         return 0;
     }
 
     unsafe {
-        std::ptr::copy_nonoverlapping(lp_src_str, lp_dest_str, src_len);
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_dest_str, wide.len());
     }
     super::error::set_last_error(0);
-    src_len as i32
+    needed
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -473,6 +512,84 @@ pub extern "win64" fn CompareStringW(
         std::cmp::Ordering::Equal => CSTR_EQUAL,
         std::cmp::Ordering::Greater => CSTR_GREATER_THAN,
     }
+}
+
+pub extern "win64" fn CompareStringOrdinal(
+    lp_string1: *const u16,
+    cch_count1: i32,
+    lp_string2: *const u16,
+    cch_count2: i32,
+    b_ignore_case: i32,
+) -> i32 {
+    if lp_string1.is_null() || lp_string2.is_null() || cch_count1 < -1 || cch_count2 < -1 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let read_len = |ptr: *const u16, len: i32| -> usize {
+        if len >= 0 {
+            len as usize
+        } else {
+            let mut idx = 0usize;
+            unsafe {
+                while *ptr.add(idx) != 0 {
+                    idx += 1;
+                }
+            }
+            idx
+        }
+    };
+
+    let len1 = read_len(lp_string1, cch_count1);
+    let len2 = read_len(lp_string2, cch_count2);
+    let s1 = unsafe { std::slice::from_raw_parts(lp_string1, len1) };
+    let s2 = unsafe { std::slice::from_raw_parts(lp_string2, len2) };
+
+    let ignore_case = b_ignore_case != 0;
+    for (&c1, &c2) in s1.iter().zip(s2.iter()) {
+        let ch1 = if ignore_case { (c1 as u8 as char).to_ascii_uppercase() as u16 } else { c1 };
+        let ch2 = if ignore_case { (c2 as u8 as char).to_ascii_uppercase() as u16 } else { c2 };
+        if ch1 < ch2 { return CSTR_LESS_THAN; }
+        if ch1 > ch2 { return CSTR_GREATER_THAN; }
+    }
+
+    set_last_error(0);
+    if s1.len() < s2.len() {
+        CSTR_LESS_THAN
+    } else if s1.len() > s2.len() {
+        CSTR_GREATER_THAN
+    } else {
+        CSTR_EQUAL
+    }
+}
+
+pub extern "win64" fn GetLocaleInfoA(
+    _locale: u32,
+    _lc_type: u32,
+    lp_lc_data: *mut i8,
+    cch_data: i32,
+) -> i32 {
+    if cch_data < 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let value = b"en-US\0";
+    if lp_lc_data.is_null() || cch_data == 0 {
+        set_last_error(0);
+        return value.len() as i32;
+    }
+
+    if (cch_data as usize) < value.len() {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(value.as_ptr() as *const i8, lp_lc_data, value.len());
+    }
+    set_last_error(0);
+    value.len() as i32
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]

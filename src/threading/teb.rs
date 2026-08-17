@@ -73,6 +73,7 @@ pub struct Teb {
 const _: () = {
     assert!(std::mem::offset_of!(Teb, tib) == 0x00);
     assert!(std::mem::offset_of!(Teb, peb) == 0x60);
+    assert!(std::mem::offset_of!(Teb, last_error_value) == 0x68);
     assert!(std::mem::offset_of!(Teb, tls_slots) == 0x1480);
     assert!(std::mem::offset_of!(Teb, tls_expansion_slots) == 0x5280);
 };

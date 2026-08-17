@@ -71,9 +71,49 @@ pub extern "win64" fn BCryptGenRandom(
     STATUS_SUCCESS
 }
 
+pub extern "win64" fn BCryptOpenAlgorithmProvider(
+    phAlgorithm: *mut usize,
+    _pszAlgId: *const u16,
+    _pszImplementation: *const u16,
+    _dwFlags: u32,
+) -> i32 {
+    if !phAlgorithm.is_null() {
+        unsafe {
+            *phAlgorithm = 0xBC00_0001;
+        }
+    }
+    STATUS_SUCCESS
+}
+
+pub extern "win64" fn BCryptCloseAlgorithmProvider(
+    _hAlgorithm: usize,
+    _dwFlags: u32,
+) -> i32 {
+    STATUS_SUCCESS
+}
+
+pub extern "win64" fn BCryptGetProperty(
+    _hObject: usize,
+    _pszProperty: *const u16,
+    _pbOutput: *mut u8,
+    _cbOutput: u32,
+    pcbResult: *mut u32,
+    _dwFlags: u32,
+) -> i32 {
+    if !pcbResult.is_null() {
+        unsafe {
+            *pcbResult = 0;
+        }
+    }
+    STATUS_SUCCESS
+}
+
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
     exports.insert("BCryptGenRandom", BCryptGenRandom as usize);
+    exports.insert("BCryptOpenAlgorithmProvider", BCryptOpenAlgorithmProvider as usize);
+    exports.insert("BCryptCloseAlgorithmProvider", BCryptCloseAlgorithmProvider as usize);
+    exports.insert("BCryptGetProperty", BCryptGetProperty as usize);
     exports
 }
 

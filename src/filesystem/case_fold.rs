@@ -43,10 +43,50 @@ fn global_cache() -> &'static CaseFoldCache {
     CACHE.get_or_init(CaseFoldCache::new)
 }
 
-/// Resolve a path using case-insensitive file and directory matching.
-///
-/// If the exact path exists, returns it directly.
-/// Otherwise traverses from the root component by component, matching directory and
+pub fn record_file_created(path: &Path) {
+    let key = cache_key(path);
+    if let Ok(mut guard) = global_cache().entries.write() {
+        guard.insert(key, Some(path.to_path_buf()));
+    }
+}
+
+pub fn record_file_deleted(path: &Path) {
+    let key = cache_key(path);
+    if let Ok(mut guard) = global_cache().entries.write() {
+        guard.remove(&key);
+        guard.insert(key, None);
+    }
+}
+
+fn normalize_numeric_key(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut chars = lower.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_ascii_digit() {
+            let mut digits = String::new();
+            digits.push(c);
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_digit() {
+                    digits.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            let trimmed = digits.trim_start_matches('0');
+            if trimmed.is_empty() {
+                out.push('0');
+            } else {
+                out.push_str(trimmed);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Resolve a path using case-insensitive file and directory matching.
 ///
 /// If the exact path exists, returns it directly.
@@ -57,15 +97,18 @@ pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    let key = cache_key(path);
-    if let Some(cached) = global_cache().get(&key) {
-        return cached;
-    }
-
     if path.exists() {
         let path_buf = path.to_path_buf();
+        let key = cache_key(path);
         global_cache().insert_batch(vec![(key, path_buf.clone())]);
         return Some(path_buf);
+    }
+
+    let key = cache_key(path);
+    if let Some(Some(cached)) = global_cache().get(&key) {
+        if cached.exists() {
+            return Some(cached);
+        }
     }
 
     // Resolve parent directory (fast via cache or single lookup)
@@ -81,8 +124,10 @@ pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
         if let Some(actual_parent) = resolved_parent {
             if let Some(file_name) = path.file_name() {
                 let file_name_str = file_name.to_string_lossy();
+                let target_numeric_key = normalize_numeric_key(&file_name_str);
                 if let Ok(dir_entries) = std::fs::read_dir(&actual_parent) {
                     let mut matched = None;
+                    let mut numeric_matched = None;
                     let mut batch = Vec::new();
                     for entry in dir_entries.flatten() {
                         let entry_path = entry.path();
@@ -91,13 +136,17 @@ pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
                         let entry_key = cache_key(&entry_path);
                         if entry_name_str.eq_ignore_ascii_case(&file_name_str) {
                             matched = Some(entry_path.clone());
+                        } else if matched.is_none()
+                            && normalize_numeric_key(&entry_name_str) == target_numeric_key
+                        {
+                            numeric_matched = Some(entry_path.clone());
                         }
                         batch.push((entry_key, entry_path));
                     }
                     if !batch.is_empty() {
                         global_cache().insert_batch(batch);
                     }
-                    if let Some(found) = matched {
+                    if let Some(found) = matched.or(numeric_matched) {
                         global_cache().insert_batch(vec![(key, found.clone())]);
                         return Some(found);
                     }
@@ -152,5 +201,23 @@ mod tests {
 
         let resolved = resolve_case_insensitive(&real_file).expect("resolved");
         assert_eq!(resolved, real_file);
+    }
+
+    #[test]
+    fn finds_numeric_normalized_match() {
+        let _guard = serial_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_file = temp.path().join("SaveMap3.png");
+        std::fs::write(&real_file, b"png_data").expect("write");
+
+        // Query with zero padding 'SaveMap03.png' should resolve to 'SaveMap3.png'
+        let lookup = temp.path().join("SaveMap03.png");
+        let resolved = resolve_case_insensitive(&lookup).expect("resolved");
+        assert_eq!(resolved, real_file);
+
+        // Query with lowercase 'savemap03.png' should also resolve
+        let lookup_lower = temp.path().join("savemap03.png");
+        let resolved_lower = resolve_case_insensitive(&lookup_lower).expect("resolved_lower");
+        assert_eq!(resolved_lower, real_file);
     }
 }

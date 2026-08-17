@@ -21,7 +21,7 @@ use crate::utils::handle::{
 use crate::utils::wide_string::from_wide_ptr;
 
 pub extern "win64" fn exit_process(exit_code: u32) {
-    trace!("ExitProcess({})", exit_code);
+    tracing::info!("kernel32 ExitProcess({})", exit_code);
     crate::runtime::telemetry::record(format!("guest_exit_code={exit_code}"));
     unsafe { libc::_exit(exit_code as i32) }
 }
@@ -2077,7 +2077,31 @@ pub extern "win64" fn set_dll_directory_a(lp_path_name: *const i8) -> i32 {
     let path = if lp_path_name.is_null() {
         None
     } else {
-        unsafe { CStr::from_ptr(lp_path_name) }.to_str().ok().map(std::path::PathBuf::from)
+        unsafe { CStr::from_ptr(lp_path_name) }.to_str().ok().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                let drives = crate::filesystem::drives::DriveMap::default();
+                let special = crate::filesystem::path::SpecialFolders::from_host_env();
+                if let Ok(host_path) =
+                    crate::filesystem::path::windows_to_host(s, &drives, &special)
+                {
+                    Some(host_path)
+                } else {
+                    let normalized = s.replace('\\', "/");
+                    let p = std::path::PathBuf::from(normalized);
+                    if p.is_relative() {
+                        if let Ok(cwd) = std::env::current_dir() {
+                            Some(cwd.join(p))
+                        } else {
+                            Some(p)
+                        }
+                    } else {
+                        Some(p)
+                    }
+                }
+            }
+        })
     };
     tracing::info!(?path, "SetDllDirectoryA called");
     crate::dll_manager::search::set_user_dll_directory(path);
@@ -2089,7 +2113,31 @@ pub extern "win64" fn set_dll_directory_w(lp_path_name: *const u16) -> i32 {
     let path = if lp_path_name.is_null() {
         None
     } else {
-        unsafe { from_wide_ptr(lp_path_name) }.ok().map(std::path::PathBuf::from)
+        unsafe { from_wide_ptr(lp_path_name) }.ok().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                let drives = crate::filesystem::drives::DriveMap::default();
+                let special = crate::filesystem::path::SpecialFolders::from_host_env();
+                if let Ok(host_path) =
+                    crate::filesystem::path::windows_to_host(&s, &drives, &special)
+                {
+                    Some(host_path)
+                } else {
+                    let normalized = s.replace('\\', "/");
+                    let p = std::path::PathBuf::from(normalized);
+                    if p.is_relative() {
+                        if let Ok(cwd) = std::env::current_dir() {
+                            Some(cwd.join(p))
+                        } else {
+                            Some(p)
+                        }
+                    } else {
+                        Some(p)
+                    }
+                }
+            }
+        })
     };
     tracing::info!(?path, "SetDllDirectoryW called");
     crate::dll_manager::search::set_user_dll_directory(path);

@@ -6,6 +6,8 @@ pub mod input;
 pub mod message;
 pub mod window;
 
+pub use window::{set_focused_hwnd, set_foreground_hwnd};
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicU16, AtomicUsize, Ordering},
@@ -449,13 +451,7 @@ pub(crate) fn message_matches_filter(
 }
 
 pub(crate) fn now_ms() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return 0;
-    };
-
-    duration.as_millis().min(u32::MAX as u128) as u32
+    crate::win32::kernel32::time::get_tick_count()
 }
 
 pub fn get_exports() -> HashMap<&'static str, usize> {
@@ -508,6 +504,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetWindowLongPtrW", window::GetWindowLongPtrW as usize);
     exports.insert("LoadIconA", window::LoadIconA as usize);
     exports.insert("LoadIconW", window::LoadIconW as usize);
+    exports.insert("CreateIconIndirect", window::CreateIconIndirect as usize);
     exports.insert("DestroyIcon", window::DestroyIcon as usize);
     exports.insert("LoadCursorA", window::LoadCursorA as usize);
     exports.insert("LoadCursorW", window::LoadCursorW as usize);
@@ -581,6 +578,27 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetWindowTextW", window::SetWindowTextW as usize);
     exports.insert("SetWindowTextA", window::SetWindowTextA as usize);
     exports.insert("ValidateRect", window::ValidateRect as usize);
+    exports.insert("InvalidateRect", window::InvalidateRect as usize);
+    exports.insert("GetUpdateRect", window::GetUpdateRect as usize);
+    exports.insert("GetUpdateRgn", window::GetUpdateRgn as usize);
+    exports.insert("RedrawWindow", window::RedrawWindow as usize);
+    exports.insert("SetLayeredWindowAttributes", window::SetLayeredWindowAttributes as usize);
+    exports.insert("GetLayeredWindowAttributes", window::GetLayeredWindowAttributes as usize);
+    exports.insert("SetPropA", window::SetPropA as usize);
+    exports.insert("SetPropW", window::SetPropW as usize);
+    exports.insert("GetPropA", window::GetPropA as usize);
+    exports.insert("GetPropW", window::GetPropW as usize);
+    exports.insert("RemovePropA", window::RemovePropA as usize);
+    exports.insert("RemovePropW", window::RemovePropW as usize);
+    exports.insert("SetProcessDPIAware", window::SetProcessDPIAware as usize);
+    exports.insert("SetProcessDpiAwarenessContext", window::SetProcessDpiAwarenessContext as usize);
+    exports.insert("GetProcessDpiAwarenessInternal", window::GetProcessDpiAwarenessInternal as usize);
+    exports.insert("GetProcessDpiAwareness", window::GetProcessDpiAwarenessInternal as usize);
+    exports.insert("SetProcessDpiAwareness", SetProcessDpiAwarenessInternal as usize);
+    exports.insert("SetProcessDpiAwarenessInternal", SetProcessDpiAwarenessInternal as usize);
+    exports.insert("GetDpiForMonitor", GetDpiForMonitorInternal as usize);
+    exports.insert("GetDpiForMonitorInternal", GetDpiForMonitorInternal as usize);
+    exports.insert("GetDpiForSystem", window::GetDpiForSystem as usize);
     exports.insert("ClipCursor", window::ClipCursor as usize);
     exports.insert("ShowCursor", window::ShowCursor as usize);
     exports.insert("DragDetect", window::DragDetect as usize);
@@ -644,6 +662,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetDlgItemTextW", message::SetDlgItemTextW as usize);
     exports.insert("RegisterWindowMessageA", message::RegisterWindowMessageA as usize);
     exports.insert("RegisterWindowMessageW", message::RegisterWindowMessageW as usize);
+    exports.insert("GetMessageTime", message::GetMessageTime as usize);
+    exports.insert("GetMessagePos", message::GetMessagePos as usize);
     exports.insert("GetMessageExtraInfo", message::GetMessageExtraInfo as usize);
     exports.insert("SetMessageExtraInfo", message::SetMessageExtraInfo as usize);
 
@@ -658,6 +678,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("RegisterTouchWindow", window::RegisterTouchWindow as usize);
     exports.insert("UnregisterTouchWindow", window::UnregisterTouchWindow as usize);
     exports.insert("IsTouchWindow", window::IsTouchWindow as usize);
+    exports.insert("CloseTouchInputHandle", window::CloseTouchInputHandle as usize);
+    exports.insert("GetTouchInputInfo", window::GetTouchInputInfo as usize);
     exports.insert("GetPointerType", window::GetPointerType as usize);
     exports.insert("GetPointerTouchInfo", window::GetPointerTouchInfo as usize);
     exports.insert("GetPointerTouchInfoHistory", window::GetPointerTouchInfoHistory as usize);

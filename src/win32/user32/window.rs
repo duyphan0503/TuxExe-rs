@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -270,6 +271,14 @@ fn foreground_window() -> &'static AtomicUsize {
     &FOREGROUND_HWND
 }
 
+pub fn set_foreground_hwnd(hwnd: usize) {
+    foreground_window().store(hwnd, Ordering::Relaxed);
+}
+
+pub fn set_focused_hwnd(hwnd: usize) {
+    focused_window().store(hwnd, Ordering::Relaxed);
+}
+
 fn is_desktop_window(hwnd: usize) -> bool {
     hwnd == DESKTOP_WINDOW_HANDLE
 }
@@ -433,13 +442,15 @@ pub extern "win64" fn CreateWindowExA(
     let actual_y = if y == i32::MIN || y < 0 { 100 } else { y };
     let actual_w = if nWidth <= 0 || nWidth == i32::MIN { 1280 } else { nWidth };
     let actual_h = if nHeight <= 0 || nHeight == i32::MIN { 720 } else { nHeight };
+    const WS_VISIBLE: u32 = 0x10000000;
+    let is_visible = (_dwStyle & WS_VISIBLE) != 0;
 
     // Try to create a REAL X11 window first
-    if let Some(hwnd) = crate::platform::x11::create_x11_window(&title, x, y, nWidth, nHeight) {
-        tracing::info!(hwnd = format_args!("0x{:x}", hwnd), "X11 window created successfully");
-        let native_window_id = crate::platform::x11::hwnd_to_x11_window(hwnd).unwrap_or(0);
+    let hwnd = if let Some(x11_hwnd) = crate::platform::x11::create_x11_window_with_visibility(&title, x, y, nWidth, nHeight, is_visible) {
+        tracing::info!(hwnd = format_args!("0x{:x}", x11_hwnd), is_visible, "X11 window created successfully");
+        let native_window_id = crate::platform::x11::hwnd_to_x11_window(x11_hwnd).unwrap_or(0);
         create_window_with_parent_and_handle(
-            hwnd,
+            x11_hwnd,
             wnd_proc,
             title,
             actual_x,
@@ -449,30 +460,50 @@ pub extern "win64" fn CreateWindowExA(
             hWndParent,
             native_window_id,
         );
+        x11_hwnd
+    } else {
+        // Fallback to fake window if X11 unavailable
+        create_window_with_parent(wnd_proc, title, actual_x, actual_y, actual_w, actual_h, hWndParent)
+    };
 
-        enqueue_message(Msg {
-            hwnd,
-            message: WM_CREATE,
-            wParam: 0,
-            lParam: lpParam as isize,
-            time: 0,
-            ..Default::default()
-        });
-
-        set_last_error(ERROR_SUCCESS);
-        return hwnd;
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    struct CreateStructA {
+        lpCreateParams: *const c_void,
+        hInstance: usize,
+        hMenu: usize,
+        hwndParent: usize,
+        cy: i32,
+        cx: i32,
+        y: i32,
+        x: i32,
+        style: u32,
+        lpszName: *const i8,
+        lpszClass: *const i8,
+        dwExStyle: u32,
     }
 
-    // Fallback to fake window if X11 unavailable
-    let hwnd = create_window_with_parent(wnd_proc, title, actual_x, actual_y, actual_w, actual_h, hWndParent);
-    enqueue_message(Msg {
-        hwnd,
-        message: WM_CREATE,
-        wParam: 0,
-        lParam: lpParam as isize,
-        time: 0,
-        ..Default::default()
-    });
+    let cs = CreateStructA {
+        lpCreateParams: lpParam,
+        hInstance: _hInstance,
+        hMenu: _hMenu,
+        hwndParent: hWndParent,
+        cy: actual_h,
+        cx: actual_w,
+        y: actual_y,
+        x: actual_x,
+        style: _dwStyle,
+        lpszName: lpWindowName,
+        lpszClass: lpClassName,
+        dwExStyle: _dwExStyle,
+    };
+
+    if let Some(proc) = wnd_proc {
+        unsafe {
+            proc(hwnd, 0x0081 /* WM_NCCREATE */, 0, &cs as *const _ as isize);
+            proc(hwnd, WM_CREATE, 0, &cs as *const _ as isize);
+        }
+    }
 
     set_last_error(ERROR_SUCCESS);
     hwnd
@@ -543,6 +574,8 @@ pub extern "win64" fn ShowWindow(hWnd: usize, nCmdShow: i32) -> i32 {
     });
 
     if visible {
+        foreground_window().store(hWnd, Ordering::Relaxed);
+        focused_window().store(hWnd, Ordering::Relaxed);
         enqueue_message(Msg {
             hwnd: hWnd,
             message: WM_ACTIVATEAPP,
@@ -715,6 +748,7 @@ pub extern "win64" fn SetForegroundWindow(hWnd: usize) -> i32 {
     }
 
     foreground_window().store(hWnd, Ordering::Relaxed);
+    focused_window().store(hWnd, Ordering::Relaxed);
     if hWnd != 0 {
         if is_window_visible(hWnd) {
             let _ = crate::platform::x11::raise_x11_window(hWnd);
@@ -764,6 +798,7 @@ pub extern "win64" fn AllowSetForegroundWindow(_dwProcessId: u32) -> i32 {
 }
 
 pub extern "win64" fn DestroyWindow(hWnd: usize) -> i32 {
+    crate::platform::x11::destroy_x11_window(hWnd);
     if !remove_window(hWnd) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
@@ -978,14 +1013,30 @@ pub extern "win64" fn MonitorFromRect(lprc: *const Rect, dwFlags: u32) -> usize 
     }
 }
 
+static HDC_TO_HWND: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+
+fn hdc_map() -> &'static Mutex<HashMap<usize, usize>> {
+    HDC_TO_HWND.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn hdc_to_hwnd(hdc: usize) -> Option<usize> {
+    hdc_map().lock().ok()?.get(&hdc).copied()
+}
+
 pub extern "win64" fn GetDC(hWnd: usize) -> usize {
     if hWnd != 0 && !is_desktop_window(hWnd) && !window_exists(hWnd) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
 
-    // Return a deterministic, non-zero pseudo HDC for compatibility.
-    let hdc = 0x40_0000usize.wrapping_add(hWnd & 0xFFFF);
+    let hdc = if hWnd != 0 {
+        hWnd | 0x40_0000_0000usize
+    } else {
+        0x40_0000usize
+    };
+    if let Ok(mut map) = hdc_map().lock() {
+        map.insert(hdc, hWnd);
+    }
     set_last_error(ERROR_SUCCESS);
     hdc
 }
@@ -1319,6 +1370,177 @@ pub extern "win64" fn SetCursor(hCursor: usize) -> usize {
     previous
 }
 
+pub extern "win64" fn CreateIconIndirect(_piconinfo: *const std::ffi::c_void) -> usize {
+    static NEXT_ICON: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0x30000);
+    let hicon = NEXT_ICON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    set_last_error(ERROR_SUCCESS);
+    hicon
+}
+
+static WINDOW_PROPS: OnceLock<Mutex<HashMap<(usize, String), usize>>> = OnceLock::new();
+
+fn window_props() -> &'static Mutex<HashMap<(usize, String), usize>> {
+    WINDOW_PROPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub extern "win64" fn SetPropA(hWnd: usize, lpString: *const i8, hData: usize) -> i32 {
+    let name = if (lpString as usize) < 0x10000 {
+        format!("#{}", lpString as usize)
+    } else {
+        unsafe { c_string(lpString) }.unwrap_or_default()
+    };
+    if let Ok(mut props) = window_props().lock() {
+        props.insert((hWnd, name), hData);
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn SetPropW(hWnd: usize, lpString: *const u16, hData: usize) -> i32 {
+    let name = if (lpString as usize) < 0x10000 {
+        format!("#{}", lpString as usize)
+    } else {
+        unsafe { wide_string(lpString) }.unwrap_or_default()
+    };
+    if let Ok(mut props) = window_props().lock() {
+        props.insert((hWnd, name), hData);
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn GetPropA(hWnd: usize, lpString: *const i8) -> usize {
+    let name = if (lpString as usize) < 0x10000 {
+        format!("#{}", lpString as usize)
+    } else {
+        unsafe { c_string(lpString) }.unwrap_or_default()
+    };
+    let val = window_props().lock().ok().and_then(|p| p.get(&(hWnd, name)).copied()).unwrap_or(0);
+    set_last_error(ERROR_SUCCESS);
+    val
+}
+
+pub extern "win64" fn GetPropW(hWnd: usize, lpString: *const u16) -> usize {
+    let name = if (lpString as usize) < 0x10000 {
+        format!("#{}", lpString as usize)
+    } else {
+        unsafe { wide_string(lpString) }.unwrap_or_default()
+    };
+    let val = window_props().lock().ok().and_then(|p| p.get(&(hWnd, name)).copied()).unwrap_or(0);
+    set_last_error(ERROR_SUCCESS);
+    val
+}
+
+pub extern "win64" fn RemovePropA(hWnd: usize, lpString: *const i8) -> usize {
+    let name = if (lpString as usize) < 0x10000 {
+        format!("#{}", lpString as usize)
+    } else {
+        unsafe { c_string(lpString) }.unwrap_or_default()
+    };
+    let val = window_props().lock().ok().and_then(|mut p| p.remove(&(hWnd, name))).unwrap_or(0);
+    set_last_error(ERROR_SUCCESS);
+    val
+}
+
+pub extern "win64" fn RemovePropW(hWnd: usize, lpString: *const u16) -> usize {
+    let name = if (lpString as usize) < 0x10000 {
+        format!("#{}", lpString as usize)
+    } else {
+        unsafe { wide_string(lpString) }.unwrap_or_default()
+    };
+    let val = window_props().lock().ok().and_then(|mut p| p.remove(&(hWnd, name))).unwrap_or(0);
+    set_last_error(ERROR_SUCCESS);
+    val
+}
+
+pub extern "win64" fn SetProcessDPIAware() -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn SetProcessDpiAwarenessContext(_value: isize) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn GetProcessDpiAwarenessInternal(_hprocess: usize, level: *mut i32) -> i32 {
+    if !level.is_null() {
+        unsafe { *level = 2; /* PROCESS_PER_MONITOR_DPI_AWARE */ }
+    }
+    0 // S_OK
+}
+
+pub extern "win64" fn GetDpiForSystem() -> u32 {
+    96
+}
+
+pub extern "win64" fn InvalidateRect(_hWnd: usize, _lpRect: *const c_void, _bErase: i32) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn GetUpdateRect(_hWnd: usize, lpRect: *mut Rect, _bErase: i32) -> i32 {
+    if !lpRect.is_null() {
+        let (w, h) = window_rect(_hWnd).map(|r| (r.2, r.3)).unwrap_or((1920, 1080));
+        unsafe {
+            (*lpRect).left = 0;
+            (*lpRect).top = 0;
+            (*lpRect).right = w;
+            (*lpRect).bottom = h;
+        }
+    }
+    1
+}
+
+pub extern "win64" fn GetUpdateRgn(_hWnd: usize, _hRgn: usize, _bErase: i32) -> i32 {
+    2 // SIMPLEREGION
+}
+
+pub extern "win64" fn RedrawWindow(
+    _hWnd: usize,
+    _lprcUpdate: *const c_void,
+    _hrgnUpdate: usize,
+    _flags: u32,
+) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn SetLayeredWindowAttributes(
+    _hwnd: usize,
+    _crKey: u32,
+    _bAlpha: u8,
+    _dwFlags: u32,
+) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn GetLayeredWindowAttributes(
+    _hwnd: usize,
+    _pcrKey: *mut u32,
+    _pbAlpha: *mut u8,
+    _pdwFlags: *mut u32,
+) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn CloseTouchInputHandle(_hTouchInput: usize) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn GetTouchInputInfo(
+    _hTouchInput: usize,
+    _cInputs: u32,
+    _pInputs: *mut c_void,
+    _cbSize: i32,
+) -> i32 {
+    set_last_error(ERROR_SUCCESS);
+    0
+}
+
 pub extern "win64" fn OpenClipboard(_hWndNewOwner: usize) -> i32 {
     set_last_error(ERROR_SUCCESS);
     1
@@ -1529,7 +1751,7 @@ unsafe fn populate_dev_mode_blob(blob: *mut u8, dm_size: u16, is_wide: bool, wid
         *(blob.add(height_offset).cast::<u32>()) = height;
     }
     if dm_size >= freq_offset + 4 {
-        *(blob.add(freq_offset).cast::<u32>()) = 60;
+        *(blob.add(freq_offset).cast::<u32>()) = crate::platform::x11::get_screen_refresh_rate();
     }
 }
 
@@ -2324,21 +2546,34 @@ pub extern "win64" fn GetClientRect(hWnd: usize, lpRect: *mut Rect) -> i32 {
     }
 }
 
-/// Set the window title (Unicode). Compatibility stub — title is not rendered.
+/// Set the window title (Unicode).
 pub extern "win64" fn SetWindowTextW(hWnd: usize, lpString: *const u16) -> i32 {
     if hWnd != 0 && !is_desktop_window(hWnd) && !window_exists(hWnd) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
-    let _ = lpString; // title tracking not needed for headless compat
+    if !lpString.is_null() {
+        if let Some(title) = unsafe { wide_string(lpString) } {
+            let _ = crate::platform::x11::set_x11_window_title(hWnd, &title);
+        }
+    }
     set_last_error(ERROR_SUCCESS);
     1
 }
 
-/// Set the window title (ANSI). Delegates to W variant.
+/// Set the window title (ANSI).
 pub extern "win64" fn SetWindowTextA(hWnd: usize, lpString: *const i8) -> i32 {
-    let _ = lpString;
-    SetWindowTextW(hWnd, std::ptr::null())
+    if hWnd != 0 && !is_desktop_window(hWnd) && !window_exists(hWnd) {
+        set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+    if !lpString.is_null() {
+        if let Some(title) = unsafe { c_string(lpString) } {
+            let _ = crate::platform::x11::set_x11_window_title(hWnd, &title);
+        }
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
 }
 
 /// Get the window title into a UTF-16 buffer. Returns character count.
@@ -2821,8 +3056,6 @@ mod tests {
         assert_ne!(hwnd, 0);
 
         let mut msg = Msg::default();
-        assert_eq!(message::GetMessageA(&raw mut msg, hwnd, 0, 0), 1);
-        assert_eq!(msg.message, WM_CREATE);
 
         // This must work for both fallback and native X11 windows.  A native
         // HWND not registered in USER32 is rejected here, which prevents GL

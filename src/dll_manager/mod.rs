@@ -123,14 +123,42 @@ pub extern "win64" fn __wine_dbg_get_channel_flags(_ch: *const libc::c_char) -> 
     0
 }
 
+fn normalize_dll_base_name(dll_name: &str) -> String {
+    let dll_lower = dll_name.to_lowercase();
+    let base_name = if let Some(idx) = dll_lower.find('.') {
+        &dll_lower[..idx]
+    } else {
+        &dll_lower
+    };
+
+    if base_name == "kernelbase" {
+        "kernel32".to_string()
+    } else if base_name.starts_with("api-ms-win-crt-") {
+        "msvcrt".to_string()
+    } else if base_name.starts_with("api-ms-win-core-")
+        || base_name.starts_with("api-ms-win-shcore-")
+        || base_name.starts_with("api-ms-win-appmodel-")
+        || base_name.starts_with("api-ms-win-devices-")
+    {
+        "kernel32".to_string()
+    } else if base_name.starts_with("api-ms-win-security-")
+        || base_name.starts_with("api-ms-win-eventing-")
+        || base_name.starts_with("api-ms-win-service-")
+    {
+        "advapi32".to_string()
+    } else if base_name.starts_with("ext-ms-win-ntuser-") {
+        "user32".to_string()
+    } else if base_name.starts_with("ext-ms-win-gdi-") {
+        "gdi32".to_string()
+    } else {
+        base_name.to_string()
+    }
+}
+
 /// Resolves an import in a static reimplemented DLL.
 /// Returns the address of the function if found, or 0 if not implemented.
 fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Option<usize> {
-    let dll_lower = dll_name.to_lowercase();
-
-    // Ignore extensions
-    let base_name =
-        if let Some(idx) = dll_lower.find('.') { &dll_lower[..idx] } else { &dll_lower };
+    let base_name = normalize_dll_base_name(dll_name);
 
     if base_name == "ntdll" {
         match func_name {
@@ -151,7 +179,7 @@ fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Opt
         }
     }
 
-    match base_name {
+    match base_name.as_str() {
         "kernel32" => resolve_export_name(&kernel32::get_exports(), func_name),
         // UCRT and the legacy MSVCRT exports used by the current games share
         // this implementation.  Falling through to the generic stub makes
@@ -159,7 +187,7 @@ fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Opt
         // a misleading crash much later in Unity startup.
         "msvcrt" | "ucrtbase" => resolve_export_name(&msvcrt::get_exports(), func_name),
         "ws2_32" | "iphlpapi" => resolve_export_name(&ws2_32::get_exports(), func_name),
-        "user32" => resolve_export_name(&user32::get_exports(), func_name),
+        "user32" | "shcore" => resolve_export_name(&user32::get_exports(), func_name),
         "gdi32" => resolve_export_name(&gdi32::get_exports(), func_name),
         "unityplayer" => resolve_export_name(&unityplayer::get_exports(), func_name),
         "dinput8" => resolve_export_name(&crate::win32::dinput8::get_exports(), func_name),
@@ -173,7 +201,15 @@ fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Opt
         "shlwapi" => resolve_export_name(&shlwapi::get_exports(), func_name),
         "setupapi" => resolve_export_name(&setupapi::get_exports(), func_name),
         "shell32" => resolve_export_name(&shell32::get_exports(), func_name),
-        "opengl32" => resolve_export_name(&opengl32::get_exports(), func_name),
+        "opengl32" => {
+            if let Some(addr) = resolve_export_name(&opengl32::get_exports(), func_name) {
+                Some(addr)
+            } else if func_name.starts_with("gl") {
+                opengl32::resolve_gl_function(func_name)
+            } else {
+                None
+            }
+        }
         "oleaut32" => resolve_export_name(&oleaut32::get_exports(), func_name),
         "imm32" => resolve_export_name(&imm32::get_exports(), func_name),
         "winhttp" => resolve_export_name(&winhttp::get_exports(), func_name),
@@ -184,6 +220,8 @@ fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Opt
         "dxgi" => resolve_export_name(&dxgi::get_exports(), func_name),
         "vulkan-1" | "winevulkan" => resolve_export_name(&crate::win32::vulkan::get_exports(), func_name),
         "steam_api64" | "steam_api" => crate::win32::steam_api64::resolve_export(func_name),
+        "comdlg32" => resolve_export_name(&crate::win32::comdlg32::get_exports(), func_name),
+        "winspool" | "winspool.drv" => resolve_export_name(&crate::win32::winspool::get_exports(), func_name),
         _ => None,
     }
 }
@@ -195,14 +233,13 @@ fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Opt
 /// that need to distinguish that fallback from a real export should use
 /// [`resolve_export_status`].
 pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
-    let dll_lower = dll_name.to_lowercase();
-    let base_name = dll_lower.split('.').next().unwrap_or(&dll_lower);
+    let base_name = normalize_dll_base_name(dll_name);
 
     if let Some(addr) = resolve_explicit_reimplemented_export(dll_name, func_name) {
         trace!("Resolved {}!{} -> {:#x}", base_name, func_name, addr);
         addr
     } else if matches!(
-        base_name,
+        base_name.as_str(),
         "kernel32"
             | "msvcrt"
             | "ws2_32"
@@ -235,6 +272,10 @@ pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
             | "iphlpapi"
             | "vulkan-1"
             | "winevulkan"
+            | "comdlg32"
+            | "winspool"
+            | "winspool.drv"
+            | "shcore"
     ) {
         tracing::warn!("{}!{} requested but not explicitly defined — providing generic stub", base_name, func_name);
         msvcrt::generic_msvcrt_stub as usize

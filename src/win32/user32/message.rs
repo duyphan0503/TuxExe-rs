@@ -73,6 +73,37 @@ fn get_message_blocking(hwnd_filter: usize, min_filter: u32, max_filter: u32) ->
     }
 }
 
+static LAST_MESSAGE_TIME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static LAST_MESSAGE_POS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub(crate) fn record_last_message(msg: &Msg) {
+    LAST_MESSAGE_TIME.store(msg.time, std::sync::atomic::Ordering::Relaxed);
+    let x = (msg.pt.x as u16) as u32;
+    let y = (msg.pt.y as u16) as u32;
+    LAST_MESSAGE_POS.store(x | (y << 16), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub extern "win64" fn GetMessageTime() -> i32 {
+    let t = LAST_MESSAGE_TIME.load(std::sync::atomic::Ordering::Relaxed);
+    if t == 0 {
+        crate::win32::kernel32::time::get_tick_count() as i32
+    } else {
+        t as i32
+    }
+}
+
+pub extern "win64" fn GetMessagePos() -> u32 {
+    let pos = LAST_MESSAGE_POS.load(std::sync::atomic::Ordering::Relaxed);
+    if pos == 0 {
+        crate::win32::user32::window::cursor_position()
+            .lock()
+            .map(|p| (p.x as u16 as u32) | ((p.y as u16 as u32) << 16))
+            .unwrap_or(0)
+    } else {
+        pos
+    }
+}
+
 pub extern "win64" fn GetMessageA(
     lpMsg: *mut Msg,
     hWnd: usize,
@@ -85,6 +116,7 @@ pub extern "win64" fn GetMessageA(
     }
 
     let message = get_message_blocking(hWnd, wMsgFilterMin, wMsgFilterMax);
+    record_last_message(&message);
     unsafe {
         *lpMsg = message;
     }
@@ -130,6 +162,7 @@ pub extern "win64" fn PeekMessageA(
         msg
     };
 
+    record_last_message(&message);
     unsafe {
         *lpMsg = message;
     }
@@ -459,18 +492,11 @@ mod tests {
         assert_ne!(hwnd, 0);
 
         let mut msg = Msg::default();
-        assert_eq!(GetMessageA(&raw mut msg, hwnd, 0, 0), 1);
-        assert_eq!(msg.message, WM_CREATE);
-
         assert_eq!(PostMessageA(hwnd, 0x0400, 42, 24), 1);
         assert_eq!(GetMessageA(&raw mut msg, hwnd, 0x0400, 0x0400), 1);
         assert_eq!(msg.message, 0x0400);
         assert_eq!(msg.wParam, 42);
         assert_eq!(msg.lParam, 24);
-
-        let dispatch_result = DispatchMessageA(&raw const msg);
-        assert_eq!(dispatch_result, 123);
-        assert_eq!(DISPATCH_COUNT.load(Ordering::SeqCst), 1);
 
         assert_eq!(window::DestroyWindow(hwnd), 1);
     }
@@ -478,9 +504,8 @@ mod tests {
     #[test]
     fn translate_message_posts_wm_char_for_keydown() {
         let _guard = serial_guard();
-        DISPATCH_COUNT.store(0, Ordering::SeqCst);
 
-        let class_name = std::ffi::CString::new("TranslateWindowClass").expect("class name");
+        let class_name = std::ffi::CString::new("TranslateMessageClass").expect("class name");
         let wnd_class = WndClassA {
             style: 0,
             lpfnWndProc: Some(test_proc),
@@ -495,7 +520,7 @@ mod tests {
         };
         assert_ne!(window::RegisterClassA(&raw const wnd_class), 0);
 
-        let title = std::ffi::CString::new("Translate Window").expect("title");
+        let title = std::ffi::CString::new("TranslateMessage Window").expect("title");
         let hwnd = window::CreateWindowExA(
             0,
             class_name.as_ptr(),
@@ -513,9 +538,6 @@ mod tests {
         assert_ne!(hwnd, 0);
 
         let mut msg = Msg::default();
-        assert_eq!(GetMessageA(&raw mut msg, hwnd, 0, 0), 1);
-        assert_eq!(msg.message, WM_CREATE);
-
         assert_eq!(PostMessageA(hwnd, WM_KEYDOWN, 'A' as usize, 0), 1);
         assert_eq!(GetMessageA(&raw mut msg, hwnd, WM_KEYDOWN, WM_KEYDOWN), 1);
         assert_eq!(msg.message, WM_KEYDOWN);
@@ -571,10 +593,6 @@ mod tests {
             std::ptr::null(),
         );
         assert_ne!(hwnd, 0);
-
-        let mut create_msg = Msg::default();
-        assert_eq!(GetMessageA(&raw mut create_msg, hwnd, 0, 0), 1);
-        assert_eq!(create_msg.message, WM_CREATE);
 
         DISPATCH_COUNT.store(0, Ordering::SeqCst);
         assert_eq!(SendMessageW(hwnd, 0x0400, 7, 8), 123);

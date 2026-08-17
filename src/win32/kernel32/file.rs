@@ -106,6 +106,34 @@ fn normalize_host_path(path: &str) -> String {
         .unwrap_or_else(|_| path.replace('\\', "/"))
 }
 
+pub(crate) fn resolve_host_path_for_read(path: &str) -> Option<PathBuf> {
+    let host_str = normalize_host_path(path);
+    let p = PathBuf::from(host_str);
+    if p.exists() {
+        return Some(p);
+    }
+    crate::filesystem::case_fold::resolve_case_insensitive(&p)
+}
+
+pub(crate) fn resolve_host_path_for_write(path: &str) -> PathBuf {
+    let host_str = normalize_host_path(path);
+    let p = PathBuf::from(host_str);
+    if p.exists() {
+        return p;
+    }
+    if let Some(resolved) = crate::filesystem::case_fold::resolve_case_insensitive(&p) {
+        return resolved;
+    }
+    if let Some(parent) = p.parent() {
+        if let Some(actual_parent) = crate::filesystem::case_fold::resolve_case_insensitive(parent) {
+            if let Some(file_name) = p.file_name() {
+                return actual_parent.join(file_name);
+            }
+        }
+    }
+    p
+}
+
 fn is_windows_absolute_path(path: &str) -> bool {
     let bytes = path.as_bytes();
     path.starts_with("\\\\")
@@ -323,10 +351,48 @@ pub extern "win64" fn get_volume_information_w(
     1
 }
 
+#[derive(Debug, Clone)]
+struct FindEntry {
+    file_name: String,
+    is_dir: bool,
+    file_size: u64,
+    modified_unix: i64,
+}
+
 #[derive(Debug)]
 struct FindFileHandle {
-    entries: Vec<String>,
+    entries: Vec<FindEntry>,
     cursor: AtomicUsize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Win32FindDataA {
+    dw_file_attributes: u32,
+    ft_creation_time: FileTime,
+    ft_last_access_time: FileTime,
+    ft_last_write_time: FileTime,
+    n_file_size_high: u32,
+    n_file_size_low: u32,
+    dw_reserved0: u32,
+    dw_reserved1: u32,
+    c_file_name: [u8; 260],
+    c_alternate_file_name: [u8; 14],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Win32FindDataW {
+    dw_file_attributes: u32,
+    ft_creation_time: FileTime,
+    ft_last_access_time: FileTime,
+    ft_last_write_time: FileTime,
+    n_file_size_high: u32,
+    n_file_size_low: u32,
+    dw_reserved0: u32,
+    dw_reserved1: u32,
+    c_file_name: [u16; 260],
+    c_alternate_file_name: [u16; 14],
 }
 
 #[repr(C)]
@@ -454,10 +520,19 @@ fn to_disposition(dw_creation_disposition: u32) -> Option<CreateDisposition> {
 }
 
 fn access_flags(dw_desired_access: u32) -> (bool, bool) {
-    let generic_read = 0x8000_0000u32;
-    let generic_write = 0x4000_0000u32;
-    let read = (dw_desired_access & generic_read) != 0 || dw_desired_access == 0;
-    let write = (dw_desired_access & generic_write) != 0;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const GENERIC_ALL: u32 = 0x1000_0000;
+    const FILE_READ_DATA: u32 = 0x0001;
+    const FILE_WRITE_DATA: u32 = 0x0002;
+    const FILE_APPEND_DATA: u32 = 0x0004;
+    const FILE_GENERIC_READ: u32 = 0x0012_0089;
+    const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+    const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+
+    let read = (dw_desired_access & (GENERIC_READ | GENERIC_ALL | FILE_READ_DATA | FILE_GENERIC_READ | FILE_ALL_ACCESS)) != 0
+        || dw_desired_access == 0;
+    let write = (dw_desired_access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_GENERIC_WRITE | FILE_ALL_ACCESS)) != 0;
     (read, write)
 }
 
@@ -631,10 +706,7 @@ pub extern "win64" fn create_file_a(
         return INVALID_HANDLE_VALUE;
     };
     let (read, write) = access_flags(dw_desired_access);
-    // Asset streaming can legitimately open the same Unity resource thousands
-    // of times.  Keep this at debug so diagnostic output does not itself
-    // become the game's I/O bottleneck.
-    tracing::debug!(path = %path, "CreateFileA");
+    tracing::info!(path = %path, ?read, ?write, "CreateFileA");
 
     match nt_create_file(&path, read, write, disposition) {
         Ok(handle) => {
@@ -726,7 +798,21 @@ pub extern "win64" fn create_directory_a(
     };
 
     let host_path = normalize_host_path(&path);
-    match std::fs::create_dir(&host_path) {
+    let host_path_buf = PathBuf::from(&host_path);
+    let target = if let Some(parent) = host_path_buf.parent() {
+        if let Some(actual_parent) = crate::filesystem::case_fold::resolve_case_insensitive(parent) {
+            if let Some(name) = host_path_buf.file_name() {
+                actual_parent.join(name)
+            } else {
+                host_path_buf
+            }
+        } else {
+            host_path_buf
+        }
+    } else {
+        host_path_buf
+    };
+    match std::fs::create_dir(&target) {
         Ok(_) => {
             set_last_error(ERROR_SUCCESS);
             1
@@ -736,7 +822,7 @@ pub extern "win64" fn create_directory_a(
             0
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            if std::fs::create_dir_all(&host_path).is_ok() {
+            if std::fs::create_dir_all(&target).is_ok() {
                 set_last_error(ERROR_SUCCESS);
                 return 1;
             }
@@ -806,9 +892,13 @@ pub extern "win64" fn delete_file_a(lp_file_name: *const i8) -> i32 {
         return 0;
     };
 
-    let host_path = normalize_host_path(&path);
+    let Some(host_path) = resolve_host_path_for_read(&path) else {
+        set_last_error(ERROR_FILE_NOT_FOUND);
+        return 0;
+    };
     match std::fs::remove_file(&host_path) {
         Ok(_) => {
+            crate::filesystem::case_fold::record_file_deleted(&host_path);
             set_last_error(ERROR_SUCCESS);
             1
         }
@@ -849,21 +939,20 @@ pub extern "win64" fn copy_file_a(
         return 0;
     };
 
-    let src_host = normalize_host_path(&src_path);
-    let dst_host = normalize_host_path(&dst_path);
-
-    if !std::path::Path::new(&src_host).exists() {
+    let Some(src_host) = resolve_host_path_for_read(&src_path) else {
         set_last_error(ERROR_FILE_NOT_FOUND);
         return 0;
-    }
+    };
+    let dst_host = resolve_host_path_for_write(&dst_path);
 
-    if b_fail_if_exists != 0 && std::path::Path::new(&dst_host).exists() {
+    if b_fail_if_exists != 0 && dst_host.exists() {
         set_last_error(ERROR_FILE_EXISTS);
         return 0;
     }
 
     match std::fs::copy(&src_host, &dst_host) {
         Ok(_) => {
+            crate::filesystem::case_fold::record_file_created(&dst_host);
             set_last_error(ERROR_SUCCESS);
             1
         }
@@ -918,16 +1007,11 @@ pub extern "win64" fn move_file_ex_a(
         return 0;
     };
 
-    let src_host = normalize_host_path(&src_path);
-    let dst_host = normalize_host_path(&dst_path);
-
-    let src = std::path::Path::new(&src_host);
-    let dst = std::path::Path::new(&dst_host);
-
-    if !src.exists() {
+    let Some(src) = resolve_host_path_for_read(&src_path) else {
         set_last_error(ERROR_FILE_NOT_FOUND);
         return 0;
-    }
+    };
+    let dst = resolve_host_path_for_write(&dst_path);
 
     if dst.exists() {
         if (dw_flags & MOVEFILE_REPLACE_EXISTING) == 0 {
@@ -936,21 +1020,26 @@ pub extern "win64" fn move_file_ex_a(
         }
 
         let remove_result =
-            if dst.is_dir() { std::fs::remove_dir_all(dst) } else { std::fs::remove_file(dst) };
+            if dst.is_dir() { std::fs::remove_dir_all(&dst) } else { std::fs::remove_file(&dst) };
         if remove_result.is_err() {
             set_last_error(ERROR_ACCESS_DENIED);
             return 0;
         }
+        crate::filesystem::case_fold::record_file_deleted(&dst);
     }
 
-    match std::fs::rename(src, dst) {
+    match std::fs::rename(&src, &dst) {
         Ok(_) => {
+            crate::filesystem::case_fold::record_file_deleted(&src);
+            crate::filesystem::case_fold::record_file_created(&dst);
             set_last_error(ERROR_SUCCESS);
             1
         }
         Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {
             // Cross-device move fallback for regular files.
-            if std::fs::copy(src, dst).is_ok() && std::fs::remove_file(src).is_ok() {
+            if std::fs::copy(&src, &dst).is_ok() && std::fs::remove_file(&src).is_ok() {
+                crate::filesystem::case_fold::record_file_deleted(&src);
+                crate::filesystem::case_fold::record_file_created(&dst);
                 set_last_error(ERROR_SUCCESS);
                 1
             } else {
@@ -1027,40 +1116,44 @@ pub extern "win64" fn replace_file_a(
         return 0;
     };
 
-    let replaced_host = normalize_host_path(&replaced_path);
-    let replacement_host = normalize_host_path(&replacement_path);
-    let replaced = std::path::Path::new(&replaced_host);
-    let replacement = std::path::Path::new(&replacement_host);
-
-    if !replaced.exists() || !replacement.exists() {
+    let Some(replaced) = resolve_host_path_for_read(&replaced_path) else {
         set_last_error(ERROR_FILE_NOT_FOUND);
         return 0;
-    }
+    };
+    let Some(replacement) = resolve_host_path_for_read(&replacement_path) else {
+        set_last_error(ERROR_FILE_NOT_FOUND);
+        return 0;
+    };
 
     if !lp_backup_file_name.is_null() {
         if let Some(backup_path) = unsafe { c_string(lp_backup_file_name) } {
-            let backup_host = normalize_host_path(&backup_path);
-            if std::fs::copy(replaced, &backup_host).is_err() {
+            let backup_host = resolve_host_path_for_write(&backup_path);
+            if std::fs::copy(&replaced, &backup_host).is_err() {
                 set_last_error(ERROR_ACCESS_DENIED);
                 return 0;
             }
+            crate::filesystem::case_fold::record_file_created(&backup_host);
         }
     }
 
-    if std::fs::remove_file(replaced).is_err() {
+    if std::fs::remove_file(&replaced).is_err() {
         set_last_error(ERROR_ACCESS_DENIED);
         return 0;
     }
 
-    match std::fs::rename(replacement, replaced) {
+    match std::fs::rename(&replacement, &replaced) {
         Ok(_) => {
+            crate::filesystem::case_fold::record_file_deleted(&replacement);
+            crate::filesystem::case_fold::record_file_created(&replaced);
             set_last_error(ERROR_SUCCESS);
             1
         }
         Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {
-            if std::fs::copy(replacement, replaced).is_ok()
-                && std::fs::remove_file(replacement).is_ok()
+            if std::fs::copy(&replacement, &replaced).is_ok()
+                && std::fs::remove_file(&replacement).is_ok()
             {
+                crate::filesystem::case_fold::record_file_deleted(&replacement);
+                crate::filesystem::case_fold::record_file_created(&replaced);
                 set_last_error(ERROR_SUCCESS);
                 1
             } else {
@@ -1271,6 +1364,181 @@ pub extern "win64" fn get_full_path_name_a(
     }
     set_last_error(ERROR_SUCCESS);
     bytes.len() as u32
+}
+
+pub extern "win64" fn get_long_path_name_w(
+    lpsz_short_path: *const u16,
+    lpsz_long_path: *mut u16,
+    cch_buffer: u32,
+) -> u32 {
+    if lpsz_short_path.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let Some(path) = (unsafe { wide_string(lpsz_short_path) }) else {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let needed = wide.len() as u32;
+    if cch_buffer == 0 || lpsz_long_path.is_null() {
+        return needed;
+    }
+    if cch_buffer < needed {
+        return needed;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), lpsz_long_path, wide.len());
+    }
+    needed - 1
+}
+
+pub extern "win64" fn get_long_path_name_a(
+    lpsz_short_path: *const i8,
+    lpsz_long_path: *mut i8,
+    cch_buffer: u32,
+) -> u32 {
+    if lpsz_short_path.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let Some(path) = (unsafe { c_string(lpsz_short_path) }) else {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    };
+    let bytes = path.as_bytes();
+    let needed = (bytes.len() + 1) as u32;
+    if cch_buffer == 0 || lpsz_long_path.is_null() {
+        return needed;
+    }
+    if cch_buffer < needed {
+        return needed;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lpsz_long_path as *mut u8, bytes.len());
+        *lpsz_long_path.add(bytes.len()) = 0;
+    }
+    needed - 1
+}
+
+pub extern "win64" fn get_short_path_name_w(
+    lpsz_long_path: *const u16,
+    lpsz_short_path: *mut u16,
+    cch_buffer: u32,
+) -> u32 {
+    get_long_path_name_w(lpsz_long_path, lpsz_short_path, cch_buffer)
+}
+
+pub extern "win64" fn get_volume_path_name_w(
+    lpsz_file_name: *const u16,
+    lpsz_volume_path_name: *mut u16,
+    cch_buffer: u32,
+) -> i32 {
+    if lpsz_file_name.is_null() || lpsz_volume_path_name.is_null() || cch_buffer < 4 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let root = [b'Z' as u16, b':' as u16, b'\\' as u16, 0u16];
+    unsafe {
+        std::ptr::copy_nonoverlapping(root.as_ptr(), lpsz_volume_path_name, 4);
+    }
+    set_last_error(ERROR_SUCCESS);
+    1
+}
+
+pub extern "win64" fn get_final_path_name_by_handle_w(
+    h_file: Handle,
+    lpsz_file_path: *mut u16,
+    cch_file_path: u32,
+    _dw_flags: u32,
+) -> u32 {
+    let mut resolved_path: Option<String> = None;
+    global_table().with(h_file, |obj| {
+        if let Some(file) = obj.as_any().downcast_ref::<FileHandle>() {
+            let win_path = format!("\\\\?\\Z:{}", file.host_path.display()).replace('/', "\\");
+            resolved_path = Some(win_path);
+        }
+    });
+
+    let Some(path) = resolved_path else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    };
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let needed = wide.len() as u32;
+    if cch_file_path == 0 || lpsz_file_path.is_null() {
+        return needed;
+    }
+    if cch_file_path < needed {
+        return needed;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), lpsz_file_path, wide.len());
+    }
+    needed - 1
+}
+
+pub extern "win64" fn path_cch_combine_ex(
+    psz_path_out: *mut u16,
+    cch_path_out: usize,
+    psz_path_in: *const u16,
+    psz_more: *const u16,
+    _dw_flags: u32,
+) -> i32 {
+    if psz_path_out.is_null() || cch_path_out == 0 { return -2147024809; }
+    let path_in = if !psz_path_in.is_null() { unsafe { wide_string(psz_path_in) }.unwrap_or_default() } else { String::new() };
+    let more = if !psz_more.is_null() { unsafe { wide_string(psz_more) }.unwrap_or_default() } else { String::new() };
+    let combined = if path_in.is_empty() {
+        more.clone()
+    } else if more.is_empty() {
+        path_in.clone()
+    } else {
+        let trimmed_in = path_in.trim_end_matches(['\\', '/']);
+        let trimmed_more = more.trim_start_matches(['\\', '/']);
+        format!("{}\\{}", trimmed_in, trimmed_more)
+    };
+    tracing::info!(%path_in, %more, %combined, "PathCchCombineEx");
+    let wide: Vec<u16> = combined.encode_utf16().chain(std::iter::once(0)).collect();
+    if wide.len() > cch_path_out { return -2147024774; }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), psz_path_out, wide.len());
+    }
+    0
+}
+
+pub extern "win64" fn path_cch_skip_root(
+    psz_path: *const u16,
+    ppsz_root_end: *mut *const u16,
+) -> i32 {
+    if psz_path.is_null() || ppsz_root_end.is_null() { return -2147024809; }
+    let path = unsafe { wide_string(psz_path) }.unwrap_or_default();
+    let mut offset = 0;
+    if path.starts_with("\\\\?\\") || path.starts_with("\\\\.\\") {
+        offset = 4;
+    }
+    let rest = &path[offset..];
+    let mut found_root = false;
+    if rest.len() >= 2 && rest.as_bytes()[1] == b':' {
+        offset += 2;
+        found_root = true;
+        if rest.len() >= 3 && (rest.as_bytes()[2] == b'\\' || rest.as_bytes()[2] == b'/') {
+            offset += 1;
+        }
+    } else if rest.starts_with('\\') || rest.starts_with('/') {
+        offset += 1;
+        found_root = true;
+    }
+
+    unsafe {
+        *ppsz_root_end = psz_path.add(offset);
+    }
+    tracing::info!(%path, offset, found_root, "PathCchSkipRoot");
+    if found_root {
+        0
+    } else {
+        -2147024809 // E_INVALIDARG when no root
+    }
 }
 
 pub extern "win64" fn get_temp_file_name_w(
@@ -1864,7 +2132,7 @@ pub extern "win64" fn get_file_attributes_a(lp_file_name: *const i8) -> u32 {
     };
     tracing::trace!(path = %path, "GetFileAttributesA");
 
-    match nt_query_information_by_path(&path) {
+    let res = match nt_query_information_by_path(&path) {
         Ok(info) => {
             set_last_error(ERROR_SUCCESS);
             if info.is_directory {
@@ -1877,7 +2145,9 @@ pub extern "win64" fn get_file_attributes_a(lp_file_name: *const i8) -> u32 {
             set_last_error(status_to_win_error(status));
             FILE_ATTRIBUTE_INVALID
         }
-    }
+    };
+    tracing::info!(path = %path, ?res, "GetFileAttributes");
+    res
 }
 
 pub extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> u32 {
@@ -1949,7 +2219,7 @@ pub extern "win64" fn get_file_attributes_ex_a(
         return 0;
     };
 
-    match nt_query_information_by_path(&path) {
+    let res = match nt_query_information_by_path(&path) {
         Ok(info) => {
             write_attribute_data(info, lp_file_information);
             set_last_error(ERROR_SUCCESS);
@@ -1959,7 +2229,9 @@ pub extern "win64" fn get_file_attributes_ex_a(
             set_last_error(status_to_win_error(status));
             0
         }
-    }
+    };
+    tracing::info!(path = %path, ?res, "GetFileAttributesEx");
+    res
 }
 
 pub extern "win64" fn get_file_attributes_ex_w(
@@ -2019,6 +2291,419 @@ pub extern "win64" fn get_file_information_by_handle(
     }
 }
 
+#[repr(C)]
+struct FileBasicInfo {
+    creation_time: FileTime,
+    last_access_time: FileTime,
+    last_write_time: FileTime,
+    change_time: FileTime,
+    file_attributes: u32,
+}
+
+#[repr(C)]
+struct FileStandardInfo {
+    allocation_size: u64,
+    end_of_file: u64,
+    number_of_links: u32,
+    delete_pending: u8,
+    directory: u8,
+}
+
+#[repr(C)]
+struct FileAttributeTagInfo {
+    file_attributes: u32,
+    reparse_tag: u32,
+}
+
+#[repr(C)]
+struct FileIdInfo {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+}
+
+pub extern "win64" fn get_file_information_by_handle_ex(
+    h_file: Handle,
+    info_class: u32,
+    lp_file_information: *mut c_void,
+    dw_buffer_size: u32,
+) -> i32 {
+    if lp_file_information.is_null() || dw_buffer_size == 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+    let mut file_path: Option<PathBuf> = None;
+    let mut got_stat = false;
+
+    global_table().with(h_file, |obj| {
+        if let Some(file) = obj.as_any().downcast_ref::<FileHandle>() {
+            let rc = unsafe { libc::fstat(file.fd, &mut stat_buf) };
+            if rc == 0 {
+                got_stat = true;
+                file_path = Some(file.host_path.clone());
+            }
+        }
+    });
+
+    if !got_stat {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    let is_dir = (stat_buf.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+    let attributes = if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+    let mtime = unix_seconds_to_filetime(stat_buf.st_mtime);
+    let atime = unix_seconds_to_filetime(stat_buf.st_atime);
+
+    let res = match info_class {
+        // FileBasicInfo = 0
+        0 => {
+            if dw_buffer_size < std::mem::size_of::<FileBasicInfo>() as u32 {
+                set_last_error(ERROR_INSUFFICIENT_BUFFER);
+                0
+            } else {
+                let info = FileBasicInfo {
+                    creation_time: mtime,
+                    last_access_time: atime,
+                    last_write_time: mtime,
+                    change_time: mtime,
+                    file_attributes: attributes,
+                };
+                unsafe {
+                    *lp_file_information.cast::<FileBasicInfo>() = info;
+                }
+                set_last_error(ERROR_SUCCESS);
+                1
+            }
+        }
+        // FileStandardInfo = 1
+        1 => {
+            if dw_buffer_size < std::mem::size_of::<FileStandardInfo>() as u32 {
+                set_last_error(ERROR_INSUFFICIENT_BUFFER);
+                0
+            } else {
+                let info = FileStandardInfo {
+                    allocation_size: stat_buf.st_size as u64,
+                    end_of_file: stat_buf.st_size as u64,
+                    number_of_links: stat_buf.st_nlink as u32,
+                    delete_pending: 0,
+                    directory: if is_dir { 1 } else { 0 },
+                };
+                unsafe {
+                    *lp_file_information.cast::<FileStandardInfo>() = info;
+                }
+                set_last_error(ERROR_SUCCESS);
+                1
+            }
+        }
+        // FileNameInfo = 2
+        2 => {
+            let win_path = file_path
+                .map(|p| format!("\\{}", p.to_string_lossy()).replace('/', "\\"))
+                .unwrap_or_default();
+            let wide: Vec<u16> = win_path.encode_utf16().collect();
+            let byte_len = (wide.len() * 2) as u32;
+            if dw_buffer_size < 4 {
+                set_last_error(ERROR_INSUFFICIENT_BUFFER);
+                0
+            } else {
+                unsafe {
+                    *lp_file_information.cast::<u32>() = byte_len;
+                    let copy_bytes = (dw_buffer_size - 4).min(byte_len) as usize;
+                    std::ptr::copy_nonoverlapping(
+                        wide.as_ptr() as *const u8,
+                        lp_file_information.add(4).cast::<u8>(),
+                        copy_bytes,
+                    );
+                }
+                set_last_error(ERROR_SUCCESS);
+                1
+            }
+        }
+        // FileAttributeTagInfo = 9
+        9 => {
+            if dw_buffer_size < std::mem::size_of::<FileAttributeTagInfo>() as u32 {
+                set_last_error(ERROR_INSUFFICIENT_BUFFER);
+                0
+            } else {
+                let info = FileAttributeTagInfo {
+                    file_attributes: attributes,
+                    reparse_tag: 0,
+                };
+                unsafe {
+                    *lp_file_information.cast::<FileAttributeTagInfo>() = info;
+                }
+                set_last_error(ERROR_SUCCESS);
+                1
+            }
+        }
+        // FileIdInfo = 18
+        18 => {
+            if dw_buffer_size < std::mem::size_of::<FileIdInfo>() as u32 {
+                set_last_error(ERROR_INSUFFICIENT_BUFFER);
+                0
+            } else {
+                let mut file_id = [0u8; 16];
+                file_id[..8].copy_from_slice(&(stat_buf.st_ino as u64).to_le_bytes());
+                file_id[8..12].copy_from_slice(&(stat_buf.st_dev as u32).to_le_bytes());
+                let info = FileIdInfo {
+                    volume_serial_number: 0x12345678,
+                    file_id,
+                };
+                unsafe {
+                    *lp_file_information.cast::<FileIdInfo>() = info;
+                }
+                set_last_error(ERROR_SUCCESS);
+                1
+            }
+        }
+        _ => {
+            tracing::warn!(info_class, "GetFileInformationByHandleEx unhandled class");
+            set_last_error(ERROR_INVALID_PARAMETER);
+            0
+        }
+    };
+    tracing::info!(h_file, info_class, ?res, "GetFileInformationByHandleEx");
+    res
+}
+
+fn match_wildcard(name: &str, pattern: &str) -> bool {
+    if pattern == "*" || pattern == "*.*" {
+        return true;
+    }
+    let n = name.to_ascii_lowercase();
+    let p = pattern.to_ascii_lowercase();
+    wildcard_match_recursive(n.as_bytes(), p.as_bytes())
+}
+
+fn wildcard_match_recursive(name: &[u8], pattern: &[u8]) -> bool {
+    let mut n_idx = 0;
+    let mut p_idx = 0;
+    let mut n_star = None;
+    let mut p_star = None;
+
+    while n_idx < name.len() {
+        if p_idx < pattern.len() && (pattern[p_idx] == b'?' || pattern[p_idx] == name[n_idx]) {
+            n_idx += 1;
+            p_idx += 1;
+        } else if p_idx < pattern.len() && pattern[p_idx] == b'*' {
+            p_star = Some(p_idx);
+            p_idx += 1;
+            n_star = Some(n_idx);
+        } else if let Some(p_back) = p_star {
+            p_idx = p_back + 1;
+            let n_back = n_star.unwrap();
+            n_star = Some(n_back + 1);
+            n_idx = n_back + 1;
+        } else {
+            return false;
+        }
+    }
+
+    while p_idx < pattern.len() && pattern[p_idx] == b'*' {
+        p_idx += 1;
+    }
+
+    p_idx == pattern.len()
+}
+
+fn enumerate_find_entries(path_str: &str) -> Result<Vec<FindEntry>, u32> {
+    let norm = path_str.replace('\\', "/");
+    let has_wildcard = path_str.contains('*') || path_str.contains('?');
+    if !has_wildcard {
+        let trimmed = path_str.trim_end_matches(['\\', '/']);
+        let host_trimmed = normalize_host_path(trimmed);
+        let host_trimmed_buf = PathBuf::from(&host_trimmed);
+        let resolved = if host_trimmed_buf.exists() {
+            Some(host_trimmed_buf)
+        } else {
+            crate::filesystem::case_fold::resolve_case_insensitive(&host_trimmed_buf)
+        };
+        if let Some(p) = resolved {
+            if let Ok(metadata) = std::fs::metadata(&p) {
+                if !metadata.is_dir() {
+                    let file_name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let modified = metadata.modified().ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    return Ok(vec![FindEntry {
+                        file_name,
+                        is_dir: false,
+                        file_size: metadata.len(),
+                        modified_unix: modified,
+                    }]);
+                }
+            }
+        }
+    }
+
+    let host_full = normalize_host_path(path_str);
+    let host_full_buf = PathBuf::from(&host_full);
+    let resolved_full = if host_full_buf.exists() {
+        Some(host_full_buf)
+    } else {
+        crate::filesystem::case_fold::resolve_case_insensitive(&host_full_buf)
+    };
+
+    let (dir_part, pattern): (&str, &str) = if let Some(ref rf) = resolved_full {
+        if rf.is_dir() {
+            (path_str, "*")
+        } else if let Some(idx) = norm.rfind('/') {
+            let (d, p) = norm.split_at(idx);
+            (if d.is_empty() { "/" } else { d }, &p[1..])
+        } else {
+            (".", path_str)
+        }
+    } else if let Some(idx) = norm.rfind('/') {
+        let (d, p) = norm.split_at(idx);
+        (if d.is_empty() { "/" } else { d }, &p[1..])
+    } else {
+        (".", path_str)
+    };
+
+    let pattern = if pattern.is_empty() { "*" } else { pattern };
+
+    let host_dir = normalize_host_path(dir_part);
+    let host_path_buf = PathBuf::from(&host_dir);
+    let resolved_dir = if host_path_buf.exists() {
+        host_path_buf
+    } else if let Some(resolved) = crate::filesystem::case_fold::resolve_case_insensitive(&host_path_buf) {
+        resolved
+    } else {
+        return Err(ERROR_PATH_NOT_FOUND);
+    };
+
+    if !resolved_dir.is_dir() {
+        if resolved_dir.is_file() {
+            let metadata = std::fs::metadata(&resolved_dir).map_err(|_| ERROR_FILE_NOT_FOUND)?;
+            let file_name = resolved_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let modified = metadata.modified().ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            return Ok(vec![FindEntry {
+                file_name,
+                is_dir: false,
+                file_size: metadata.len(),
+                modified_unix: modified,
+            }]);
+        }
+        return Err(ERROR_PATH_NOT_FOUND);
+    }
+
+    let dir_entries = std::fs::read_dir(&resolved_dir).map_err(|_| ERROR_PATH_NOT_FOUND)?;
+    let mut results = Vec::new();
+
+    if pattern == "*" || pattern == "*.*" {
+        results.push(FindEntry {
+            file_name: ".".to_string(),
+            is_dir: true,
+            file_size: 0,
+            modified_unix: 0,
+        });
+        results.push(FindEntry {
+            file_name: "..".to_string(),
+            is_dir: true,
+            file_size: 0,
+            modified_unix: 0,
+        });
+    }
+
+    for entry in dir_entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if match_wildcard(&name, pattern) {
+            if let Ok(metadata) = entry.metadata() {
+                let modified = metadata.modified().ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                results.push(FindEntry {
+                    file_name: name,
+                    is_dir: metadata.is_dir(),
+                    file_size: metadata.len(),
+                    modified_unix: modified,
+                });
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Err(ERROR_FILE_NOT_FOUND);
+    }
+
+    Ok(results)
+}
+
+fn write_find_data_w(entry: &FindEntry, lp_find_file_data: *mut c_void) {
+    if lp_find_file_data.is_null() {
+        return;
+    }
+    let data_ptr = lp_find_file_data as *mut Win32FindDataW;
+    let attrs = if entry.is_dir {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
+    let time = unix_seconds_to_filetime(entry.modified_unix);
+    let mut c_file_name = [0u16; 260];
+    let wide: Vec<u16> = entry.file_name.encode_utf16().collect();
+    let len = wide.len().min(259);
+    c_file_name[..len].copy_from_slice(&wide[..len]);
+    c_file_name[len] = 0;
+
+    let data = Win32FindDataW {
+        dw_file_attributes: attrs,
+        ft_creation_time: time,
+        ft_last_access_time: time,
+        ft_last_write_time: time,
+        n_file_size_high: (entry.file_size >> 32) as u32,
+        n_file_size_low: (entry.file_size & 0xFFFF_FFFF) as u32,
+        dw_reserved0: 0,
+        dw_reserved1: 0,
+        c_file_name,
+        c_alternate_file_name: [0u16; 14],
+    };
+    unsafe {
+        std::ptr::write_unaligned(data_ptr, data);
+    }
+}
+
+fn write_find_data_a(entry: &FindEntry, lp_find_file_data: *mut c_void) {
+    if lp_find_file_data.is_null() {
+        return;
+    }
+    let data_ptr = lp_find_file_data as *mut Win32FindDataA;
+    let attrs = if entry.is_dir {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
+    let time = unix_seconds_to_filetime(entry.modified_unix);
+    let mut c_file_name = [0u8; 260];
+    let bytes = entry.file_name.as_bytes();
+    let len = bytes.len().min(259);
+    c_file_name[..len].copy_from_slice(&bytes[..len]);
+    c_file_name[len] = 0;
+
+    let data = Win32FindDataA {
+        dw_file_attributes: attrs,
+        ft_creation_time: time,
+        ft_last_access_time: time,
+        ft_last_write_time: time,
+        n_file_size_high: (entry.file_size >> 32) as u32,
+        n_file_size_low: (entry.file_size & 0xFFFF_FFFF) as u32,
+        dw_reserved0: 0,
+        dw_reserved1: 0,
+        c_file_name,
+        c_alternate_file_name: [0u8; 14],
+    };
+    unsafe {
+        std::ptr::write_unaligned(data_ptr, data);
+    }
+}
+
 pub extern "win64" fn find_first_file_a(
     lp_file_name: *const i8,
     lp_find_file_data: *mut c_void,
@@ -2033,49 +2718,63 @@ pub extern "win64" fn find_first_file_a(
         return INVALID_HANDLE_VALUE;
     };
 
-    let directory = path.trim_end_matches(['\\', '/']);
-    let Ok(entries) = nt_create_file(directory, true, false, CreateDisposition::OpenExisting)
-        .and_then(nt_query_directory_file)
-    else {
-        set_last_error(ERROR_PATH_NOT_FOUND);
-        return INVALID_HANDLE_VALUE;
-    };
-
-    let mut names: Vec<String> = entries.into_iter().map(|e| e.file_name).collect();
-    names.sort();
-    if names.is_empty() {
-        set_last_error(ERROR_FILE_NOT_FOUND);
-        return INVALID_HANDLE_VALUE;
+    match enumerate_find_entries(&path) {
+        Ok(entries) => {
+            if entries.is_empty() {
+                set_last_error(ERROR_FILE_NOT_FOUND);
+                return INVALID_HANDLE_VALUE;
+            }
+            write_find_data_a(&entries[0], lp_find_file_data);
+            let handle = global_table().alloc(Box::new(FindFileHandle {
+                entries,
+                cursor: AtomicUsize::new(1),
+            }));
+            set_last_error(ERROR_SUCCESS);
+            handle
+        }
+        Err(err) => {
+            set_last_error(err);
+            INVALID_HANDLE_VALUE
+        }
     }
-
-    let first = names[0].clone();
-    let bytes = first.as_bytes();
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_find_file_data as *mut u8, bytes.len());
-        *((lp_find_file_data as *mut u8).add(bytes.len())) = 0;
-    }
-
-    let handle = global_table()
-        .alloc(Box::new(FindFileHandle { entries: names, cursor: AtomicUsize::new(1) }));
-    set_last_error(ERROR_SUCCESS);
-    handle
 }
 
 pub extern "win64" fn find_first_file_w(
     lp_file_name: *const u16,
     lp_find_file_data: *mut c_void,
 ) -> Handle {
+    if lp_find_file_data.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
     let Some(path) = (unsafe { wide_string(lp_file_name) }) else {
         set_last_error(ERROR_INVALID_PARAMETER);
         return INVALID_HANDLE_VALUE;
     };
 
-    let Some(path_c) = std::ffi::CString::new(path).ok() else {
-        set_last_error(ERROR_INVALID_PARAMETER);
-        return INVALID_HANDLE_VALUE;
+    let res = match enumerate_find_entries(&path) {
+        Ok(entries) => {
+            if entries.is_empty() {
+                set_last_error(ERROR_FILE_NOT_FOUND);
+                INVALID_HANDLE_VALUE
+            } else {
+                write_find_data_w(&entries[0], lp_find_file_data);
+                let handle = global_table().alloc(Box::new(FindFileHandle {
+                    entries,
+                    cursor: AtomicUsize::new(1),
+                }));
+                set_last_error(ERROR_SUCCESS);
+                handle
+            }
+        }
+        Err(err) => {
+            set_last_error(err);
+            INVALID_HANDLE_VALUE
+        }
     };
-
-    find_first_file_a(path_c.as_ptr(), lp_find_file_data)
+    tracing::info!(path = %path, ?res, "FindFirstFileW");
+    res
 }
 
 pub extern "win64" fn find_next_file_a(handle: Handle, lp_find_file_data: *mut c_void) -> i32 {
@@ -2084,7 +2783,7 @@ pub extern "win64" fn find_next_file_a(handle: Handle, lp_find_file_data: *mut c
         return 0;
     }
 
-    let mut output: Option<Result<String, u32>> = None;
+    let mut output: Option<Result<FindEntry, u32>> = None;
     global_table().with(handle, |obj| {
         if let Some(find) = obj.as_any().downcast_ref::<FindFileHandle>() {
             let idx = find.cursor.load(Ordering::Relaxed);
@@ -2100,16 +2799,8 @@ pub extern "win64" fn find_next_file_a(handle: Handle, lp_find_file_data: *mut c
     });
 
     match output {
-        Some(Ok(name)) => {
-            let bytes = name.as_bytes();
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    lp_find_file_data as *mut u8,
-                    bytes.len(),
-                );
-                *((lp_find_file_data as *mut u8).add(bytes.len())) = 0;
-            }
+        Some(Ok(entry)) => {
+            write_find_data_a(&entry, lp_find_file_data);
             set_last_error(ERROR_SUCCESS);
             1
         }
@@ -2125,7 +2816,41 @@ pub extern "win64" fn find_next_file_a(handle: Handle, lp_find_file_data: *mut c
 }
 
 pub extern "win64" fn find_next_file_w(handle: Handle, lp_find_file_data: *mut c_void) -> i32 {
-    find_next_file_a(handle, lp_find_file_data)
+    if lp_find_file_data.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let mut output: Option<Result<FindEntry, u32>> = None;
+    global_table().with(handle, |obj| {
+        if let Some(find) = obj.as_any().downcast_ref::<FindFileHandle>() {
+            let idx = find.cursor.load(Ordering::Relaxed);
+            if idx >= find.entries.len() {
+                output = Some(Err(ERROR_NO_MORE_FILES));
+            } else {
+                output = Some(Ok(find.entries[idx].clone()));
+                find.cursor.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            output = Some(Err(ERROR_INVALID_HANDLE));
+        }
+    });
+
+    match output {
+        Some(Ok(entry)) => {
+            write_find_data_w(&entry, lp_find_file_data);
+            set_last_error(ERROR_SUCCESS);
+            1
+        }
+        Some(Err(err)) => {
+            set_last_error(err);
+            0
+        }
+        None => {
+            set_last_error(ERROR_INVALID_HANDLE);
+            0
+        }
+    }
 }
 
 pub extern "win64" fn find_close(handle: Handle) -> i32 {
@@ -2258,19 +2983,23 @@ mod tests {
         let dir_c =
             std::ffi::CString::new(temp.path().to_string_lossy().to_string()).expect("cstring");
 
-        let mut buf = [0u8; 260];
-        let handle = find_first_file_a(dir_c.as_ptr(), buf.as_mut_ptr() as *mut c_void);
+        let mut data = unsafe { std::mem::zeroed::<Win32FindDataA>() };
+        let handle = find_first_file_a(dir_c.as_ptr(), (&mut data as *mut Win32FindDataA).cast());
         assert_ne!(handle, INVALID_HANDLE_VALUE);
-        let first = std::ffi::CStr::from_bytes_until_nul(&buf)
-            .expect("first nul")
+        let first = unsafe { std::ffi::CStr::from_ptr(data.c_file_name.as_ptr().cast()) }
             .to_str()
             .expect("utf8")
             .to_string();
         assert!(!first.is_empty());
 
-        let mut buf2 = [0u8; 260];
-        let next_ok = find_next_file_a(handle, buf2.as_mut_ptr() as *mut c_void);
+        let mut data2 = unsafe { std::mem::zeroed::<Win32FindDataA>() };
+        let next_ok = find_next_file_a(handle, (&mut data2 as *mut Win32FindDataA).cast());
         assert_eq!(next_ok, 1);
+        let second = unsafe { std::ffi::CStr::from_ptr(data2.c_file_name.as_ptr().cast()) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        assert!(!second.is_empty());
         assert_eq!(find_close(handle), 1);
     }
 

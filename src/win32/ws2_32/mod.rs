@@ -67,6 +67,7 @@ const WSAECONNREFUSED: i32 = 10061;
 const WSAEHOSTUNREACH: i32 = 10065;
 const WSAEPROVIDERFAILEDINIT: i32 = 10106;
 const WSAEOPNOTSUPP: i32 = 10045;
+const WSAHOST_NOT_FOUND: i32 = 11001;
 const WINDOWS_AF_INET6: i32 = 23;
 
 #[repr(C)]
@@ -502,12 +503,26 @@ pub extern "win64" fn WSAGetLastError() -> i32 {
 }
 
 pub extern "win64" fn socket(af: i32, kind: i32, protocol: i32) -> usize {
-    let fd = unsafe { libc::socket(af, kind, protocol) };
+    let linux_af = match af {
+        2 => libc::AF_INET,
+        WINDOWS_AF_INET6 => libc::AF_INET6,
+        other => other,
+    };
+    let linux_proto = match protocol {
+        0 => 0,
+        1 => libc::IPPROTO_ICMP,
+        6 => libc::IPPROTO_TCP,
+        17 => libc::IPPROTO_UDP,
+        other => other,
+    };
+    let fd = unsafe { libc::socket(linux_af, kind, linux_proto) };
     if fd < 0 {
         set_wsa_error_from_errno();
+        trace!(af, kind, protocol, err = WSAGetLastError(), "socket failed");
         INVALID_SOCKET
     } else {
         set_wsa_last_error(0);
+        trace!(af, kind, protocol, fd, "socket success");
         fd as usize
     }
 }
@@ -518,23 +533,22 @@ pub extern "win64" fn socket(af: i32, kind: i32, protocol: i32) -> usize {
 pub extern "win64" fn inet_pton(af: i32, src: *const c_char, dst: *mut c_void) -> i32 {
     if src.is_null() || dst.is_null() {
         set_wsa_last_error(WSAEFAULT);
-        return SOCKET_ERROR;
+        return 0;
     }
 
-    let native_af = match af {
-        x if x == libc::AF_INET => libc::AF_INET,
+    let linux_af = match af {
+        libc::AF_INET => libc::AF_INET,
         WINDOWS_AF_INET6 => libc::AF_INET6,
-        _ => {
+        other => {
             set_wsa_last_error(WSAEAFNOSUPPORT);
-            return SOCKET_ERROR;
+            trace!("inet_pton unsupported af={}", other);
+            return -1;
         }
     };
 
-    let result = unsafe { host_inet_pton(native_af, src, dst) };
-    if result < 0 {
+    let result = unsafe { host_inet_pton(linux_af, src, dst) };
+    if result <= 0 {
         set_wsa_error_from_errno();
-    } else if result == 0 {
-        set_wsa_last_error(WSAEINVAL);
     } else {
         set_wsa_last_error(0);
     }
@@ -557,9 +571,11 @@ pub extern "win64" fn connect(s: usize, name: *const libc::sockaddr, namelen: i3
     let ret = unsafe { libc::connect(s as c_int, name, namelen as libc::socklen_t) };
     if ret == 0 {
         set_wsa_last_error(0);
+        trace!(s, "connect success");
         0
     } else {
         set_wsa_error_from_errno();
+        trace!(s, err = WSAGetLastError(), "connect failed");
         SOCKET_ERROR
     }
 }
@@ -568,9 +584,11 @@ pub extern "win64" fn bind(s: usize, name: *const libc::sockaddr, namelen: i32) 
     let ret = unsafe { libc::bind(s as c_int, name, namelen as libc::socklen_t) };
     if ret == 0 {
         set_wsa_last_error(0);
+        trace!(s, "bind success");
         0
     } else {
         set_wsa_error_from_errno();
+        trace!(s, err = WSAGetLastError(), "bind failed");
         SOCKET_ERROR
     }
 }
@@ -579,9 +597,11 @@ pub extern "win64" fn listen(s: usize, backlog: i32) -> i32 {
     let ret = unsafe { libc::listen(s as c_int, backlog) };
     if ret == 0 {
         set_wsa_last_error(0);
+        trace!(s, backlog, "listen success");
         0
     } else {
         set_wsa_error_from_errno();
+        trace!(s, backlog, err = WSAGetLastError(), "listen failed");
         SOCKET_ERROR
     }
 }
@@ -592,6 +612,7 @@ pub extern "win64" fn accept(s: usize, addr: *mut libc::sockaddr, addrlen: *mut 
     let fd = unsafe { libc::accept(s as c_int, addr, &raw mut len) };
     if fd < 0 {
         set_wsa_error_from_errno();
+        trace!(s, err = WSAGetLastError(), "accept failed");
         INVALID_SOCKET
     } else {
         if !addrlen.is_null() {
@@ -600,6 +621,7 @@ pub extern "win64" fn accept(s: usize, addr: *mut libc::sockaddr, addrlen: *mut 
             }
         }
         set_wsa_last_error(0);
+        trace!(s, fd, "accept success");
         fd as usize
     }
 }
@@ -624,6 +646,482 @@ pub extern "win64" fn recv(s: usize, buf: *mut c_char, len: i32, flags: i32) -> 
         set_wsa_last_error(0);
         ret as i32
     }
+}
+
+pub extern "win64" fn getsockname(s: usize, name: *mut libc::sockaddr, namelen: *mut i32) -> i32 {
+    if name.is_null() || namelen.is_null() {
+        set_wsa_last_error(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+    let mut len: libc::socklen_t = unsafe { (*namelen).max(0) as libc::socklen_t };
+    let ret = unsafe { libc::getsockname(s as c_int, name, &mut len) };
+    if ret == 0 {
+        unsafe { *namelen = len as i32 };
+        set_wsa_last_error(0);
+        trace!(s, namelen = (len as i32), "getsockname success");
+        0
+    } else {
+        set_wsa_error_from_errno();
+        trace!(s, err = WSAGetLastError(), "getsockname failed");
+        SOCKET_ERROR
+    }
+}
+
+pub extern "win64" fn getpeername(s: usize, name: *mut libc::sockaddr, namelen: *mut i32) -> i32 {
+    if name.is_null() || namelen.is_null() {
+        set_wsa_last_error(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+    let mut len: libc::socklen_t = unsafe { (*namelen).max(0) as libc::socklen_t };
+    let ret = unsafe { libc::getpeername(s as c_int, name, &mut len) };
+    if ret == 0 {
+        unsafe { *namelen = len as i32 };
+        set_wsa_last_error(0);
+        0
+    } else {
+        set_wsa_error_from_errno();
+        SOCKET_ERROR
+    }
+}
+
+pub extern "win64" fn setsockopt(
+    s: usize,
+    level: i32,
+    optname: i32,
+    optval: *const c_char,
+    optlen: i32,
+) -> i32 {
+    if optval.is_null() || optlen < 0 {
+        set_wsa_last_error(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+    // SO_EXCLUSIVEADDRUSE (~SO_REUSEADDR = -5 / 0xfffb / 0xfffffffb) is a no-op on Linux
+    if (level == 0xffff || level == 1) && (optname == -5 || optname == 0xfffb || optname == !0x0004) {
+        set_wsa_last_error(0);
+        trace!(s, "setsockopt SO_EXCLUSIVEADDRUSE -> success (no-op on linux)");
+        return 0;
+    }
+    let linux_level = if level == 0xffff { libc::SOL_SOCKET } else { level };
+    let linux_optname = match (level, optname) {
+        (0xffff, 0x0004) => libc::SO_REUSEADDR,
+        (0xffff, 0x0020) => libc::SO_BROADCAST,
+        (0xffff, 0x0008) => libc::SO_KEEPALIVE,
+        (0xffff, 0x1001) => libc::SO_SNDBUF,
+        (0xffff, 0x1002) => libc::SO_RCVBUF,
+        (0xffff, 0x1005) => libc::SO_SNDTIMEO,
+        (0xffff, 0x1006) => libc::SO_RCVTIMEO,
+        (0xffff, 0x0080) => libc::SO_LINGER,
+        (0xffff, 0x0001) => libc::SO_DEBUG,
+        (0xffff, 0x0002) => libc::SO_ACCEPTCONN,
+        (0xffff, 0x0010) => libc::SO_DONTROUTE,
+        (0xffff, 0x1007) => libc::SO_ERROR,
+        (0xffff, 0x1008) => libc::SO_TYPE,
+        (6, 0x0001) => libc::TCP_NODELAY,
+        _ => optname,
+    };
+    let ret = unsafe {
+        libc::setsockopt(
+            s as c_int,
+            linux_level,
+            linux_optname,
+            optval.cast::<c_void>(),
+            optlen as libc::socklen_t,
+        )
+    };
+    if ret == 0 {
+        set_wsa_last_error(0);
+        trace!(s, level, optname, "setsockopt success");
+        0
+    } else {
+        set_wsa_error_from_errno();
+        trace!(s, level, optname, err = WSAGetLastError(), "setsockopt failed");
+        SOCKET_ERROR
+    }
+}
+
+pub extern "win64" fn getsockopt(
+    s: usize,
+    level: i32,
+    optname: i32,
+    optval: *mut c_char,
+    optlen: *mut i32,
+) -> i32 {
+    if optval.is_null() || optlen.is_null() {
+        set_wsa_last_error(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+    let linux_level = if level == 0xffff { libc::SOL_SOCKET } else { level };
+    let linux_optname = match (level, optname) {
+        (0xffff, 0x0004) => libc::SO_REUSEADDR,
+        (0xffff, 0x0020) => libc::SO_BROADCAST,
+        (0xffff, 0x0008) => libc::SO_KEEPALIVE,
+        (0xffff, 0x1001) => libc::SO_SNDBUF,
+        (0xffff, 0x1002) => libc::SO_RCVBUF,
+        (0xffff, 0x1005) => libc::SO_SNDTIMEO,
+        (0xffff, 0x1006) => libc::SO_RCVTIMEO,
+        (0xffff, 0x0080) => libc::SO_LINGER,
+        (0xffff, 0x0001) => libc::SO_DEBUG,
+        (0xffff, 0x0002) => libc::SO_ACCEPTCONN,
+        (0xffff, 0x0010) => libc::SO_DONTROUTE,
+        (0xffff, 0x1007) => libc::SO_ERROR,
+        (0xffff, 0x1008) => libc::SO_TYPE,
+        (6, 0x0001) => libc::TCP_NODELAY,
+        _ => optname,
+    };
+    let mut len = unsafe { (*optlen).max(0) as libc::socklen_t };
+    let ret = unsafe {
+        libc::getsockopt(
+            s as c_int,
+            linux_level,
+            linux_optname,
+            optval.cast::<c_void>(),
+            &mut len,
+        )
+    };
+    if ret == 0 {
+        unsafe { *optlen = len as i32 };
+        set_wsa_last_error(0);
+        0
+    } else {
+        set_wsa_error_from_errno();
+        SOCKET_ERROR
+    }
+}
+
+pub extern "win64" fn ioctlsocket(s: usize, cmd: i32, argp: *mut u32) -> i32 {
+    if argp.is_null() {
+        set_wsa_last_error(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+    if cmd == 0x8004667eu32 as i32 || cmd == 0x667e {
+        let non_blocking = unsafe { *argp != 0 };
+        let flags = unsafe { libc::fcntl(s as c_int, libc::F_GETFL, 0) };
+        if flags < 0 {
+            set_wsa_error_from_errno();
+            return SOCKET_ERROR;
+        }
+        let new_flags = if non_blocking {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        if unsafe { libc::fcntl(s as c_int, libc::F_SETFL, new_flags) } < 0 {
+            set_wsa_error_from_errno();
+            return SOCKET_ERROR;
+        }
+        set_wsa_last_error(0);
+        0
+    } else if cmd == 0x4004667fu32 as i32 {
+        let mut available: c_int = 0;
+        if unsafe { libc::ioctl(s as c_int, libc::FIONREAD, &mut available) } < 0 {
+            set_wsa_error_from_errno();
+            return SOCKET_ERROR;
+        }
+        unsafe { *argp = available.max(0) as u32 };
+        set_wsa_last_error(0);
+        0
+    } else {
+        let ret = unsafe { libc::ioctl(s as c_int, cmd as _, argp) };
+        if ret < 0 {
+            set_wsa_error_from_errno();
+            SOCKET_ERROR
+        } else {
+            set_wsa_last_error(0);
+            0
+        }
+    }
+}
+
+pub extern "win64" fn shutdown(s: usize, how: i32) -> i32 {
+    let ret = unsafe { libc::shutdown(s as c_int, how) };
+    if ret == 0 {
+        set_wsa_last_error(0);
+        0
+    } else {
+        set_wsa_error_from_errno();
+        SOCKET_ERROR
+    }
+}
+
+pub extern "win64" fn sendto(
+    s: usize,
+    buf: *const c_char,
+    len: i32,
+    flags: i32,
+    to: *const libc::sockaddr,
+    tolen: i32,
+) -> i32 {
+    let ret = unsafe {
+        libc::sendto(
+            s as c_int,
+            buf.cast::<c_void>(),
+            len as usize,
+            flags,
+            to,
+            tolen as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        set_wsa_error_from_errno();
+        SOCKET_ERROR
+    } else {
+        set_wsa_last_error(0);
+        ret as i32
+    }
+}
+
+pub extern "win64" fn recvfrom(
+    s: usize,
+    buf: *mut c_char,
+    len: i32,
+    flags: i32,
+    from: *mut libc::sockaddr,
+    fromlen: *mut i32,
+) -> i32 {
+    let mut sock_len = if fromlen.is_null() {
+        0
+    } else {
+        unsafe { (*fromlen).max(0) as libc::socklen_t }
+    };
+    let ret = unsafe {
+        libc::recvfrom(
+            s as c_int,
+            buf.cast::<c_void>(),
+            len as usize,
+            flags,
+            from,
+            if fromlen.is_null() { std::ptr::null_mut() } else { &mut sock_len },
+        )
+    };
+    if ret < 0 {
+        set_wsa_error_from_errno();
+        SOCKET_ERROR
+    } else {
+        if !fromlen.is_null() {
+            unsafe { *fromlen = sock_len as i32 };
+        }
+        set_wsa_last_error(0);
+        ret as i32
+    }
+}
+
+pub extern "win64" fn htons(hostshort: u16) -> u16 {
+    hostshort.to_be()
+}
+
+pub extern "win64" fn ntohs(netshort: u16) -> u16 {
+    u16::from_be(netshort)
+}
+
+pub extern "win64" fn htonl(hostlong: u32) -> u32 {
+    hostlong.to_be()
+}
+
+pub extern "win64" fn ntohl(netlong: u32) -> u32 {
+    u32::from_be(netlong)
+}
+
+pub extern "win64" fn inet_addr(cp: *const c_char) -> u32 {
+    if cp.is_null() {
+        return 0xffff_ffff;
+    }
+    let Ok(s) = unsafe { std::ffi::CStr::from_ptr(cp) }.to_str() else {
+        return 0xffff_ffff;
+    };
+    if let Ok(ip) = s.parse::<std::net::Ipv4Addr>() {
+        u32::from_ne_bytes(ip.octets())
+    } else {
+        0xffff_ffff
+    }
+}
+
+pub extern "win64" fn inet_ntoa(in_addr: u32) -> *mut c_char {
+    use std::cell::RefCell;
+    thread_local! {
+        static NTOA_BUF: RefCell<[u8; 32]> = const { RefCell::new([0u8; 32]) };
+    }
+    let ip = std::net::Ipv4Addr::from(in_addr.to_ne_bytes());
+    let formatted = format!("{ip}\0");
+    NTOA_BUF.with(|buf| {
+        let mut b = buf.borrow_mut();
+        let bytes = formatted.as_bytes();
+        let len = bytes.len().min(31);
+        b[..len].copy_from_slice(&bytes[..len]);
+        b[len] = 0;
+        b.as_mut_ptr().cast::<c_char>()
+    })
+}
+
+pub extern "win64" fn gethostname(name: *mut c_char, namelen: i32) -> i32 {
+    if name.is_null() || namelen <= 0 {
+        set_wsa_last_error(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+    let ret = unsafe { libc::gethostname(name, namelen as usize) };
+    if ret == 0 {
+        set_wsa_last_error(0);
+        0
+    } else {
+        set_wsa_error_from_errno();
+        SOCKET_ERROR
+    }
+}
+
+pub extern "win64" fn WSASetLastError(iError: i32) {
+    set_wsa_last_error(iError);
+}
+
+pub extern "win64" fn __WSAFDIsSet(fd: usize, set: *mut WinFdSet) -> i32 {
+    if set.is_null() {
+        return 0;
+    }
+    unsafe {
+        let s = &*set;
+        let count = (s.fd_count as usize).min(WINSOCK_FD_SETSIZE);
+        for &item in &s.fd_array[..count] {
+            if item == fd {
+                return 1;
+            }
+        }
+    }
+    0
+}
+
+#[repr(C)]
+pub struct Hostent {
+    pub h_name: *mut c_char,
+    pub h_aliases: *mut *mut c_char,
+    pub h_addrtype: i16,
+    pub h_length: i16,
+    pub h_addr_list: *mut *mut c_char,
+}
+
+pub extern "win64" fn gethostbyname(name: *const c_char) -> *mut Hostent {
+    use std::cell::RefCell;
+    use std::net::ToSocketAddrs;
+    thread_local! {
+        static HOSTENT_BUF: RefCell<(Hostent, [u8; 256], [*mut c_char; 2], [u8; 16])> = 
+            RefCell::new((
+                Hostent {
+                    h_name: std::ptr::null_mut(),
+                    h_aliases: std::ptr::null_mut(),
+                    h_addrtype: 2, // AF_INET
+                    h_length: 4,
+                    h_addr_list: std::ptr::null_mut(),
+                },
+                [0u8; 256],
+                [std::ptr::null_mut(); 2],
+                [0u8; 16],
+            ));
+    }
+    if name.is_null() {
+        set_wsa_last_error(WSAEFAULT);
+        return std::ptr::null_mut();
+    }
+    let host_name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap_or("localhost");
+    
+    let Ok(addrs) = (host_name, 0).to_socket_addrs() else {
+        set_wsa_last_error(WSAHOST_NOT_FOUND);
+        return std::ptr::null_mut();
+    };
+
+    for addr in addrs {
+        if let std::net::SocketAddr::V4(v4) = addr {
+            return HOSTENT_BUF.with(|cell| {
+                let mut guard = cell.borrow_mut();
+                let (h, name_buf, addr_ptrs, ip_buf) = &mut *guard;
+                
+                let nb = host_name.as_bytes();
+                let nlen = nb.len().min(255);
+                name_buf[..nlen].copy_from_slice(&nb[..nlen]);
+                name_buf[nlen] = 0;
+                h.h_name = name_buf.as_mut_ptr().cast::<c_char>();
+                
+                let oct = v4.ip().octets();
+                ip_buf[..4].copy_from_slice(&oct);
+                addr_ptrs[0] = ip_buf.as_mut_ptr().cast::<c_char>();
+                addr_ptrs[1] = std::ptr::null_mut();
+                h.h_addr_list = addr_ptrs.as_mut_ptr();
+                
+                h.h_addrtype = 2; // AF_INET
+                h.h_length = 4;
+                h.h_aliases = std::ptr::null_mut();
+                
+                set_wsa_last_error(0);
+                h as *mut Hostent
+            });
+        }
+    }
+    set_wsa_last_error(WSAHOST_NOT_FOUND);
+    std::ptr::null_mut()
+}
+
+pub extern "win64" fn gethostbyaddr(
+    addr: *const c_char,
+    len: i32,
+    _kind: i32,
+) -> *mut Hostent {
+    if addr.is_null() || len < 4 {
+        set_wsa_last_error(WSAEFAULT);
+        return std::ptr::null_mut();
+    }
+    let ip_bytes: [u8; 4] = unsafe { *(addr as *const [u8; 4]) };
+    let ip = std::net::Ipv4Addr::from(ip_bytes);
+    let ip_str = ip.to_string();
+    let Ok(c_str) = std::ffi::CString::new(ip_str) else {
+        set_wsa_last_error(WSAHOST_NOT_FOUND);
+        return std::ptr::null_mut();
+    };
+    gethostbyname(c_str.as_ptr())
+}
+
+#[repr(C)]
+pub struct Protoent {
+    pub p_name: *mut c_char,
+    pub p_aliases: *mut *mut c_char,
+    pub p_proto: i16,
+}
+
+pub extern "win64" fn getprotobyname(name: *const c_char) -> *mut Protoent {
+    use std::cell::RefCell;
+    thread_local! {
+        static PROTO_BUF: RefCell<(Protoent, [u8; 32])> = 
+            RefCell::new((
+                Protoent {
+                    p_name: std::ptr::null_mut(),
+                    p_aliases: std::ptr::null_mut(),
+                    p_proto: 6, // IPPROTO_TCP default
+                },
+                [0u8; 32],
+            ));
+    }
+    if name.is_null() {
+        set_wsa_last_error(WSAEFAULT);
+        return std::ptr::null_mut();
+    }
+    let proto_str = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap_or("tcp");
+    let proto_num = if proto_str.eq_ignore_ascii_case("tcp") {
+        6
+    } else if proto_str.eq_ignore_ascii_case("udp") {
+        17
+    } else if proto_str.eq_ignore_ascii_case("icmp") {
+        1
+    } else {
+        0
+    };
+    PROTO_BUF.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let (p, name_buf) = &mut *guard;
+        let pb = proto_str.as_bytes();
+        let len = pb.len().min(31);
+        name_buf[..len].copy_from_slice(&pb[..len]);
+        name_buf[len] = 0;
+        p.p_name = name_buf.as_mut_ptr().cast::<c_char>();
+        p.p_aliases = std::ptr::null_mut();
+        p.p_proto = proto_num;
+        set_wsa_last_error(0);
+        p as *mut Protoent
+    })
 }
 
 fn winfd_to_libc(ptr_set: *mut WinFdSet, out_max_fd: &mut c_int) -> Option<libc::fd_set> {
@@ -1728,39 +2226,45 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("#2", bind as usize);
     exports.insert("#3", closesocket as usize);
     exports.insert("#4", connect as usize);
-    exports.insert("#5", ordinal_5 as usize);
-    exports.insert("#6", ordinal_6 as usize);
-    exports.insert("#7", ordinal_7 as usize);
-    exports.insert("#8", ordinal_8 as usize);
-    exports.insert("#9", ordinal_9 as usize);
-    exports.insert("#10", ordinal_10 as usize);
-    exports.insert("#11", ordinal_11 as usize);
-    exports.insert("#13", ordinal_13 as usize);
-    exports.insert("#14", ordinal_14 as usize);
-    exports.insert("#15", recv as usize);
-    exports.insert("#16", ordinal_16 as usize);
-    exports.insert("#17", select as usize);
-    exports.insert("#18", send as usize);
-    exports.insert("#19", ordinal_19 as usize);
-    exports.insert("#20", ordinal_20 as usize);
-    exports.insert("#21", ordinal_21 as usize);
-    exports.insert("#22", socket as usize);
-    exports.insert("#23", WSASocketW as usize);
-    exports.insert("#51", ordinal_51 as usize);
-    exports.insert("#52", ordinal_52 as usize);
-    exports.insert("#53", ordinal_53 as usize);
-    exports.insert("#57", ordinal_57 as usize);
-    exports.insert("#103", ordinal_103 as usize);
-    exports.insert("#108", ordinal_108 as usize);
-    exports.insert("#111", ordinal_111 as usize);
-    exports.insert("#112", ordinal_112 as usize);
+    exports.insert("#5", getpeername as usize);
+    exports.insert("#6", getsockname as usize);
+    exports.insert("#7", getsockopt as usize);
+    exports.insert("#8", htonl as usize);
+    exports.insert("#9", htons as usize);
+    exports.insert("#10", ioctlsocket as usize);
+    exports.insert("#11", inet_addr as usize);
+    exports.insert("#12", inet_ntoa as usize);
+    exports.insert("#13", listen as usize);
+    exports.insert("#14", ntohl as usize);
+    exports.insert("#15", ntohs as usize);
+    exports.insert("#16", recv as usize);
+    exports.insert("#17", recvfrom as usize);
+    exports.insert("#18", select as usize);
+    exports.insert("#19", send as usize);
+    exports.insert("#20", sendto as usize);
+    exports.insert("#21", setsockopt as usize);
+    exports.insert("#22", shutdown as usize);
+    exports.insert("#23", socket as usize);
+    exports.insert("#51", gethostbyaddr as usize);
+    exports.insert("#52", gethostbyname as usize);
+    exports.insert("#53", getprotobyname as usize);
+    exports.insert("#57", gethostname as usize);
+    exports.insert("#103", htons as usize);
+    exports.insert("#108", inet_ntoa as usize);
+    exports.insert("#111", WSAGetLastError as usize);
+    exports.insert("#112", WSASetLastError as usize);
     exports.insert("#115", WSAStartup as usize);
     exports.insert("#116", WSACleanup as usize);
-    exports.insert("#151", ordinal_151 as usize);
+    exports.insert("#151", __WSAFDIsSet as usize);
 
     exports.insert("WSAStartup", WSAStartup as usize);
     exports.insert("WSACleanup", WSACleanup as usize);
     exports.insert("WSAGetLastError", WSAGetLastError as usize);
+    exports.insert("WSASetLastError", WSASetLastError as usize);
+    exports.insert("__WSAFDIsSet", __WSAFDIsSet as usize);
+    exports.insert("gethostbyname", gethostbyname as usize);
+    exports.insert("gethostbyaddr", gethostbyaddr as usize);
+    exports.insert("getprotobyname", getprotobyname as usize);
     exports.insert("WSAAsyncSelect", WSAAsyncSelect as usize);
     exports.insert("WSAEventSelect", WSAEventSelect as usize);
     exports.insert("WSACreateEvent", WSACreateEvent as usize);
@@ -1773,14 +2277,29 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("WSAGetOverlappedResult", WSAGetOverlappedResult as usize);
     exports.insert("socket", socket as usize);
     exports.insert("inet_pton", inet_pton as usize);
+    exports.insert("inet_addr", inet_addr as usize);
+    exports.insert("inet_ntoa", inet_ntoa as usize);
     exports.insert("closesocket", closesocket as usize);
     exports.insert("connect", connect as usize);
     exports.insert("bind", bind as usize);
     exports.insert("listen", listen as usize);
     exports.insert("accept", accept as usize);
     exports.insert("send", send as usize);
+    exports.insert("sendto", sendto as usize);
     exports.insert("recv", recv as usize);
+    exports.insert("recvfrom", recvfrom as usize);
     exports.insert("select", select as usize);
+    exports.insert("getsockname", getsockname as usize);
+    exports.insert("getpeername", getpeername as usize);
+    exports.insert("setsockopt", setsockopt as usize);
+    exports.insert("getsockopt", getsockopt as usize);
+    exports.insert("ioctlsocket", ioctlsocket as usize);
+    exports.insert("shutdown", shutdown as usize);
+    exports.insert("htons", htons as usize);
+    exports.insert("ntohs", ntohs as usize);
+    exports.insert("htonl", htonl as usize);
+    exports.insert("ntohl", ntohl as usize);
+    exports.insert("gethostname", gethostname as usize);
     exports.insert("getaddrinfo", getaddrinfo as usize);
     exports.insert("freeaddrinfo", freeaddrinfo as usize);
     exports.insert("GetAddrInfoA", getaddrinfo as usize);

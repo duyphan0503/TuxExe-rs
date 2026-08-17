@@ -270,6 +270,7 @@ pub fn create_thread(
     creation_flags: u32,
     thread_id_out: *mut u32,
 ) -> Handle {
+    trace!(start = ?start_address, param = ?parameter, flags = creation_flags, "nt_kernel::create_thread called");
     if start_address.is_null() {
         return INVALID_HANDLE_VALUE;
     }
@@ -476,12 +477,10 @@ pub fn current_thread_pseudo_handle() -> Handle {
 }
 
 pub fn exit_thread(exit_code: u32) -> ! {
-    if teb::is_managed_guest_thread() {
-        panic::panic_any(ThreadExitSignal(exit_code));
-    }
-
+    tracing::info!(exit_code, "exit_thread terminating thread");
+    teb::destroy_current_teb();
     unsafe {
-        libc::_exit(exit_code as i32);
+        libc::pthread_exit(exit_code as usize as *mut c_void);
     }
 }
 

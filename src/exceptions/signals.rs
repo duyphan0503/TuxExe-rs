@@ -299,10 +299,47 @@ extern "C" fn host_signal_handler(
     }
 
     let breadcrumbs = telemetry::recent_compact(24);
+    let ip_module = crate::dll_manager::loader::module_base_for_address(instruction_pointer);
+    let ret_module = crate::dll_manager::loader::module_base_for_address(reg_dump.return_address);
+
+    // Inspect stack words
+    let mut stack_words = Vec::new();
+    for i in 0..24 {
+        let sp = reg_dump.rsp + i * 8;
+        let mut val = 0usize;
+        let read_ok = unsafe {
+            libc::memcpy(&mut val as *mut _ as *mut libc::c_void, sp as *const libc::c_void, 8)
+        };
+        if !read_ok.is_null() {
+            let m = crate::dll_manager::loader::module_base_for_address(val);
+            stack_words.push(format!("+0x{:02x}: 0x{:x} ({:?})", i * 8, val, m.map(|b| format!("base+0x{:x}", val - b))));
+        }
+    }
+
+    // Inspect string at rdx if readable
+    let mut rdx_str = String::new();
+    for offset in [32, 40, 48, 0] {
+        let ptr = reg_dump.rdx + offset;
+        let mut buf = [0u8; 64];
+        let ok = unsafe {
+            libc::memcpy(buf.as_mut_ptr() as *mut libc::c_void, ptr as *const libc::c_void, 63)
+        };
+        if !ok.is_null() {
+            let s: String = buf.iter().take_while(|&&b| b >= 0x20 && b <= 0x7e).map(|&b| b as char).collect();
+            if s.len() >= 3 {
+                rdx_str = format!("offset {}: \"{}\"", offset, s);
+                break;
+            }
+        }
+    }
+
     error!(
         ?record,
         breadcrumbs = %breadcrumbs,
-        instruction_pointer = format_args!("0x{:x}", instruction_pointer),
+        instruction_pointer = format_args!("0x{:x} (module_base: {:?}, rva: {:?})", instruction_pointer, ip_module.map(|b| format!("0x{:x}", b)), ip_module.map(|b| format!("0x{:x}", instruction_pointer - b))),
+        return_address = format_args!("0x{:x} (module_base: {:?}, rva: {:?})", reg_dump.return_address, ret_module.map(|b| format!("0x{:x}", b)), ret_module.map(|b| format!("0x{:x}", reg_dump.return_address - b))),
+        rdx_str = %rdx_str,
+        stack = ?stack_words,
         rax = format_args!("0x{:x}", reg_dump.rax),
         rbx = format_args!("0x{:x}", reg_dump.rbx),
         rcx = format_args!("0x{:x}", reg_dump.rcx),
@@ -319,7 +356,6 @@ extern "C" fn host_signal_handler(
         r15 = format_args!("0x{:x}", reg_dump.r15),
         rsp = format_args!("0x{:x}", reg_dump.rsp),
         rbp = format_args!("0x{:x}", reg_dump.rbp),
-        return_address = format_args!("0x{:x}", reg_dump.return_address),
         "Unhandled host signal in SEH emulation path"
     );
     // Fall back to default signal behavior once unhandled.

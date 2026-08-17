@@ -423,8 +423,7 @@ fn with_device<R>(handle: usize, f: impl FnOnce(&WaveOutDevice) -> R) -> Option<
 }
 
 extern "win64" fn timeGetTime() -> u32 {
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    (ts.as_millis() & 0xFFFF_FFFF) as u32
+    crate::win32::kernel32::time::get_tick_count()
 }
 
 extern "win64" fn timeBeginPeriod(_uPeriod: u32) -> u32 {
@@ -440,7 +439,7 @@ extern "win64" fn timeGetDevCaps(caps: *mut u8, size: u32) -> u32 {
     }
     unsafe {
         caps.cast::<u32>().write_unaligned(1);
-        caps.add(4).cast::<u32>().write_unaligned(1);
+        caps.add(4).cast::<u32>().write_unaligned(1000);
     }
     MMSYSERR_NOERROR
 }

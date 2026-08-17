@@ -44,6 +44,32 @@ pub fn seed_minimal_defaults(store: &RegistryStore) -> Result<(), RegistryError>
     let steam_hklm = r"HKLM\SOFTWARE\Valve\Steam";
     set_sz(store, steam_hklm, Some("InstallPath"), r"C:\Program Files (x86)\Steam")?;
 
+    // HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts
+    let fonts_key = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
+    set_sz(store, fonts_key, Some("Arial (TrueType)"), "arial.ttf")?;
+    set_sz(store, fonts_key, Some("Arial Bold (TrueType)"), "arialbd.ttf")?;
+    set_sz(store, fonts_key, Some("Arial Italic (TrueType)"), "ariali.ttf")?;
+    set_sz(store, fonts_key, Some("Arial Bold Italic (TrueType)"), "arialbi.ttf")?;
+    set_sz(store, fonts_key, Some("Times New Roman (TrueType)"), "times.ttf")?;
+    set_sz(store, fonts_key, Some("Courier New (TrueType)"), "cour.ttf")?;
+    set_sz(store, fonts_key, Some("Tahoma (TrueType)"), "tahoma.ttf")?;
+    set_sz(store, fonts_key, Some("Segoe UI (TrueType)"), "segoeui.ttf")?;
+    set_sz(store, fonts_key, Some("Verdana (TrueType)"), "verdana.ttf")?;
+    set_sz(store, fonts_key, Some("MS Gothic & MS PGothic & MS UI Gothic (TrueType)"), "msgothic.ttc")?;
+    set_sz(store, fonts_key, Some("MS Mincho & MS PMincho (TrueType)"), "msmincho.ttc")?;
+    set_sz(store, fonts_key, Some("Meiryo & Meiryo UI (TrueType)"), "meiryo.ttc")?;
+    set_sz(store, fonts_key, Some("SimSun & NSimSun (TrueType)"), "simsun.ttc")?;
+    set_sz(store, fonts_key, Some("Microsoft YaHei & Microsoft YaHei UI (TrueType)"), "msyh.ttc")?;
+    set_sz(store, fonts_key, Some("Malgun Gothic (TrueType)"), "malgun.ttf")?;
+    set_sz(store, fonts_key, Some("Gulim & GulimChe & Dotum & DotumChe (TrueType)"), "gulim.ttc")?;
+
+    // HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes
+    let font_sub_key = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes";
+    set_sz(store, font_sub_key, Some("MS Shell Dlg"), "Tahoma")?;
+    set_sz(store, font_sub_key, Some("MS Shell Dlg 2"), "Tahoma")?;
+    set_sz(store, font_sub_key, Some("Helv"), "Arial")?;
+    set_sz(store, font_sub_key, Some("Tms Rmn"), "Times New Roman")?;
+
     Ok(())
 }
 

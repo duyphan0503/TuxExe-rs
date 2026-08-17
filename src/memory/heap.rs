@@ -57,19 +57,23 @@ pub fn heap_create(_options: u32, _initial_size: usize, _maximum_size: usize) ->
     global_table().alloc(Box::new(HeapHandleObject { handle: 0, is_process_heap: false }))
 }
 
+static ALLOCATED_PTRS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<usize>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
 #[inline(always)]
 pub fn heap_alloc(_heap: Handle, flags: u32, bytes: usize) -> *mut c_void {
     let size = if bytes == 0 { 1 } else { bytes };
-    // The process heap must be compatible with UCRT allocations. Native Wine
-    // DLLs regularly transfer ownership between Heap* and CRT APIs, and the
-    // old mmap-plus-private-header allocator made that immediately unsafe.
-    unsafe {
+    let ptr = unsafe {
         if flags & HEAP_ZERO_MEMORY != 0 {
             libc::calloc(1, size)
         } else {
             libc::malloc(size)
         }
+    };
+    if !ptr.is_null() {
+        ALLOCATED_PTRS.lock().unwrap().insert(ptr as usize);
     }
+    ptr
 }
 
 #[inline(always)]
@@ -77,7 +81,10 @@ pub fn heap_free(_heap: Handle, _flags: u32, memory: *mut c_void) -> i32 {
     if memory.is_null() {
         return 1;
     }
-    unsafe { libc::free(memory) };
+    let was_present = ALLOCATED_PTRS.lock().unwrap().remove(&(memory as usize));
+    if was_present {
+        unsafe { libc::free(memory) };
+    }
     1
 }
 
@@ -94,10 +101,31 @@ pub fn heap_realloc(_heap: Handle, flags: u32, memory: *mut c_void, bytes: usize
     }
 
     let size = if bytes == 0 { 1 } else { bytes };
-    let old_size = heap_size(_heap, flags, memory);
-    let new_ptr = unsafe { libc::realloc(memory, size) };
-    if !new_ptr.is_null() && flags & HEAP_ZERO_MEMORY != 0 && size > old_size {
-        unsafe { libc::memset((new_ptr as *mut u8).add(old_size).cast(), 0, size - old_size) };
+    let mut set = ALLOCATED_PTRS.lock().unwrap();
+    let was_present = set.remove(&(memory as usize));
+    if !was_present {
+        drop(set);
+        return heap_alloc(_heap, flags, size);
+    }
+
+    let old_size = unsafe { libc::malloc_usable_size(memory) };
+    let new_ptr = unsafe {
+        if flags & HEAP_ZERO_MEMORY != 0 {
+            libc::calloc(1, size)
+        } else {
+            libc::malloc(size)
+        }
+    };
+    if !new_ptr.is_null() {
+        if old_size > 0 {
+            unsafe {
+                libc::memcpy(new_ptr, memory, old_size.min(size));
+            }
+        }
+        unsafe {
+            libc::free(memory);
+        }
+        set.insert(new_ptr as usize);
     }
     new_ptr
 }

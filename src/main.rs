@@ -59,6 +59,13 @@ enum Commands {
         #[arg(value_name = "PE_FILE")]
         file: PathBuf,
     },
+
+    /// Check and synchronize host fonts with virtual Windows C:\Windows\Fonts
+    Fonts {
+        /// Verbose list of all linked fonts
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -85,12 +92,81 @@ fn main() -> Result<()> {
         .context("Failed to set tracing subscriber")?;
 
     match cli.command {
+        Commands::Fonts { verbose } => {
+            let drives = tuxexe_rs::filesystem::drives::DriveMap::default();
+            let report = tuxexe_rs::filesystem::fonts::init_fonts_directory(&drives)
+                .map_err(|e| anyhow::anyhow!("Failed to initialize fonts: {e}"))?;
+
+            println!("TuxExe-rs Windows Fonts Virtualization Report");
+            println!("============================================");
+            println!("Virtual Fonts Directory: {}", report.fonts_dir.display());
+            println!("Total Linked Host Fonts: {}", report.linked_count);
+            println!("Standard Windows Aliases: {}", report.alias_count);
+            println!();
+
+            if let Some(health) = report.health {
+                println!("Font Categories Status:");
+                println!(
+                    "  - Latin (Arial, Times, Courier, etc.): {}",
+                    if health.has_latin_fonts { "Installed" } else { "Missing" }
+                );
+                println!(
+                    "  - CJK (Japanese / Chinese / Korean):   {}",
+                    if health.has_cjk_fonts { "Installed" } else { "Missing" }
+                );
+                println!(
+                    "    * Japanese Fonts:                   {}",
+                    if health.has_japanese_fonts { "Yes" } else { "No" }
+                );
+                println!(
+                    "    * Chinese Fonts:                    {}",
+                    if health.has_chinese_fonts { "Yes" } else { "No" }
+                );
+                println!();
+
+                if !health.missing_recommendations.is_empty() {
+                    println!("Recommendations for Missing Fonts:");
+                    for rec in health.missing_recommendations {
+                        println!("  - {rec}");
+                    }
+                    println!();
+                } else {
+                    println!("All essential font families (Latin + CJK) are healthy and available for games.");
+                }
+            }
+
+            if verbose {
+                println!("\nDiscovered Host Fonts in C:\\Windows\\Fonts:");
+                if let Ok(entries) = std::fs::read_dir(&report.fonts_dir) {
+                    let mut list: Vec<_> = entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    list.sort();
+                    for name in list {
+                        println!("  {name}");
+                    }
+                }
+            }
+
+            Ok(())
+        }
+
         Commands::Run { exe, args } => {
             std::thread::Builder::new()
                 .name("tuxexe-runner".to_string())
                 .stack_size(32 * 1024 * 1024)
                 .spawn(move || -> anyhow::Result<()> {
                     info!(exe = %exe.display(), ?args, "Preparing to execute PE");
+
+                    let drives = tuxexe_rs::filesystem::drives::DriveMap::default();
+                    if let Ok(report) = tuxexe_rs::filesystem::fonts::init_fonts_directory(&drives) {
+                        info!(
+                            linked_fonts = report.linked_count,
+                            aliases = report.alias_count,
+                            "Windows Fonts virtual directory synchronized"
+                        );
+                    }
 
                     tuxexe_rs::dll_manager::search::set_executable_directory(
                         exe.parent().map(PathBuf::from),
@@ -115,14 +191,14 @@ fn main() -> Result<()> {
                     if std::env::var("DXVK_CONFIG").is_err() {
                         std::env::set_var(
                             "DXVK_CONFIG",
-                            "dxgi.syncInterval=0;dxgi.maxFrameLatency=3;d3d11.relaxedBarriers=True;dxvk.useRawSsbo=True;dxvk.enableAsync=true;dxvk.numCompilerThreads=6;d3d11.constantBufferRangeCheck=False;d3d11.zeroInit=False",
+                            "dxgi.maxFrameLatency=2;d3d11.relaxedBarriers=True;dxvk.useRawSsbo=True;dxvk.enableAsync=true;dxvk.numCompilerThreads=6;d3d11.constantBufferRangeCheck=False;d3d11.zeroInit=False",
                         );
                     }
                     if std::env::var("__GL_SYNC_TO_VBLANK").is_err() {
-                        std::env::set_var("__GL_SYNC_TO_VBLANK", "0");
+                        std::env::set_var("__GL_SYNC_TO_VBLANK", "1");
                     }
                     if std::env::var("vblank_mode").is_err() {
-                        std::env::set_var("vblank_mode", "0");
+                        std::env::set_var("vblank_mode", "1");
                     }
 
                     // Auto-select dedicated NVIDIA GPU if available for hardware-accelerated 3D

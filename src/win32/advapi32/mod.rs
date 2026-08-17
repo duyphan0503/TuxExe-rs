@@ -90,6 +90,28 @@ extern "win64" fn CryptCreateHash(
     1
 }
 
+extern "win64" fn SystemFunction036(random_buffer: *mut u8, random_buffer_length: u32) -> u8 {
+    if random_buffer.is_null() || random_buffer_length == 0 {
+        return 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts_mut(random_buffer, random_buffer_length as usize) };
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(slice);
+    } else {
+        let mut seed = 0x12345678u64;
+        for byte in slice.iter_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *byte = (seed >> 32) as u8;
+        }
+    }
+    1
+}
+
+extern "win64" fn RtlGenRandom(random_buffer: *mut u8, random_buffer_length: u32) -> u8 {
+    SystemFunction036(random_buffer, random_buffer_length)
+}
+
 extern "win64" fn CryptHashData(
     hHash: HCRYPTHASH,
     pbData: *const u8,
@@ -766,6 +788,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("CryptGetUserKey", CryptGetUserKey as usize);
     exports.insert("CryptExportKey", CryptExportKey as usize);
     exports.insert("CryptDecrypt", CryptDecrypt as usize);
+    exports.insert("SystemFunction036", SystemFunction036 as usize);
+    exports.insert("RtlGenRandom", RtlGenRandom as usize);
 
     // Security / Token
     exports.insert("AllocateAndInitializeSid", AllocateAndInitializeSid as usize);

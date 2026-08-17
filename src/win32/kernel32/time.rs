@@ -342,9 +342,10 @@ pub extern "win64" fn get_local_time(lp_system_time: *mut SystemTime) {
 
 pub extern "win64" fn query_performance_counter(lp_performance_count: *mut u64) -> i32 {
     if !lp_performance_count.is_null() {
-        let elapsed = START_TIME.elapsed().as_nanos() as u64;
+        // Standard Windows 10/11 QPC frequency is 10 MHz (10,000,000 Hz, 100 ns ticks).
+        let elapsed_ticks = (START_TIME.elapsed().as_nanos() / 100) as u64;
         unsafe {
-            *lp_performance_count = elapsed;
+            *lp_performance_count = elapsed_ticks;
         }
     }
     1
@@ -353,8 +354,8 @@ pub extern "win64" fn query_performance_counter(lp_performance_count: *mut u64) 
 pub extern "win64" fn query_performance_frequency(lp_frequency: *mut u64) -> i32 {
     if !lp_frequency.is_null() {
         unsafe {
-            // We measure QPC in nanoseconds, so frequency is 1_000_000_000 per second.
-            *lp_frequency = 1_000_000_000;
+            // Standard Windows 10/11 QPC frequency: 10,000,000 counts per second (10 MHz).
+            *lp_frequency = 10_000_000;
         }
     }
     1

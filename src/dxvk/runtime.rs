@@ -115,6 +115,9 @@ fn load() -> Option<Runtime> {
     if env::var_os("DXVK_WSI_DRIVER").is_none() {
         unsafe { env::set_var("DXVK_WSI_DRIVER", "TUXEXE") };
     }
+    if env::var_os("DXVK_FRAME_RATE").is_none() {
+        unsafe { env::set_var("DXVK_FRAME_RATE", "60") };
+    }
 
     // DXGI is loaded first so D3D11's DT_NEEDED soname is already available.
     let dxgi = unsafe { open(&dxgi_path) }?;
