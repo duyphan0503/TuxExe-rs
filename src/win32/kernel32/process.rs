@@ -155,6 +155,7 @@ const ERROR_PROC_NOT_FOUND: u32 = 127;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_NO_MORE_FILES: u32 = 18;
 const ERROR_NOT_FOUND: u32 = 1168;
+const ERROR_TIMEOUT: u32 = 1460;
 const WAIT_IO_COMPLETION: u32 = 0x0000_00C0;
 const VALID_PRIORITY_CLASSES: [u32; 6] = [0x40, 0x20, 0x80, 0x100, 0x4000, 0x10000];
 const STILL_ACTIVE: u32 = 259;
@@ -3313,6 +3314,52 @@ mod tests {
     }
 
     #[test]
+    fn sleep_condition_variable_cs_reports_error_timeout() {
+        let _guard = crate::test_support::serial_guard();
+        let mut critical_section = 0usize;
+        let mut cv = 0usize;
+        super::super::sync::InitializeCriticalSection(
+            &raw mut critical_section as *mut c_void,
+        );
+        initialize_condition_variable(&raw mut cv as *mut c_void);
+        super::super::sync::EnterCriticalSection(&raw mut critical_section as *mut c_void);
+        set_last_error(ERROR_SUCCESS);
+
+        let awakened = sleep_condition_variable_cs(
+            &raw mut cv as *mut c_void,
+            &raw mut critical_section as *mut c_void,
+            1,
+        );
+
+        assert_eq!(awakened, 0);
+        assert_eq!(get_last_error(), 1460);
+        super::super::sync::LeaveCriticalSection(&raw mut critical_section as *mut c_void);
+        super::super::sync::DeleteCriticalSection(&raw mut critical_section as *mut c_void);
+    }
+
+    #[test]
+    fn sleep_condition_variable_srw_reports_error_timeout() {
+        let _guard = crate::test_support::serial_guard();
+        let mut srw = 0usize;
+        let mut cv = 0usize;
+        initialize_srw_lock(&raw mut srw as *mut c_void);
+        initialize_condition_variable(&raw mut cv as *mut c_void);
+        super::super::sync::AcquireSRWLockExclusive(&raw mut srw as *mut c_void);
+        set_last_error(ERROR_SUCCESS);
+
+        let awakened = sleep_condition_variable_srw(
+            &raw mut cv as *mut c_void,
+            &raw mut srw as *mut c_void,
+            1,
+            0,
+        );
+
+        assert_eq!(awakened, 0);
+        assert_eq!(get_last_error(), 1460);
+        super::super::sync::ReleaseSRWLockExclusive(&raw mut srw as *mut c_void);
+    }
+
+    #[test]
     fn queue_user_apc_with_thread_reference_handle_and_execute() {
         let _guard = crate::test_support::serial_guard();
         static APC_CALLED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -3893,6 +3940,9 @@ pub extern "win64" fn sleep_condition_variable_cs(
             super::sync::LeaveCriticalSection(crit_section)
         });
     super::sync::EnterCriticalSection(crit_section);
+    if !awakened {
+        set_last_error(ERROR_TIMEOUT);
+    }
     i32::from(awakened)
 }
 
@@ -3918,6 +3968,9 @@ pub extern "win64" fn sleep_condition_variable_srw(
         super::sync::AcquireSRWLockShared(srw_lock);
     } else {
         super::sync::AcquireSRWLockExclusive(srw_lock);
+    }
+    if !awakened {
+        set_last_error(ERROR_TIMEOUT);
     }
     i32::from(awakened)
 }

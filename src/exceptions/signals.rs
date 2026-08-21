@@ -34,6 +34,10 @@ pub fn signal_to_exception_code(signal: i32) -> u32 {
     }
 }
 
+fn signal_can_recover_memory_fault(signal: i32) -> bool {
+    signal == libc::SIGSEGV
+}
+
 extern "C" fn host_signal_handler(
     signal: libc::c_int,
     info: *mut libc::siginfo_t,
@@ -61,8 +65,13 @@ extern "C" fn host_signal_handler(
         fault_address,
     };
 
-    if crate::memory::virtual_alloc::try_handle_page_fault(record.fault_address) {
-        trace!(fault_address = format_args!("0x{:x}", record.fault_address), "Auto-committed VirtualAlloc page");
+    if signal_can_recover_memory_fault(signal)
+        && crate::memory::virtual_alloc::try_handle_page_fault(record.fault_address)
+    {
+        trace!(
+            fault_address = format_args!("0x{:x}", record.fault_address),
+            "Auto-committed VirtualAlloc page"
+        );
         return;
     }
 
@@ -487,5 +496,13 @@ mod tests {
         assert_eq!(signal_to_exception_code(libc::SIGILL), EXCEPTION_ILLEGAL_INSTRUCTION);
         assert_eq!(signal_to_exception_code(libc::SIGFPE), EXCEPTION_INT_DIVIDE_BY_ZERO);
         assert_eq!(signal_to_exception_code(libc::SIGTRAP), EXCEPTION_BREAKPOINT);
+    }
+
+    #[test]
+    fn only_access_violations_enter_memory_fault_recovery() {
+        assert!(signal_can_recover_memory_fault(libc::SIGSEGV));
+        assert!(!signal_can_recover_memory_fault(libc::SIGFPE));
+        assert!(!signal_can_recover_memory_fault(libc::SIGILL));
+        assert!(!signal_can_recover_memory_fault(libc::SIGTRAP));
     }
 }

@@ -8,6 +8,7 @@ const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
 const PROCESSOR_ARCHITECTURE_INTEL: u16 = 0;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+const RELATION_GROUP: u32 = 4;
 
 #[repr(C)]
 #[allow(non_snake_case)]
@@ -37,6 +38,32 @@ pub struct SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX {
     pub Relationship: u32,
     pub Size: u32,
     pub Reserved: [u8; 40],
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+struct PROCESSOR_GROUP_INFO {
+    MaximumProcessorCount: u8,
+    ActiveProcessorCount: u8,
+    Reserved: [u8; 38],
+    ActiveProcessorMask: usize,
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+struct GROUP_RELATIONSHIP {
+    MaximumGroupCount: u16,
+    ActiveGroupCount: u16,
+    Reserved: [u8; 20],
+    GroupInfo: [PROCESSOR_GROUP_INFO; 1],
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+struct SYSTEM_LOGICAL_PROCESSOR_GROUP_INFORMATION {
+    Relationship: u32,
+    Size: u32,
+    Group: GROUP_RELATIONSHIP,
 }
 
 #[repr(C)]
@@ -455,7 +482,11 @@ pub extern "win64" fn GetLogicalProcessorInformationEx(
         return 0;
     }
 
-    let required = std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>() as u32;
+    let required = if RelationshipType == RELATION_GROUP {
+        std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_GROUP_INFORMATION>() as u32
+    } else {
+        std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>() as u32
+    };
     unsafe {
         if Buffer.is_null() || *ReturnedLength < required {
             *ReturnedLength = required;
@@ -463,11 +494,34 @@ pub extern "win64" fn GetLogicalProcessorInformationEx(
             return 0;
         }
 
-        *Buffer = SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX {
-            Relationship: RelationshipType,
-            Size: required,
-            Reserved: [0; 40],
-        };
+        if RelationshipType == RELATION_GROUP {
+            let num_cpus = num_cpus_from_system().max(1).min(usize::BITS);
+            let active_processor_mask =
+                if num_cpus >= usize::BITS { usize::MAX } else { (1usize << num_cpus) - 1 };
+            Buffer.cast::<SYSTEM_LOGICAL_PROCESSOR_GROUP_INFORMATION>().write_unaligned(
+                SYSTEM_LOGICAL_PROCESSOR_GROUP_INFORMATION {
+                    Relationship: RELATION_GROUP,
+                    Size: required,
+                    Group: GROUP_RELATIONSHIP {
+                        MaximumGroupCount: 1,
+                        ActiveGroupCount: 1,
+                        Reserved: [0; 20],
+                        GroupInfo: [PROCESSOR_GROUP_INFO {
+                            MaximumProcessorCount: num_cpus as u8,
+                            ActiveProcessorCount: num_cpus as u8,
+                            Reserved: [0; 38],
+                            ActiveProcessorMask: active_processor_mask,
+                        }],
+                    },
+                },
+            );
+        } else {
+            Buffer.write_unaligned(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX {
+                Relationship: RelationshipType,
+                Size: required,
+                Reserved: [0; 40],
+            });
+        }
         *ReturnedLength = required;
     }
     crate::win32::kernel32::error::set_last_error(0);
@@ -767,5 +821,35 @@ mod tests {
         // VER_MINORVERSION (0x1) -> field index 0 => shift 0
         let combined = VerSetConditionMask(mask, 0x1, 5);
         assert_eq!(combined, (3u64 << 3) | 5u64);
+    }
+
+    #[test]
+    fn logical_processor_group_reports_at_least_one_active_cpu() {
+        const GROUP_INFO_OFFSET: usize = 32;
+        const ACTIVE_PROCESSOR_COUNT_OFFSET: usize = GROUP_INFO_OFFSET + 1;
+        const ACTIVE_PROCESSOR_MASK_OFFSET: usize = GROUP_INFO_OFFSET + 40;
+
+        let mut required = 0u32;
+        assert_eq!(
+            GetLogicalProcessorInformationEx(RELATION_GROUP, std::ptr::null_mut(), &mut required,),
+            0
+        );
+        assert!(required as usize >= ACTIVE_PROCESSOR_MASK_OFFSET + std::mem::size_of::<usize>());
+
+        let mut buffer = vec![0u8; required as usize];
+        assert_eq!(
+            GetLogicalProcessorInformationEx(
+                RELATION_GROUP,
+                buffer.as_mut_ptr().cast(),
+                &mut required,
+            ),
+            1
+        );
+
+        assert!(buffer[ACTIVE_PROCESSOR_COUNT_OFFSET] > 0);
+        let mask = unsafe {
+            buffer.as_ptr().add(ACTIVE_PROCESSOR_MASK_OFFSET).cast::<usize>().read_unaligned()
+        };
+        assert_ne!(mask, 0);
     }
 }

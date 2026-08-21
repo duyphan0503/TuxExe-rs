@@ -4,9 +4,9 @@
 
 use std::{
     any::Any,
+    collections::HashMap,
     ffi::c_void,
     panic,
-    collections::HashMap,
     sync::{Arc, Condvar, Mutex, OnceLock, Weak},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -41,6 +41,7 @@ thread_local! {
 #[derive(Debug)]
 struct ThreadControl {
     completed: bool,
+    exited_via_api: bool,
     exit_code: u32,
     os_thread_id: u32,
     suspend_count: u32,
@@ -134,7 +135,11 @@ impl ThreadHandleObject {
         }
 
         if let Some(join) = join_handle.lock().expect("thread join handle poisoned").take() {
-            let _ = join.join();
+            if control.0.lock().expect("thread control poisoned").exited_via_api {
+                drop(join);
+            } else {
+                let _ = join.join();
+            }
         }
 
         WAIT_OBJECT_0
@@ -262,6 +267,15 @@ fn finish_thread(control: &Arc<(Mutex<ThreadControl>, Condvar)>, exit_code: u32)
     condvar.notify_all();
 }
 
+fn finish_thread_via_api(control: &Arc<(Mutex<ThreadControl>, Condvar)>, exit_code: u32) {
+    let (lock, condvar) = &**control;
+    let mut guard = lock.lock().expect("thread control poisoned");
+    guard.completed = true;
+    guard.exited_via_api = true;
+    guard.exit_code = exit_code;
+    condvar.notify_all();
+}
+
 pub fn create_thread(
     _attributes: *const c_void,
     stack_size: usize,
@@ -280,6 +294,7 @@ pub fn create_thread(
     let control = Arc::new((
         Mutex::new(ThreadControl {
             completed: false,
+            exited_via_api: false,
             exit_code: 0,
             os_thread_id: 0,
             suspend_count: if creation_flags & CREATE_SUSPENDED != 0 { 1 } else { 0 },
@@ -291,7 +306,8 @@ pub fn create_thread(
     let start_address = start as usize;
     let parameter = parameter as usize;
     let control_clone = Arc::clone(&control);
-    let actual_stack_size = if stack_size > 0 { stack_size.max(512 * 1024) } else { 2 * 1024 * 1024 };
+    let actual_stack_size =
+        if stack_size > 0 { stack_size.max(512 * 1024) } else { 2 * 1024 * 1024 };
     let builder = thread::Builder::new().stack_size(actual_stack_size);
 
     let join_handle = match builder.spawn(move || {
@@ -478,6 +494,15 @@ pub fn current_thread_pseudo_handle() -> Handle {
 
 pub fn exit_thread(exit_code: u32) -> ! {
     tracing::info!(exit_code, "exit_thread terminating thread");
+    let thread_id = current_thread_id();
+    let control = thread_registry()
+        .lock()
+        .expect("thread registry poisoned")
+        .get(&thread_id)
+        .and_then(Weak::upgrade);
+    if let Some(control) = control {
+        finish_thread_via_api(&control, exit_code);
+    }
     teb::destroy_current_teb();
     unsafe {
         libc::pthread_exit(exit_code as usize as *mut c_void);
@@ -501,6 +526,10 @@ mod tests {
         42
     }
 
+    unsafe extern "win64" fn exiting_thread(_arg: *mut c_void) -> u32 {
+        exit_thread(123)
+    }
+
     #[test]
     fn guest_threads_can_be_created_and_waited() {
         let _guard = serial_guard();
@@ -519,6 +548,22 @@ mod tests {
         assert_ne!(thread_id, 0);
         assert_eq!(wait_for_thread(handle, INFINITE), WAIT_OBJECT_0);
         assert_eq!(THREAD_RESULT.load(Ordering::SeqCst), 7);
+    }
+
+    #[test]
+    fn exit_thread_signals_waiters() {
+        let _guard = serial_guard();
+        let handle = create_thread(
+            std::ptr::null(),
+            0,
+            exiting_thread as *const c_void,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+        );
+
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        assert_eq!(wait_for_thread(handle, 500), WAIT_OBJECT_0);
     }
 
     #[test]
@@ -554,5 +599,4 @@ mod tests {
         assert_eq!(resume_thread(CURRENT_THREAD_PSEUDO_HANDLE), 1);
         assert_eq!(resume_thread(CURRENT_THREAD_PSEUDO_HANDLE), 0);
     }
-
 }
