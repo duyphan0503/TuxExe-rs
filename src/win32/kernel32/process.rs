@@ -894,30 +894,33 @@ pub extern "win64" fn free_library_api(h_lib_module: *mut c_void) -> i32 {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref ENV_STRINGS_W: Vec<u16> = {
-        let mut block: Vec<u16> = Vec::new();
-        for (k, v) in std::env::vars() {
-            let entry = format!("{k}={v}");
-            block.extend(entry.encode_utf16());
-            block.push(0);
-        }
-        // Environment block terminator is an extra trailing NUL.
+fn environment_block_w() -> *mut u16 {
+    let mut block = Vec::new();
+    for (key, value) in super::env::guest_environment_snapshot() {
+        block.extend(format!("{key}={value}").encode_utf16());
         block.push(0);
-        block
-    };
+    }
+    block.push(0);
+    let byte_len = block.len().saturating_mul(std::mem::size_of::<u16>());
+    let output = unsafe { libc::malloc(byte_len) }.cast::<u16>();
+    if !output.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(block.as_ptr(), output, block.len()) };
+    }
+    output
+}
 
-    static ref ENV_STRINGS_A: Vec<u8> = {
-        let mut block: Vec<u8> = Vec::new();
-        for (k, v) in std::env::vars() {
-            let entry = format!("{k}={v}");
-            block.extend(entry.as_bytes());
-            block.push(0);
-        }
-        // Environment block terminator is an extra trailing NUL.
+fn environment_block_a() -> *mut i8 {
+    let mut block = Vec::new();
+    for (key, value) in super::env::guest_environment_snapshot() {
+        block.extend(format!("{key}={value}").bytes());
         block.push(0);
-        block
-    };
+    }
+    block.push(0);
+    let output = unsafe { libc::malloc(block.len()) }.cast::<i8>();
+    if !output.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(block.as_ptr(), output.cast::<u8>(), block.len()) };
+    }
+    output
 }
 
 pub extern "win64" fn get_command_line_a() -> *const i8 {
@@ -933,18 +936,26 @@ pub extern "win64" fn get_command_line_w() -> *const u16 {
 }
 
 pub extern "win64" fn get_environment_strings_w() -> *mut u16 {
-    ENV_STRINGS_W.as_ptr() as *mut u16
+    environment_block_w()
 }
 
-pub extern "win64" fn free_environment_strings_w(_lpsz_environment_block: *mut u16) -> i32 {
+pub extern "win64" fn free_environment_strings_w(lpsz_environment_block: *mut u16) -> i32 {
+    if lpsz_environment_block.is_null() {
+        return 0;
+    }
+    unsafe { libc::free(lpsz_environment_block.cast()) };
     1
 }
 
 pub extern "win64" fn get_environment_strings_a() -> *mut i8 {
-    ENV_STRINGS_A.as_ptr() as *mut i8
+    environment_block_a()
 }
 
-pub extern "win64" fn free_environment_strings_a(_lpsz_environment_block: *mut i8) -> i32 {
+pub extern "win64" fn free_environment_strings_a(lpsz_environment_block: *mut i8) -> i32 {
+    if lpsz_environment_block.is_null() {
+        return 0;
+    }
+    unsafe { libc::free(lpsz_environment_block.cast()) };
     1
 }
 
@@ -2946,6 +2957,37 @@ mod tests {
         }
 
         assert!(saw_separator || unsafe { *block } == 0);
+        assert_eq!(free_environment_strings_w(block), 1);
+    }
+
+    #[test]
+    fn environment_strings_expose_windows_paths_instead_of_host_paths() {
+        let _guard = crate::test_support::serial_guard();
+        crate::win32::kernel32::env::init_windows_env_vars();
+        let block = get_environment_strings_w();
+        assert!(!block.is_null());
+
+        let mut entries = Vec::new();
+        let mut current = Vec::new();
+        let mut index = 0usize;
+        loop {
+            let ch = unsafe { *block.add(index) };
+            if ch == 0 {
+                if current.is_empty() {
+                    break;
+                }
+                entries.push(String::from_utf16_lossy(&current));
+                current.clear();
+            } else {
+                current.push(ch);
+            }
+            index += 1;
+            assert!(index < 1_000_000, "environment block missing terminator");
+        }
+
+        assert!(entries.iter().any(|entry| entry == r"USERPROFILE=C:\Users\User"));
+        assert!(entries.iter().any(|entry| entry == r"APPDATA=C:\Users\User\AppData\Roaming"));
+        assert!(!entries.iter().any(|entry| entry.contains("users/tuxexe")));
         assert_eq!(free_environment_strings_w(block), 1);
     }
 

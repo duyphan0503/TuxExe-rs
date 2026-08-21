@@ -4,6 +4,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static DIRECTORY_SCAN_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 struct CaseFoldCache {
     entries: RwLock<HashMap<String, Option<PathBuf>>>,
 }
@@ -98,8 +104,20 @@ pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
     let key = cache_key(path);
 
     // Fast-path: Check memory cache first (instant hit, 0 syscalls)
-    if let Some(cached_opt) = global_cache().get(&key) {
-        return cached_opt;
+    match global_cache().get(&key) {
+        Some(Some(cached)) => return Some(cached),
+        Some(None) => {
+            // Guest-created files call `record_file_created`, so a negative entry normally
+            // remains authoritative without rescanning the whole directory.  The exact-path
+            // probe also notices files created externally on the Linux side.
+            if path.exists() {
+                let path_buf = path.to_path_buf();
+                global_cache().insert_batch(vec![(key, path_buf.clone())]);
+                return Some(path_buf);
+            }
+            return None;
+        }
+        None => {}
     }
 
     // Check if the exact path exists on disk
@@ -121,6 +139,8 @@ pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
             if let Some(file_name) = path.file_name() {
                 let file_name_str = file_name.to_string_lossy();
                 let target_numeric_key = normalize_numeric_key(&file_name_str);
+                #[cfg(test)]
+                DIRECTORY_SCAN_COUNT.fetch_add(1, Ordering::Relaxed);
                 if let Ok(dir_entries) = std::fs::read_dir(&actual_parent) {
                     let mut matched = None;
                     let mut numeric_matched = None;
@@ -215,5 +235,36 @@ mod tests {
         let lookup_lower = temp.path().join("savemap03.png");
         let resolved_lower = resolve_case_insensitive(&lookup_lower).expect("resolved_lower");
         assert_eq!(resolved_lower, real_file);
+    }
+
+    #[test]
+    fn refreshes_a_cached_miss_after_a_save_file_appears() {
+        let _guard = serial_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lookup = temp.path().join("SaveImage03.png");
+
+        assert!(resolve_case_insensitive(&lookup).is_none());
+        std::fs::write(&lookup, b"real save thumbnail").expect("create save image");
+
+        assert_eq!(resolve_case_insensitive(&lookup), Some(lookup));
+    }
+
+    #[test]
+    fn cached_miss_does_not_rescan_an_unchanged_save_directory() {
+        let _guard = serial_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lookup = temp.path().join("SaveImage99.png");
+
+        let before = DIRECTORY_SCAN_COUNT.load(Ordering::Relaxed);
+        assert!(resolve_case_insensitive(&lookup).is_none());
+        let after_first = DIRECTORY_SCAN_COUNT.load(Ordering::Relaxed);
+        assert!(after_first > before, "first miss must inspect its directory");
+
+        assert!(resolve_case_insensitive(&lookup).is_none());
+        assert_eq!(
+            DIRECTORY_SCAN_COUNT.load(Ordering::Relaxed),
+            after_first,
+            "a cached miss must not rescan the directory"
+        );
     }
 }

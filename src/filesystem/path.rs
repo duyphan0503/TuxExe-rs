@@ -13,11 +13,11 @@ pub struct SpecialFolders {
 
 impl SpecialFolders {
     pub fn from_host_env() -> Self {
-        let user_profile =
+        let home =
             std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/tmp"));
-        let temp =
-            std::env::var("TMPDIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/tmp"));
-        let app_data = user_profile.join(".local/share");
+        let user_profile = home.join(".tuxexe/drive_c/users/User");
+        let temp = user_profile.join("AppData/Local/Temp");
+        let app_data = user_profile.join("AppData/Roaming");
 
         Self { temp, user_profile, app_data }
     }
@@ -117,6 +117,7 @@ pub fn host_to_windows(host_path: &Path, drives: &DriveMap) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::serial_guard;
     use std::path::Path;
 
     #[test]
@@ -159,5 +160,25 @@ mod tests {
             host_to_windows(Path::new("/sandbox/.tuxexe/drive_c/Users/tester/file.txt"), &drives)
                 .expect("to windows path");
         assert_eq!(win, r"C:\Users\tester\file.txt");
+    }
+
+    #[test]
+    fn host_special_folders_live_inside_the_virtual_windows_profile() {
+        let _guard = serial_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let special = SpecialFolders::from_host_env();
+
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
+        let profile = temp.path().join(".tuxexe/drive_c/users/User");
+        assert_eq!(special.user_profile, profile);
+        assert_eq!(special.app_data, profile.join("AppData/Roaming"));
+        assert_eq!(special.temp, profile.join("AppData/Local/Temp"));
     }
 }

@@ -203,6 +203,7 @@ fn encode_wide(value: &str) -> Box<[u16]> {
 
 fn build_process_environment(image_base: usize) -> ProcessEnvironment {
     init_global_table();
+    crate::win32::kernel32::env::init_windows_env_vars();
     let process_heap = heap::get_process_heap();
 
     let cwd = env::current_dir()
@@ -214,8 +215,12 @@ fn build_process_environment(image_base: usize) -> ProcessEnvironment {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "tuxexe".to_string());
     let command_line = env::args().collect::<Vec<_>>().join(" ");
-    let environment =
-        env::vars().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("\u{0}");
+    let mut environment = crate::win32::kernel32::env::guest_environment_snapshot()
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\u{0}");
+    environment.push('\0');
 
     let current_directory = encode_wide(&cwd);
     let image_path_name = encode_wide(&image_path);

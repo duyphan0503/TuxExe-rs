@@ -755,10 +755,18 @@ pub fn try_handle_page_fault(addr: usize) -> bool {
         }
     }
 
-    // Fallback for native runtime memory (Mono BDWGC card table write barriers & guard pages)
-    let ret = unsafe {
-        libc::mprotect(page_base as *mut c_void, page_sz, libc::PROT_READ | libc::PROT_WRITE)
-    };
+    // Fallback for native runtime memory (Mono BDWGC card tables, JIT pages and guard pages).
+    // Preserve execute permission when recovering a write fault on generated code.  Dropping X
+    // here makes the resumed instruction fault forever on the same page.
+    let existing_protect = find_host_mapping(addr)
+        .filter(|info| info.state == MEM_COMMIT)
+        .map(|info| page_protect_to_native(info.protect))
+        .unwrap_or(libc::PROT_NONE);
+    let recovered_protect = existing_protect | libc::PROT_READ | libc::PROT_WRITE;
+    let ret = unsafe { libc::mprotect(page_base as *mut c_void, page_sz, recovered_protect) };
+    if ret == 0 {
+        invalidate_host_mapping_cache();
+    }
     ret == 0
 }
 
@@ -799,6 +807,34 @@ mod tests {
 
         assert_eq!(virtual_free(ptr, 0, MEM_RELEASE), 1);
         assert!(query_allocation(ptr as usize).is_none());
+    }
+
+    #[test]
+    fn native_executable_mapping_stays_executable_after_fault_recovery() {
+        let _guard = serial_guard();
+        let page = page_size();
+        let mapping = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(mapping, libc::MAP_FAILED);
+        assert_eq!(
+            unsafe { libc::mprotect(mapping, page, libc::PROT_READ | libc::PROT_EXEC) },
+            0
+        );
+
+        assert!(try_handle_page_fault(mapping as usize));
+        let mappings = parse_host_mappings().expect("host mappings");
+        let info = mapping_containing(&mappings, mapping as usize).expect("test mapping");
+
+        unsafe { libc::munmap(mapping, page) };
+        assert_eq!(info.protect, PAGE_EXECUTE_READWRITE);
     }
 
     #[test]

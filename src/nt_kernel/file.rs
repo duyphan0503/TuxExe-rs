@@ -147,7 +147,7 @@ fn resolve_windows_path(windows_path: &str, create: bool) -> Result<PathBuf, NtS
     // Fallback: If opening a missing save image/thumbnail (e.g. SaveMapXX.png or SaveImageXX.png)
     // for a slot that has save data, copy an existing template PNG in that folder or generate a
     // valid, CRC-verified PNG on demand so that Unity's ImageConversion::LoadImage succeeds.
-    if !create {
+    if !create && std::env::var_os("TUXEXE_SYNTHESIZE_MISSING_SAVE_IMAGES").is_some() {
         if let Some(file_name) = translated.file_name().and_then(|n| n.to_str()) {
             let lower_name = file_name.to_ascii_lowercase();
             if (lower_name.starts_with("savemap") || lower_name.starts_with("saveimage"))
@@ -670,5 +670,57 @@ mod tests {
         let mut names: Vec<_> = entries.into_iter().map(|e| e.file_name).collect();
         names.sort();
         assert_eq!(names, vec!["a.txt".to_string(), "b.txt".to_string()]);
+    }
+
+    #[test]
+    fn missing_save_image_read_does_not_create_placeholder_data() {
+        let _guard = serial_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let image = temp.path().join("SaveImage03.png");
+
+        assert!(matches!(
+            nt_query_information_by_path(&image.to_string_lossy()),
+            Err(status) if status == STATUS_OBJECT_NAME_NOT_FOUND
+        ));
+        assert!(!image.exists(), "a read-only lookup must not mutate the game directory");
+    }
+
+    #[test]
+    fn z_drive_reads_real_streaming_assets_save_and_image_files() {
+        let _guard = serial_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let assets = temp.path().join("Mad Island_Data/StreamingAssets/XML");
+        std::fs::create_dir_all(&assets).expect("create assets");
+        let fixtures = [
+            (assets.join("SaveData03.xml"), b"<save>real data</save>".as_slice()),
+            (assets.join("SaveImage03.png"), b"\x89PNG\r\n\x1a\nreal image".as_slice()),
+        ];
+
+        for (host_path, expected) in fixtures {
+            std::fs::write(&host_path, expected).expect("write fixture");
+            let windows_path = format!(
+                "Z:\\{}",
+                host_path.to_string_lossy().trim_start_matches('/').replace('/', "\\")
+            );
+
+            let info = nt_query_information_by_path(&windows_path).expect("query through Z drive");
+            assert_eq!(info.file_size, expected.len() as u64);
+            let handle =
+                nt_create_file(&windows_path, true, false, CreateDisposition::OpenExisting)
+                    .expect("open through Z drive");
+            let mut output = vec![0u8; expected.len()];
+            let mut read = 0;
+            assert_eq!(
+                nt_read_file(
+                    handle,
+                    output.as_mut_ptr().cast(),
+                    output.len() as u32,
+                    Some(&mut read),
+                ),
+                STATUS_SUCCESS
+            );
+            assert_eq!(read as usize, expected.len());
+            assert_eq!(output, expected);
+        }
     }
 }

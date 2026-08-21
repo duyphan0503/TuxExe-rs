@@ -1,14 +1,54 @@
 //! Environment variable APIs
 
+use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::ptr;
+use std::sync::{OnceLock, RwLock};
+
+type GuestEnvironmentEntry = Option<(String, String)>;
+
+fn guest_environment_overrides() -> &'static RwLock<BTreeMap<String, GuestEnvironmentEntry>> {
+    static OVERRIDES: OnceLock<RwLock<BTreeMap<String, GuestEnvironmentEntry>>> = OnceLock::new();
+    OVERRIDES.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+fn set_guest_environment_variable(name: &str, value: Option<&str>) {
+    let folded = name.to_ascii_uppercase();
+    if let Ok(mut overrides) = guest_environment_overrides().write() {
+        overrides.insert(folded, value.map(|value| (name.to_string(), value.to_string())));
+    }
+}
+
+pub(crate) fn guest_environment_snapshot() -> Vec<(String, String)> {
+    let mut merged: BTreeMap<String, (String, String)> =
+        std::env::vars().map(|(name, value)| (name.to_ascii_uppercase(), (name, value))).collect();
+    if let Ok(overrides) = guest_environment_overrides().read() {
+        for (folded, entry) in overrides.iter() {
+            match entry {
+                Some((name, value)) => {
+                    merged.insert(folded.clone(), (name.clone(), value.clone()));
+                }
+                None => {
+                    merged.remove(folded);
+                }
+            }
+        }
+    }
+    merged.into_values().collect()
+}
 
 fn lookup_env_var_case_insensitive(name: &str) -> Option<String> {
+    let folded = name.to_ascii_uppercase();
+    if let Ok(overrides) = guest_environment_overrides().read() {
+        if let Some(entry) = overrides.get(&folded) {
+            return entry.as_ref().map(|(_, value)| value.clone());
+        }
+    }
+
     if let Ok(value) = std::env::var(name) {
         return Some(value);
     }
 
-    let folded = name.to_ascii_uppercase();
     std::env::vars().find_map(|(key, value)| (key.to_ascii_uppercase() == folded).then_some(value))
 }
 
@@ -135,7 +175,7 @@ pub extern "win64" fn SetEnvironmentVariableA(lpName: *const u8, lpValue: *const
 
         if lpValue.is_null() {
             // Remove the variable
-            std::env::remove_var(name);
+            set_guest_environment_variable(name, None);
         } else {
             let value_cstr = CStr::from_ptr(lpValue as *const i8);
             let value = match value_cstr.to_str() {
@@ -144,7 +184,7 @@ pub extern "win64" fn SetEnvironmentVariableA(lpName: *const u8, lpValue: *const
             };
 
             tracing::trace!("SetEnvironmentVariableA: {}={}", name, value);
-            std::env::set_var(name, value);
+            set_guest_environment_variable(name, Some(value));
         }
     }
 
@@ -164,11 +204,11 @@ pub extern "win64" fn SetEnvironmentVariableW(lpName: *const u16, lpValue: *cons
 
     if lpValue.is_null() {
         // Remove the variable
-        std::env::remove_var(&name);
+        set_guest_environment_variable(&name, None);
     } else {
         let value = crate::utils::wide_string::wide_to_string(lpValue);
         tracing::trace!("SetEnvironmentVariableW: {}={}", name, value);
-        std::env::set_var(&name, &value);
+        set_guest_environment_variable(&name, Some(&value));
     }
 
     1 // TRUE
@@ -269,7 +309,7 @@ fn expand_env_vars(input: &str) -> String {
 
             if found_end && !var_name.is_empty() {
                 // Try to get the variable value
-                if let Ok(value) = std::env::var(&var_name) {
+                if let Some(value) = lookup_env_var_case_insensitive(&var_name) {
                     result.push_str(&value);
                 } else {
                     // Variable not found, keep original
@@ -292,64 +332,84 @@ fn expand_env_vars(input: &str) -> String {
 
 /// Initialize common Windows environment variables
 pub fn init_windows_env_vars() {
-    use std::env;
-
-    // Set up common Windows environment variables if not already set
-    let home_dir = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let tuxexe_root = format!("{}/.tuxexe", home_dir);
-    let drive_c = format!("{}/drive_c", tuxexe_root);
-
-    if env::var("SYSTEMROOT").is_err() {
-        env::set_var("SYSTEMROOT", format!("{}/Windows", drive_c));
+    let home =
+        std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| "/tmp".into());
+    let profile = home.join(".tuxexe/drive_c/users/User");
+    for directory in [
+        profile.join("AppData/Roaming"),
+        profile.join("AppData/Local"),
+        profile.join("AppData/LocalLow"),
+        profile.join("AppData/Local/Temp"),
+        profile.join("Documents"),
+    ] {
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            tracing::warn!(?directory, %error, "Failed to create virtual Windows profile directory");
+        }
     }
 
-    if env::var("WINDIR").is_err() {
-        env::set_var("WINDIR", format!("{}/Windows", drive_c));
-    }
-
-    if env::var("PROGRAMFILES").is_err() {
-        env::set_var("PROGRAMFILES", format!("{}/Program Files", drive_c));
-    }
-
-    if env::var("PROGRAMFILES(X86)").is_err() {
-        env::set_var("PROGRAMFILES(X86)", format!("{}/Program Files (x86)", drive_c));
-    }
-
-    if env::var("ProgramFiles").is_err() {
-        env::set_var("ProgramFiles", format!("{}/Program Files", drive_c));
-    }
-
-    if env::var("ProgramFiles(x86)").is_err() {
-        env::set_var("ProgramFiles(x86)", format!("{}/Program Files (x86)", drive_c));
-    }
-
-    if env::var("ProgramData").is_err() {
-        env::set_var("ProgramData", format!("{}/ProgramData", drive_c));
-    }
-
-    if env::var("USERPROFILE").is_err() {
-        env::set_var("USERPROFILE", format!("{}/users/tuxexe", drive_c));
-    }
-
-    if env::var("APPDATA").is_err() {
-        env::set_var("APPDATA", format!("{}/users/tuxexe/AppData/Roaming", drive_c));
-    }
-
-    if env::var("LOCALAPPDATA").is_err() {
-        env::set_var("LOCALAPPDATA", format!("{}/users/tuxexe/AppData/Local", drive_c));
-    }
-
-    if env::var("TEMP").is_err() {
-        env::set_var("TEMP", "/tmp");
-    }
-
-    if env::var("TMP").is_err() {
-        env::set_var("TMP", "/tmp");
-    }
-
-    if env::var("COMPUTERNAME").is_err() {
-        env::set_var("COMPUTERNAME", "TUXEXE-PC");
+    for (name, value) in [
+        ("SYSTEMROOT", r"C:\Windows"),
+        ("WINDIR", r"C:\Windows"),
+        ("PROGRAMFILES", r"C:\Program Files"),
+        ("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+        ("ProgramFiles", r"C:\Program Files"),
+        ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ("ProgramData", r"C:\ProgramData"),
+        ("USERPROFILE", r"C:\Users\User"),
+        ("APPDATA", r"C:\Users\User\AppData\Roaming"),
+        ("LOCALAPPDATA", r"C:\Users\User\AppData\Local"),
+        ("TEMP", r"C:\Users\User\AppData\Local\Temp"),
+        ("TMP", r"C:\Users\User\AppData\Local\Temp"),
+        ("USERNAME", "User"),
+        ("HOMEDRIVE", "C:"),
+        ("HOMEPATH", r"\Users\User"),
+        ("COMPUTERNAME", "TUXEXE-PC"),
+    ] {
+        set_guest_environment_variable(name, Some(value));
     }
 
     tracing::debug!("Windows environment variables initialized");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::serial_guard;
+
+    #[test]
+    fn initializes_guest_visible_paths_with_one_windows_profile() {
+        let _guard = serial_guard();
+        const NAMES: [&str; 7] =
+            ["SYSTEMROOT", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"];
+        let original_temp = std::env::var_os("TEMP");
+        std::env::set_var("TEMP", "/host/tmp-must-remain-linux");
+
+        init_windows_env_vars();
+        let actual: Vec<_> = NAMES
+            .iter()
+            .map(|name| {
+                ((*name).to_string(), lookup_env_var_case_insensitive(name).expect("initialized"))
+            })
+            .collect();
+        let host_temp = std::env::var("TEMP").expect("host TEMP");
+
+        match original_temp {
+            Some(value) => std::env::set_var("TEMP", value),
+            None => std::env::remove_var("TEMP"),
+        }
+
+        assert_eq!(
+            actual,
+            vec![
+                ("SYSTEMROOT".into(), r"C:\Windows".into()),
+                ("WINDIR".into(), r"C:\Windows".into()),
+                ("USERPROFILE".into(), r"C:\Users\User".into()),
+                ("APPDATA".into(), r"C:\Users\User\AppData\Roaming".into()),
+                ("LOCALAPPDATA".into(), r"C:\Users\User\AppData\Local".into()),
+                ("TEMP".into(), r"C:\Users\User\AppData\Local\Temp".into()),
+                ("TMP".into(), r"C:\Users\User\AppData\Local\Temp".into()),
+            ]
+        );
+        assert_eq!(host_temp, "/host/tmp-must-remain-linux");
+    }
 }
