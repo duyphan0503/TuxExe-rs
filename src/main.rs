@@ -37,6 +37,10 @@ struct Cli {
 enum Commands {
     /// Execute a Windows .exe file
     Run {
+        /// Target frame rate limit (0 for uncapped, or e.g. 60, 144, 240)
+        #[arg(long, default_value = "0")]
+        fps: u32,
+
         /// Path to the Windows PE executable
         #[arg(value_name = "EXE")]
         exe: PathBuf,
@@ -81,15 +85,28 @@ fn main() -> Result<()> {
         _ => tracing::level_filters::LevelFilter::INFO,
     };
 
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(level_filter)
-        .with_target(false)
-        .with_thread_ids(false)
-        .compact()
-        .finish();
+    use tracing_subscriber::layer::SubscriberExt;
 
-    tracing::subscriber::set_global_default(subscriber)
-        .context("Failed to set tracing subscriber")?;
+    let log_file =
+        std::fs::OpenOptions::new().create(true).write(true).truncate(true).open("tuxexe.log").ok();
+
+    let console_layer =
+        tracing_subscriber::fmt::layer().with_target(false).with_thread_ids(false).compact();
+
+    let registry = tracing_subscriber::registry().with(level_filter).with(console_layer);
+
+    if let Some(file) = log_file {
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file));
+        tracing::subscriber::set_global_default(registry.with(file_layer))
+            .context("Failed to set tracing subscriber")?;
+    } else {
+        tracing::subscriber::set_global_default(registry)
+            .context("Failed to set tracing subscriber")?;
+    }
 
     match cli.command {
         Commands::Fonts { verbose } => {
@@ -152,15 +169,29 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Commands::Run { exe, args } => {
+        Commands::Run { fps, exe, args } => {
+            let exe = std::fs::canonicalize(&exe)
+                .with_context(|| format!("Failed to resolve executable path: {}", exe.display()))?;
             std::thread::Builder::new()
                 .name("tuxexe-runner".to_string())
                 .stack_size(32 * 1024 * 1024)
                 .spawn(move || -> anyhow::Result<()> {
-                    info!(exe = %exe.display(), ?args, "Preparing to execute PE");
+                    info!(exe = %exe.display(), fps, ?args, "Preparing to execute PE");
+
+                    if fps > 0 {
+                        std::env::set_var("TUXEXE_FPS", fps.to_string());
+                        std::env::set_var("DXVK_FRAME_RATE", fps.to_string());
+                    }
+                    if std::env::var("__GL_SYNC_TO_VBLANK").is_err() {
+                        std::env::set_var("__GL_SYNC_TO_VBLANK", if fps > 0 { "1" } else { "0" });
+                    }
+                    if std::env::var("vblank_mode").is_err() {
+                        std::env::set_var("vblank_mode", if fps > 0 { "1" } else { "0" });
+                    }
 
                     let drives = tuxexe_rs::filesystem::drives::DriveMap::default();
-                    if let Ok(report) = tuxexe_rs::filesystem::fonts::init_fonts_directory(&drives) {
+                    if let Ok(report) = tuxexe_rs::filesystem::fonts::init_fonts_directory(&drives)
+                    {
                         info!(
                             linked_fonts = report.linked_count,
                             aliases = report.alias_count,
@@ -172,7 +203,9 @@ fn main() -> Result<()> {
                         exe.parent().map(PathBuf::from),
                     );
                     if let Some(parent) = exe.parent() {
-                        let _ = std::env::set_current_dir(parent);
+                        std::env::set_current_dir(parent).with_context(|| {
+                            format!("Failed to use game data directory: {}", parent.display())
+                        })?;
                     }
 
                     // Set optimized DXVK and graphics performance variables if not overridden
@@ -191,14 +224,8 @@ fn main() -> Result<()> {
                     if std::env::var("DXVK_CONFIG").is_err() {
                         std::env::set_var(
                             "DXVK_CONFIG",
-                            "dxgi.maxFrameLatency=2;d3d11.relaxedBarriers=True;dxvk.useRawSsbo=True;dxvk.enableAsync=true;dxvk.numCompilerThreads=6;d3d11.constantBufferRangeCheck=False;d3d11.zeroInit=False",
+                            tuxexe_rs::dxvk::runtime::build_dxvk_config(fps),
                         );
-                    }
-                    if std::env::var("__GL_SYNC_TO_VBLANK").is_err() {
-                        std::env::set_var("__GL_SYNC_TO_VBLANK", "1");
-                    }
-                    if std::env::var("vblank_mode").is_err() {
-                        std::env::set_var("vblank_mode", "1");
                     }
 
                     // Auto-select dedicated NVIDIA GPU if available for hardware-accelerated 3D
@@ -213,7 +240,10 @@ fn main() -> Result<()> {
                             std::env::set_var("__VK_LAYER_NV_optimus", "NVIDIA_only");
                         }
                         if std::env::var("VK_DRIVER_FILES").is_err() {
-                            std::env::set_var("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/nvidia_icd.json");
+                            std::env::set_var(
+                                "VK_DRIVER_FILES",
+                                "/usr/share/vulkan/icd.d/nvidia_icd.json",
+                            );
                         }
                     }
 
@@ -222,90 +252,108 @@ fn main() -> Result<()> {
                         eprintln!("warning: {warning}");
                     }
 
-            // Initialize Windows environment variables
-            tuxexe_rs::win32::kernel32::env::init_windows_env_vars();
+                    // Initialize Windows environment variables
+                    tuxexe_rs::win32::kernel32::env::init_windows_env_vars();
+                    tuxexe_rs::win32::kernel32::system::init_kuser_shared_data();
 
-            init_global_table();
+                    init_global_table();
 
-            set_main_image_path(&exe);
-            set_guest_command_line(&exe, &args);
+                    set_main_image_path(&exe);
+                    set_guest_command_line(&exe, &args);
 
-            // Phase 1: Load, map, relocate, enumerate imports.
-            let mut pe = run_pe_loader(&exe)?;
-            set_main_image_base(pe.mapped.base_addr());
-            if pe.parsed.machine == Machine::X86 {
-                tuxexe_rs::wow64::setup_wow64_context(pe.mapped.base_addr(), pe.mapped.size())
-                    .map_err(|error| anyhow::anyhow!("Failed to setup WoW64 context: {error}"))?;
-            } else {
-                register_runtime_function_table(&pe.parsed, &pe.mapped)
-                    .map_err(|error| anyhow::anyhow!("Failed to register unwind table: {error}"))?;
-            }
+                    // Phase 1: Load, map, relocate, enumerate imports.
+                    let mut pe = run_pe_loader(&exe)?;
+                    set_main_image_base(pe.mapped.base_addr());
+                    if pe.parsed.machine == Machine::X86 {
+                        tuxexe_rs::wow64::setup_wow64_context(
+                            pe.mapped.base_addr(),
+                            pe.mapped.size(),
+                        )
+                        .map_err(|error| {
+                            anyhow::anyhow!("Failed to setup WoW64 context: {error}")
+                        })?;
+                    } else {
+                        register_runtime_function_table(&pe.parsed, &pe.mapped).map_err(
+                            |error| anyhow::anyhow!("Failed to register unwind table: {error}"),
+                        )?;
+                    }
 
-            // Establish the main guest TEB/PEB before resolving dependencies.
-            // UnityPlayer.dll has static TLS; letting its loader initialize a
-            // placeholder TEB first creates a PEB with ImageBaseAddress == 0,
-            // which corrupts early Unity startup state.
-            if pe.parsed.machine != Machine::X86 {
-                tuxexe_rs::threading::teb::setup_teb(pe.mapped.base_addr())
-                    .map_err(|error| anyhow::anyhow!("Failed to setup TEB: {error}"))?;
-            }
+                    // Establish the main guest TEB/PEB before resolving dependencies.
+                    // UnityPlayer.dll has static TLS; letting its loader initialize a
+                    // placeholder TEB first creates a PEB with ImageBaseAddress == 0,
+                    // which corrupts early Unity startup state.
+                    if pe.parsed.machine != Machine::X86 {
+                        tuxexe_rs::threading::teb::setup_teb(pe.mapped.base_addr())
+                            .map_err(|error| anyhow::anyhow!("Failed to setup TEB: {error}"))?;
+                    }
 
-            install_signal_handlers()
-                .map_err(|error| anyhow::anyhow!("Failed to install signal handlers: {error}"))?;
+                    install_signal_handlers().map_err(|error| {
+                        anyhow::anyhow!("Failed to install signal handlers: {error}")
+                    })?;
 
-            let _wow64_dll_mode_guard = (pe.parsed.machine == Machine::X86)
-                .then(tuxexe_rs::dll_manager::search::enter_wow64_search_mode);
+                    let _wow64_dll_mode_guard = (pe.parsed.machine == Machine::X86)
+                        .then(tuxexe_rs::dll_manager::search::enter_wow64_search_mode);
 
-            // Resolve and patch imports
-            tuxexe_rs::pe_loader::imports::resolve_imports(&mut pe.mapped, &pe.parsed, &pe.imports)
-                .with_context(|| "Failed to resolve imports")?;
+                    // Resolve and patch imports
+                    tuxexe_rs::pe_loader::imports::resolve_imports(
+                        &mut pe.mapped,
+                        &pe.parsed,
+                        &pe.imports,
+                    )
+                    .with_context(|| "Failed to resolve imports")?;
 
-            // Apply memory protection
-            pe.mapped
-                .apply_protections(&pe.parsed)
-                .with_context(|| "Failed to apply memory protections")?;
+                    // Apply memory protection
+                    pe.mapped
+                        .apply_protections(&pe.parsed)
+                        .with_context(|| "Failed to apply memory protections")?;
 
-            register_tls_callbacks(&pe.parsed, &pe.mapped)
-                .map_err(|error| anyhow::anyhow!("Failed to register TLS callbacks: {error}"))?;
+                    register_tls_callbacks(&pe.parsed, &pe.mapped).map_err(|error| {
+                        anyhow::anyhow!("Failed to register TLS callbacks: {error}")
+                    })?;
 
-            // Initialize static TLS
-            tuxexe_rs::threading::tls::initialize_static_tls(&pe.parsed, &mut pe.mapped)
-                .map_err(|error| anyhow::anyhow!("Failed to initialize static TLS: {error}"))?;
+                    // Initialize static TLS
+                    tuxexe_rs::threading::tls::initialize_static_tls(&pe.parsed, &mut pe.mapped)
+                        .map_err(|error| {
+                            anyhow::anyhow!("Failed to initialize static TLS: {error}")
+                        })?;
 
-            // PE32 has a separate WoW64 execution contract. Never cast an x86
-            // entry point to the host x64 ABI: doing so corrupts the host
-            // stack/register state and turns an unsupported path into a
-            // process crash.
-            if pe.parsed.machine == Machine::X86 {
-                return tuxexe_rs::wow64::entry::execute_pe32_entry(
-                    &pe.parsed,
-                    pe.mapped.base_addr(),
-                )
-                .map_err(|error| anyhow::anyhow!(error));
-            }
+                    // PE32 has a separate WoW64 execution contract. Never cast an x86
+                    // entry point to the host x64 ABI: doing so corrupts the host
+                    // stack/register state and turns an unsupported path into a
+                    // process crash.
+                    if pe.parsed.machine == Machine::X86 {
+                        return tuxexe_rs::wow64::entry::execute_pe32_entry(
+                            &pe.parsed,
+                            pe.mapped.base_addr(),
+                        )
+                        .map_err(|error| anyhow::anyhow!(error));
+                    }
 
-            invoke_tls_callbacks_for(&pe.parsed, &pe.mapped, DLL_PROCESS_ATTACH).map_err(
-                |error| anyhow::anyhow!("Failed to invoke main-image TLS callbacks: {error}"),
-            )?;
+                    invoke_tls_callbacks_for(&pe.parsed, &pe.mapped, DLL_PROCESS_ATTACH).map_err(
+                        |error| {
+                            anyhow::anyhow!("Failed to invoke main-image TLS callbacks: {error}")
+                        },
+                    )?;
 
-            // Execute PE64.
-            let entry_point_rva = pe.parsed.entry_point_rva as usize;
-            if entry_point_rva == 0 {
-                anyhow::bail!("PE has no entry point or it's statically linked as a DLL.");
-            }
+                    // Execute PE64.
+                    let entry_point_rva = pe.parsed.entry_point_rva as usize;
+                    if entry_point_rva == 0 {
+                        anyhow::bail!("PE has no entry point or it's statically linked as a DLL.");
+                    }
 
-            let entry_point_addr = pe.mapped.base_addr() + entry_point_rva;
-            info!(va = format_args!("0x{:x}", entry_point_addr), "Jumping to entry point");
+                    let entry_point_addr = pe.mapped.base_addr() + entry_point_rva;
+                    info!(va = format_args!("0x{:x}", entry_point_addr), "Jumping to entry point");
 
-            tuxexe_rs::runtime::guest_stack::invoke(entry_point_addr)
-                .map_err(|error| anyhow::anyhow!("Failed to execute PE64 entry: {error}"))?;
+                    tuxexe_rs::runtime::guest_stack::invoke(entry_point_addr).map_err(|error| {
+                        anyhow::anyhow!("Failed to execute PE64 entry: {error}")
+                    })?;
 
-            info!("Execution finished successfully");
-            Ok(())
-        })
-        .map_err(|e| anyhow::anyhow!("Failed to spawn runner thread: {e}"))?
-        .join()
-        .map_err(|_| anyhow::anyhow!("Runner thread panicked"))??;
+                    info!("Execution finished successfully");
+                    Ok(())
+                })
+                .map_err(|e| anyhow::anyhow!("Failed to spawn runner thread: {e}"))?
+                .join()
+                .map_err(|_| anyhow::anyhow!("Runner thread panicked"))??;
             Ok(())
         }
 

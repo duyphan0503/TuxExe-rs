@@ -3,7 +3,7 @@
 //! This module creates REAL X11 windows and GLX contexts that Unity can use.
 
 use std::ffi::CString;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use x11::glx::*;
@@ -129,39 +129,22 @@ pub fn get_monitors() -> Vec<MonitorGeometry> {
     }
 
     if !init_x11() {
-        return vec![MonitorGeometry {
-            is_primary: true,
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        }];
+        return vec![MonitorGeometry { is_primary: true, x: 0, y: 0, width: 1920, height: 1080 }];
     }
 
     let state_guard = x11_state().lock().ok();
     let Some(state_guard) = state_guard else {
-        return vec![MonitorGeometry {
-            is_primary: true,
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        }];
+        return vec![MonitorGeometry { is_primary: true, x: 0, y: 0, width: 1920, height: 1080 }];
     };
     let Some(state) = state_guard.as_ref() else {
-        return vec![MonitorGeometry {
-            is_primary: true,
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        }];
+        return vec![MonitorGeometry { is_primary: true, x: 0, y: 0, width: 1920, height: 1080 }];
     };
 
     let monitors = unsafe {
         // Try XRRGetMonitors first (XRandR)
         let mut count = 0;
-        let monitors_ptr = x11::xrandr::XRRGetMonitors(state.display, state.root_window, 1, &mut count);
+        let monitors_ptr =
+            x11::xrandr::XRRGetMonitors(state.display, state.root_window, 1, &mut count);
         if !monitors_ptr.is_null() && count > 0 {
             let mut list = Vec::with_capacity(count as usize);
             let slice = std::slice::from_raw_parts(monitors_ptr, count as usize);
@@ -228,13 +211,7 @@ pub fn get_primary_monitor() -> MonitorGeometry {
         .find(|m| m.is_primary)
         .copied()
         .or_else(|| monitors.first().copied())
-        .unwrap_or(MonitorGeometry {
-            is_primary: true,
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        })
+        .unwrap_or(MonitorGeometry { is_primary: true, x: 0, y: 0, width: 1920, height: 1080 })
 }
 
 /// Query the primary display monitor's resolution (width, height).
@@ -245,13 +222,25 @@ pub fn get_screen_size() -> Option<(i32, i32)> {
 
 /// Query the primary display monitor's refresh rate in Hz.
 pub fn get_screen_refresh_rate() -> u32 {
+    if let Ok(val) = std::env::var("TUXEXE_FPS") {
+        if let Ok(fps) = val.parse::<u32>() {
+            if fps > 0 {
+                return fps;
+            }
+        }
+    }
+
     if !init_x11() {
         return 60;
     }
 
     let state_guard = x11_state().lock().ok();
-    let Some(state_guard) = state_guard else { return 60; };
-    let Some(state) = state_guard.as_ref() else { return 60; };
+    let Some(state_guard) = state_guard else {
+        return 60;
+    };
+    let Some(state) = state_guard.as_ref() else {
+        return 60;
+    };
 
     unsafe {
         let screen_info = x11::xrandr::XRRGetScreenInfo(state.display, state.root_window);
@@ -532,14 +521,7 @@ pub fn configure_x11_window(hwnd: usize, x: i32, y: i32, width: i32, height: i32
         return false;
     };
     unsafe {
-        XMoveResizeWindow(
-            display,
-            window,
-            x,
-            y,
-            width.max(1) as u32,
-            height.max(1) as u32,
-        );
+        XMoveResizeWindow(display, window, x, y, width.max(1) as u32, height.max(1) as u32);
         XFlush(display);
     }
     if let Some(record) = window_registry()
@@ -668,13 +650,9 @@ pub fn make_gl_context_current_for_window(hglrc: usize, target_hwnd: Option<usiz
     };
     let glx_ctx = ctx.glx_context as *mut __GLXcontextRec;
 
-    let target_win = target_hwnd.and_then(hwnd_to_x11_window).or_else(|| {
-        window_registry()
-            .lock()
-            .ok()?
-            .last()
-            .map(|w| w.x11_window)
-    });
+    let target_win = target_hwnd
+        .and_then(hwnd_to_x11_window)
+        .or_else(|| window_registry().lock().ok()?.last().map(|w| w.x11_window));
 
     let x11_win = if let Some(w) = target_win {
         ctx.x11_window = w;
@@ -695,14 +673,28 @@ pub fn make_gl_context_current_for_window(hglrc: usize, target_hwnd: Option<usiz
     }
 }
 
+static LAST_SWAP_TIME_NS: AtomicU64 = AtomicU64::new(0);
+
 pub fn swap_buffers(hwnd: usize) {
-    let x11_win = hwnd_to_x11_window(hwnd).or_else(|| {
-        window_registry()
-            .lock()
-            .ok()?
-            .last()
-            .map(|w| w.x11_window)
-    });
+    let target_fps =
+        std::env::var("TUXEXE_FPS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    if target_fps > 0 {
+        let frame_budget_ns = 1_000_000_000 / target_fps;
+        let now = crate::win32::kernel32::time::START_TIME.elapsed().as_nanos() as u64;
+        let last = LAST_SWAP_TIME_NS.load(Ordering::Relaxed);
+        let elapsed = now.saturating_sub(last);
+        if elapsed < frame_budget_ns {
+            let sleep_ns = frame_budget_ns - elapsed;
+            std::thread::sleep(std::time::Duration::from_nanos(sleep_ns));
+        }
+        LAST_SWAP_TIME_NS.store(
+            crate::win32::kernel32::time::START_TIME.elapsed().as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    let x11_win = hwnd_to_x11_window(hwnd)
+        .or_else(|| window_registry().lock().ok()?.last().map(|w| w.x11_window));
 
     if let Some(win) = x11_win {
         if let Some(display) = x11_display() {
@@ -716,21 +708,21 @@ pub fn swap_buffers(hwnd: usize) {
 
 fn xkeysym_to_vk(keysym: u64) -> u32 {
     match keysym {
-        0x0020 => 0x20, // VK_SPACE
-        0x0030..=0x0039 => keysym as u32, // '0'..'9'
-        0x0041..=0x005a => keysym as u32, // 'A'..'Z'
+        0x0020 => 0x20,                            // VK_SPACE
+        0x0030..=0x0039 => keysym as u32,          // '0'..'9'
+        0x0041..=0x005a => keysym as u32,          // 'A'..'Z'
         0x0061..=0x007a => (keysym - 0x20) as u32, // 'a'..'z' -> 'A'..'Z'
         // Punctuation and symbols
-        0x0021 => 0x31, // '!' -> VK_1 (with shift)
-        0x0040 => 0x32, // '@' -> VK_2
-        0x0023 => 0x33, // '#' -> VK_3
-        0x0024 => 0x34, // '$' -> VK_4
-        0x0025 => 0x35, // '%' -> VK_5
-        0x005e => 0x36, // '^' -> VK_6
-        0x0026 => 0x37, // '&' -> VK_7
-        0x002a => 0x38, // '*' -> VK_8
-        0x0028 => 0x39, // '(' -> VK_9
-        0x0029 => 0x30, // ')' -> VK_0
+        0x0021 => 0x31,          // '!' -> VK_1 (with shift)
+        0x0040 => 0x32,          // '@' -> VK_2
+        0x0023 => 0x33,          // '#' -> VK_3
+        0x0024 => 0x34,          // '$' -> VK_4
+        0x0025 => 0x35,          // '%' -> VK_5
+        0x005e => 0x36,          // '^' -> VK_6
+        0x0026 => 0x37,          // '&' -> VK_7
+        0x002a => 0x38,          // '*' -> VK_8
+        0x0028 => 0x39,          // '(' -> VK_9
+        0x0029 => 0x30,          // ')' -> VK_0
         0x002d | 0x005f => 0xBD, // '-' / '_' -> VK_OEM_MINUS
         0x003d | 0x002b => 0xBB, // '=' / '+' -> VK_OEM_PLUS
         0x005b | 0x007b => 0xDB, // '[' / '{' -> VK_OEM_4
@@ -773,12 +765,12 @@ fn xkeysym_to_vk(keysym: u64) -> u32 {
         0xffec => 0x5C, // Super_R -> VK_RWIN
         0xff7f => 0x90, // Num_Lock -> VK_NUMLOCK
         // Keypad / Numpad keys
-        0xff8d => 0x0D, // KP_Enter -> VK_RETURN
-        0xffaa => 0x6A, // KP_Multiply -> VK_MULTIPLY
-        0xffab => 0x6B, // KP_Add -> VK_ADD
-        0xffad => 0x6D, // KP_Subtract -> VK_SUBTRACT
-        0xffae => 0x6E, // KP_Decimal -> VK_DECIMAL
-        0xffaf => 0x6F, // KP_Divide -> VK_DIVIDE
+        0xff8d => 0x0D,                                     // KP_Enter -> VK_RETURN
+        0xffaa => 0x6A,                                     // KP_Multiply -> VK_MULTIPLY
+        0xffab => 0x6B,                                     // KP_Add -> VK_ADD
+        0xffad => 0x6D,                                     // KP_Subtract -> VK_SUBTRACT
+        0xffae => 0x6E,                                     // KP_Decimal -> VK_DECIMAL
+        0xffaf => 0x6F,                                     // KP_Divide -> VK_DIVIDE
         0xffb0..=0xffb9 => (keysym - 0xffb0 + 0x60) as u32, // KP_0..KP_9 -> VK_NUMPAD0..VK_NUMPAD9
         // Function keys F1..F24
         0xffbe..=0xffcb => (keysym - 0xffbe + 0x70) as u32, // VK_F1..VK_F12
@@ -794,10 +786,7 @@ pub fn query_pointer_root() -> Option<(i32, i32)> {
 
     let last = LAST_QUERY_POINTER_MS.load(Ordering::Relaxed);
     if now_ms > last && now_ms - last < 16 {
-        let pos = crate::win32::user32::window::cursor_position()
-            .lock()
-            .map(|p| (p.x, p.y))
-            .ok();
+        let pos = crate::win32::user32::window::cursor_position().lock().map(|p| (p.x, p.y)).ok();
         return pos;
     }
     LAST_QUERY_POINTER_MS.store(now_ms, Ordering::Relaxed);
@@ -911,9 +900,26 @@ pub fn pump_x11_events() {
                         &mut child,
                     );
 
-                    crate::win32::user32::update_window_rect(hwnd, root_x, root_y, cfg.width, cfg.height);
+                    // The WSI backend re-asserts the window size on every
+                    // present, producing a continuous stream of no-op
+                    // ConfigureNotify events. Translating each one into
+                    // WM_MOVE/WM_SIZE makes the guest think the window is
+                    // being moved constantly, which (for engines such as
+                    // Unity) re-enables refresh-rate-based frame timing and
+                    // the accompanying time drift. Only notify the guest
+                    // when the geometry actually changed.
+                    let changed = crate::win32::user32::window_rect_changed(
+                        hwnd, root_x, root_y, cfg.width, cfg.height,
+                    );
+                    crate::win32::user32::update_window_rect(
+                        hwnd, root_x, root_y, cfg.width, cfg.height,
+                    );
+                    if !changed {
+                        continue;
+                    }
 
-                    let move_lparam = ((root_x as u16 as usize) | ((root_y as u16 as usize) << 16)) as isize;
+                    let move_lparam =
+                        ((root_x as u16 as usize) | ((root_y as u16 as usize) << 16)) as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: 0x0003, // WM_MOVE
@@ -923,7 +929,9 @@ pub fn pump_x11_events() {
                         ..Default::default()
                     });
 
-                    let size_lparam = ((cfg.width as u16 as usize) | ((cfg.height as u16 as usize) << 16)) as isize;
+                    let size_lparam = ((cfg.width as u16 as usize)
+                        | ((cfg.height as u16 as usize) << 16))
+                        as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: 0x0005, // WM_SIZE
@@ -1032,7 +1040,7 @@ pub fn pump_x11_events() {
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: 0x0006, // WM_ACTIVATE
-                        wParam: 1, // WA_ACTIVE
+                        wParam: 1,       // WA_ACTIVE
                         lParam: 0,
                         time: 0,
                         ..Default::default()
@@ -1060,14 +1068,18 @@ pub fn pump_x11_events() {
                 }
                 ButtonPress => {
                     let btn = event.button;
-                    crate::win32::user32::update_window_pos(hwnd, btn.x_root - btn.x, btn.y_root - btn.y);
+                    crate::win32::user32::update_window_pos(
+                        hwnd,
+                        btn.x_root - btn.x,
+                        btn.y_root - btn.y,
+                    );
                     crate::win32::user32::window::SetCursorPos(btn.x_root, btn.y_root);
                     crate::win32::user32::set_focused_hwnd(hwnd);
                     crate::win32::user32::set_foreground_hwnd(hwnd);
                     let (msg_id, vk, wparam) = match btn.button {
-                        1 => (0x0201, 0x01, 0x0001), // WM_LBUTTONDOWN, VK_LBUTTON, MK_LBUTTON
-                        2 => (0x0207, 0x04, 0x0010), // WM_MBUTTONDOWN, VK_MBUTTON, MK_MBUTTON
-                        3 => (0x0204, 0x02, 0x0002), // WM_RBUTTONDOWN, VK_RBUTTON, MK_RBUTTON
+                        1 => (0x0201, 0x01, 0x0001),   // WM_LBUTTONDOWN, VK_LBUTTON, MK_LBUTTON
+                        2 => (0x0207, 0x04, 0x0010),   // WM_MBUTTONDOWN, VK_MBUTTON, MK_MBUTTON
+                        3 => (0x0204, 0x02, 0x0002),   // WM_RBUTTONDOWN, VK_RBUTTON, MK_RBUTTON
                         4 => (0x020A, 0, (120 << 16)), // WM_MOUSEWHEEL (scroll up)
                         5 => (0x020A, 0, ((-120i32 as u32) << 16) as usize), // WM_MOUSEWHEEL (scroll down)
                         6 => (0x020E, 0, ((-120i32 as u32) << 16) as usize), // WM_MOUSEHWHEEL (scroll left)
@@ -1082,7 +1094,8 @@ pub fn pump_x11_events() {
                     } else {
                         (btn.x, btn.y)
                     };
-                    let lparam = ((lx as i16 as u16 as usize) | ((ly as i16 as u16 as usize) << 16)) as isize;
+                    let lparam = ((lx as i16 as u16 as usize) | ((ly as i16 as u16 as usize) << 16))
+                        as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: msg_id,
@@ -1094,7 +1107,11 @@ pub fn pump_x11_events() {
                 }
                 ButtonRelease => {
                     let btn = event.button;
-                    crate::win32::user32::update_window_pos(hwnd, btn.x_root - btn.x, btn.y_root - btn.y);
+                    crate::win32::user32::update_window_pos(
+                        hwnd,
+                        btn.x_root - btn.x,
+                        btn.y_root - btn.y,
+                    );
                     crate::win32::user32::window::SetCursorPos(btn.x_root, btn.y_root);
                     let (msg_id, vk) = match btn.button {
                         1 => (0x0202, 0x01), // WM_LBUTTONUP, VK_LBUTTON
@@ -1105,7 +1122,9 @@ pub fn pump_x11_events() {
                     if vk != 0 {
                         crate::win32::user32::input::set_key_up(vk);
                     }
-                    let lparam = ((btn.x as i16 as u16 as usize) | ((btn.y as i16 as u16 as usize) << 16)) as isize;
+                    let lparam = ((btn.x as i16 as u16 as usize)
+                        | ((btn.y as i16 as u16 as usize) << 16))
+                        as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: msg_id,
@@ -1117,7 +1136,11 @@ pub fn pump_x11_events() {
                 }
                 MotionNotify => {
                     let mot = event.motion;
-                    crate::win32::user32::update_window_pos(hwnd, mot.x_root - mot.x, mot.y_root - mot.y);
+                    crate::win32::user32::update_window_pos(
+                        hwnd,
+                        mot.x_root - mot.x,
+                        mot.y_root - mot.y,
+                    );
                     crate::win32::user32::window::SetCursorPos(mot.x_root, mot.y_root);
 
                     let mut wparam = 0usize;
@@ -1137,7 +1160,9 @@ pub fn pump_x11_events() {
                         wparam |= 0x0010; // MK_MBUTTON
                     }
 
-                    let lparam = ((mot.x as i16 as u16 as usize) | ((mot.y as i16 as u16 as usize) << 16)) as isize;
+                    let lparam = ((mot.x as i16 as u16 as usize)
+                        | ((mot.y as i16 as u16 as usize) << 16))
+                        as isize;
                     crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
                         hwnd,
                         message: 0x0200, // WM_MOUSEMOVE

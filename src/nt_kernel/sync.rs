@@ -3,7 +3,10 @@
 use std::{
     any::Any,
     collections::HashMap,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tracing::warn;
@@ -20,10 +23,73 @@ pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 pub const INFINITE: u32 = 0xFFFF_FFFF;
 
 /// Reserved by the TuxExe-flavoured DXVK build for the DXGI frame-latency
-/// waitable object. It has no host kernel counterpart; DXVK signals it after
-/// each frame, so exposing it as immediately signalled is the compatible
-/// fallback until native handle duplication is implemented cross-ABI.
+/// waitable object.  By default the handle behaves like the original instant-
+/// return path so the host is not capped.  If `TUXEXE_FPS` is set, we enforce
+/// a target frame budget derived from it to prevent speed-hack-like behaviour.
 pub const DXVK_FRAME_LATENCY_HANDLE: Handle = 0xd7a1_0001;
+
+/// Nanosecond timestamp of the last DXVK frame-latency signal.
+static DXVK_LAST_FRAME_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Lazily initialised frame budget in nanoseconds.
+fn dxvk_frame_budget_ns() -> u64 {
+    static BUDGET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let fps = std::env::var("TUXEXE_FPS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0); // uncapped by default; set TUXEXE_FPS=N to enable frame pacing
+        if fps == 0 {
+            0 // uncapped
+        } else {
+            1_000_000_000 / fps
+        }
+    })
+}
+
+/// Returns the monotonic nanosecond timestamp since process start.
+fn monotonic_nanos() -> u64 {
+    use crate::win32::kernel32::time::START_TIME;
+    START_TIME.elapsed().as_nanos() as u64
+}
+
+/// Pace a single frame for the DXVK frame-latency waitable object.
+/// Sleeps for the remainder of the frame budget, then returns `WAIT_OBJECT_0`.
+fn pace_dxvk_frame(timeout_ms: u32) -> u32 {
+    let budget = dxvk_frame_budget_ns();
+    if budget == 0 {
+        // Uncapped — behave like the old instant-return.
+        return WAIT_OBJECT_0;
+    }
+
+    let now = monotonic_nanos();
+    let last = DXVK_LAST_FRAME_NS.load(Ordering::Relaxed);
+    let elapsed = now.saturating_sub(last);
+
+    if elapsed < budget {
+        let remaining_ns = budget - elapsed;
+        let timeout_ns =
+            if timeout_ms == INFINITE { u64::MAX } else { (timeout_ms as u64) * 1_000_000 };
+        let sleep_ns = remaining_ns.min(timeout_ns);
+        if sleep_ns > 0 {
+            std::thread::sleep(Duration::from_nanos(sleep_ns));
+        }
+        // If the timeout was shorter than the remaining budget, report timeout.
+        if timeout_ms != INFINITE && remaining_ns > timeout_ns {
+            return WAIT_TIMEOUT;
+        }
+    }
+
+    DXVK_LAST_FRAME_NS.store(monotonic_nanos(), Ordering::Relaxed);
+    WAIT_OBJECT_0
+}
+
+/// Check whether the DXVK frame budget has elapsed.
+fn dxvk_frame_ready() -> bool {
+    let budget = dxvk_frame_budget_ns();
+    if budget == 0 {
+        return true;
+    }
+    let elapsed = monotonic_nanos().saturating_sub(DXVK_LAST_FRAME_NS.load(Ordering::Relaxed));
+    elapsed >= budget
+}
 
 #[derive(Debug)]
 struct MutexState {
@@ -469,7 +535,7 @@ pub fn release_semaphore(handle: Handle, release_count: i32, previous_count: *mu
 
 pub fn is_signaled(handle: Handle) -> Result<bool, ()> {
     if handle == DXVK_FRAME_LATENCY_HANDLE {
-        return Ok(true);
+        return Ok(dxvk_frame_ready());
     }
     let current_tid = thread::current_os_thread_id();
     let res = global_table().with(handle, |object| {
@@ -502,7 +568,7 @@ pub fn is_signaled(handle: Handle) -> Result<bool, ()> {
 
 pub fn wait_for_single_object(handle: Handle, timeout_ms: u32) -> u32 {
     if handle == DXVK_FRAME_LATENCY_HANDLE {
-        return WAIT_OBJECT_0;
+        return pace_dxvk_frame(timeout_ms);
     }
 
     enum WaitTarget {
@@ -559,7 +625,6 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
     };
 
     if wait_all {
-        let mut loop_count = 0u32;
         loop {
             let mut all_signaled = true;
             for handle in handles {
@@ -592,18 +657,10 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
                 }
             }
 
-            loop_count = loop_count.saturating_add(1);
-            if loop_count < 16 {
-                std::hint::spin_loop();
-            } else if loop_count < 32 {
-                std::thread::yield_now();
-            } else {
-                std::thread::sleep(Duration::from_micros(50));
-            }
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
-    let mut loop_count = 0u32;
     loop {
         for (index, handle) in handles.iter().enumerate() {
             if wait_for_single_object(*handle, 0) == WAIT_OBJECT_0 {
@@ -617,14 +674,7 @@ pub fn wait_for_multiple_objects(handles: &[Handle], wait_all: bool, timeout_ms:
             }
         }
 
-        loop_count = loop_count.saturating_add(1);
-        if loop_count < 16 {
-            std::hint::spin_loop();
-        } else if loop_count < 32 {
-            std::thread::yield_now();
-        } else {
-            std::thread::sleep(Duration::from_micros(50));
-        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 

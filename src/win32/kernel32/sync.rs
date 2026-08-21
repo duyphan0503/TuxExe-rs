@@ -141,11 +141,7 @@ unsafe fn read_slist_header(list_head: *mut c_void) -> SListState {
     let first = unsafe { list_head.cast::<u64>().read_unaligned() };
     let second = unsafe { list_head.cast::<u8>().add(8).cast::<u64>().read_unaligned() };
 
-    SListState {
-        head: (second & !0xf) as usize,
-        depth: first as u16,
-        sequence: first >> 16,
-    }
+    SListState { head: (second & !0xf) as usize, depth: first as u16, sequence: first >> 16 }
 }
 
 thread_local! {
@@ -281,6 +277,7 @@ fn spawn_timer_queue_worker(timer_handle: Handle, due_time_ms: u32, period_ms: u
                             }
 
                             if let Some(callback) = timer.callback {
+                                let _ = crate::threading::teb::attach_spawned_thread();
                                 unsafe {
                                     callback(timer.parameter as *mut c_void, 1);
                                 }
@@ -311,14 +308,10 @@ fn get_or_create_srw_lock(ptr: *mut c_void) -> Arc<(Mutex<SrwLockState>, Condvar
     entry
 }
 
-fn get_or_create_critical_section(
-    ptr: *mut c_void,
-) -> Arc<(Mutex<CriticalSectionState>, Condvar)> {
+fn get_or_create_critical_section(ptr: *mut c_void) -> Arc<(Mutex<CriticalSectionState>, Condvar)> {
     let key = ptr as usize;
-    if let Some(entry) = critical_sections()
-        .read()
-        .expect("critical section table poisoned")
-        .get(&key)
+    if let Some(entry) =
+        critical_sections().read().expect("critical section table poisoned").get(&key)
     {
         return Arc::clone(entry);
     }
@@ -900,7 +893,23 @@ pub extern "win64" fn SetWaitableTimer(
     }
 
     let due_time = unsafe { *lpDueTime };
-    let initial_delay_ms = if due_time < 0 { ((-due_time) as u64) / 10_000 } else { 0 };
+    let initial_delay_ms = if due_time < 0 {
+        ((-due_time) as u64) / 10_000
+    } else if due_time > 0 {
+        let now = std::time::SystemTime::now();
+        let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let secs = since_epoch.as_secs() + 11_644_473_600;
+        let nanos = since_epoch.subsec_nanos() as u64;
+        let now_ft = (secs * 10_000_000) + (nanos / 100);
+        let target_ft = due_time as u64;
+        if target_ft > now_ft {
+            (target_ft - now_ft) / 10_000
+        } else {
+            0
+        }
+    } else {
+        0
+    };
 
     // Validate handle up front.
     if nt_sync::set_event(hTimer) == 0 && nt_sync::reset_event(hTimer) == 0 {
@@ -1435,10 +1444,7 @@ mod tests {
 
         assert_eq!(InterlockedPopEntrySList(list_head), entry.as_mut_ptr().cast());
         assert_eq!(unsafe { list_head.cast::<u64>().read_unaligned() } as u16, 0);
-        assert_eq!(
-            unsafe { list_head.cast::<u8>().add(8).cast::<u64>().read_unaligned() },
-            0b11
-        );
+        assert_eq!(unsafe { list_head.cast::<u8>().add(8).cast::<u64>().read_unaligned() }, 0b11);
     }
 
     #[test]

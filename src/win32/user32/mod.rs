@@ -349,11 +349,27 @@ pub(crate) fn update_window_rect(hwnd: usize, x: i32, y: i32, width: i32, height
         return false;
     };
 
-    window.x = x;
-    window.y = y;
-    window.width = width;
-    window.height = height;
+    let changed =
+        window.x != x || window.y != y || window.width != width || window.height != height;
+    if changed {
+        window.x = x;
+        window.y = y;
+        window.width = width;
+        window.height = height;
+    }
+    // `true` means "the window exists"; `changed` is reported separately by
+    // `window_rect_changed` consumers that must avoid spamming WM_MOVE/WM_SIZE
+    // for no-op configure events.
     true
+}
+
+/// Report whether a rect update would change the stored geometry.
+pub(crate) fn window_rect_changed(hwnd: usize, x: i32, y: i32, width: i32, height: i32) -> bool {
+    let windows = window_registry().read().expect("window registry poisoned");
+    let Some(window) = windows.get(&hwnd) else {
+        return false;
+    };
+    window.x != x || window.y != y || window.width != width || window.height != height
 }
 
 pub(crate) fn update_window_pos(hwnd: usize, x: i32, y: i32) -> bool {
@@ -459,10 +475,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
 
     exports.insert("WaitForInputIdle", WaitForInputIdle as usize);
     exports.insert("GetDpiForMonitorInternal", GetDpiForMonitorInternal as usize);
-    exports.insert(
-        "SetProcessDpiAwarenessInternal",
-        SetProcessDpiAwarenessInternal as usize,
-    );
+    exports.insert("SetProcessDpiAwarenessInternal", SetProcessDpiAwarenessInternal as usize);
     exports.insert("GetWindow", GetWindow as usize);
     exports.insert("GetWindowThreadProcessId", GetWindowThreadProcessId as usize);
 
@@ -488,10 +501,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetWindowPlacement", window::SetWindowPlacement as usize);
     exports.insert("AdjustWindowRect", window::AdjustWindowRect as usize);
     exports.insert("AdjustWindowRectEx", window::AdjustWindowRectEx as usize);
-    exports.insert(
-        "AdjustWindowRectExForDpi",
-        window::AdjustWindowRectExForDpi as usize,
-    );
+    exports.insert("AdjustWindowRectExForDpi", window::AdjustWindowRectExForDpi as usize);
     exports.insert("EnableNonClientDpiScaling", window::EnableNonClientDpiScaling as usize);
     exports.insert("GetDpiForWindow", window::GetDpiForWindow as usize);
     exports.insert("SetWindowLongA", window::SetWindowLongA as usize);
@@ -538,10 +548,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("GetUserObjectInformationW", window::GetUserObjectInformationW as usize);
     exports.insert("SystemParametersInfoA", window::SystemParametersInfoA as usize);
     exports.insert("SystemParametersInfoW", window::SystemParametersInfoW as usize);
-    exports.insert(
-        "SystemParametersInfoForDpi",
-        window::SystemParametersInfoForDpi as usize,
-    );
+    exports.insert("SystemParametersInfoForDpi", window::SystemParametersInfoForDpi as usize);
     exports.insert("PtInRect", window::PtInRect as usize);
     exports.insert("OffsetRect", window::OffsetRect as usize);
     exports.insert("CopyRect", window::CopyRect as usize);
@@ -592,7 +599,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("RemovePropW", window::RemovePropW as usize);
     exports.insert("SetProcessDPIAware", window::SetProcessDPIAware as usize);
     exports.insert("SetProcessDpiAwarenessContext", window::SetProcessDpiAwarenessContext as usize);
-    exports.insert("GetProcessDpiAwarenessInternal", window::GetProcessDpiAwarenessInternal as usize);
+    exports
+        .insert("GetProcessDpiAwarenessInternal", window::GetProcessDpiAwarenessInternal as usize);
     exports.insert("GetProcessDpiAwareness", window::GetProcessDpiAwarenessInternal as usize);
     exports.insert("SetProcessDpiAwareness", SetProcessDpiAwarenessInternal as usize);
     exports.insert("SetProcessDpiAwarenessInternal", SetProcessDpiAwarenessInternal as usize);

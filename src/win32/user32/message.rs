@@ -56,6 +56,7 @@ fn peek_or_pop_filtered(
 }
 
 fn get_message_blocking(hwnd_filter: usize, min_filter: u32, max_filter: u32) -> Msg {
+    crate::win32::user32::window::check_and_fire_timers();
     crate::platform::x11::pump_x11_events();
     let (queue, condvar) = message_queue();
     let mut guard = queue.lock().expect("message queue poisoned");
@@ -68,6 +69,7 @@ fn get_message_blocking(hwnd_filter: usize, min_filter: u32, max_filter: u32) ->
             return guard.remove(index).expect("index must exist for a filtered message removal");
         }
 
+        crate::win32::user32::window::check_and_fire_timers();
         crate::platform::x11::pump_x11_events();
         guard = condvar.wait(guard).expect("message queue poisoned");
     }
@@ -145,22 +147,24 @@ pub extern "win64" fn PeekMessageA(
     wMsgFilterMax: u32,
     wRemoveMsg: u32,
 ) -> i32 {
+    crate::win32::user32::window::check_and_fire_timers();
     if lpMsg.is_null() {
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     }
 
     let remove = wRemoveMsg & PM_REMOVE != 0;
-    let message = if let Some(msg) = peek_or_pop_filtered(hWnd, wMsgFilterMin, wMsgFilterMax, remove) {
-        msg
-    } else {
-        crate::platform::x11::pump_x11_events();
-        let Some(msg) = peek_or_pop_filtered(hWnd, wMsgFilterMin, wMsgFilterMax, remove) else {
-            set_last_error(ERROR_SUCCESS);
-            return 0;
+    let message =
+        if let Some(msg) = peek_or_pop_filtered(hWnd, wMsgFilterMin, wMsgFilterMax, remove) {
+            msg
+        } else {
+            crate::platform::x11::pump_x11_events();
+            let Some(msg) = peek_or_pop_filtered(hWnd, wMsgFilterMin, wMsgFilterMax, remove) else {
+                set_last_error(ERROR_SUCCESS);
+                return 0;
+            };
+            msg
         };
-        msg
-    };
 
     record_last_message(&message);
     unsafe {
@@ -215,6 +219,14 @@ pub extern "win64" fn DispatchMessageA(lpMsg: *const Msg) -> isize {
     if message.message == WM_QUIT {
         set_last_error(ERROR_SUCCESS);
         return message.wParam as isize;
+    }
+
+    if message.message == 0x0113 /* WM_TIMER */ && message.lParam != 0 {
+        type TimerProc = unsafe extern "win64" fn(usize, u32, usize, u32) -> isize;
+        let proc: TimerProc = unsafe { std::mem::transmute(message.lParam) };
+        let result = unsafe { proc(message.hwnd, message.message, message.wParam, message.time) };
+        set_last_error(ERROR_SUCCESS);
+        return result;
     }
 
     let result = if let Some(wnd_proc) = window_proc_for(message.hwnd) {

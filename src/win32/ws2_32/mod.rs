@@ -19,6 +19,21 @@ unsafe extern "C" {
     fn host_inet_pton(af: c_int, src: *const c_char, dst: *mut c_void) -> c_int;
 }
 
+/// Return the host network-interface index for the Windows IP Helper API.
+pub extern "win64" fn if_nametoindex(interface_name: *const c_char) -> u32 {
+    if interface_name.is_null() {
+        set_wsa_last_error(WSAEFAULT);
+        return 0;
+    }
+    let index = unsafe { libc::if_nametoindex(interface_name) };
+    if index == 0 {
+        set_wsa_last_error(WSAEINVAL);
+    } else {
+        set_wsa_last_error(0);
+    }
+    index
+}
+
 const INVALID_SOCKET: usize = usize::MAX;
 const SOCKET_ERROR: i32 = -1;
 const OVERLAPPED_WAIT_TIMEOUT_MS: i32 = 30_000;
@@ -696,7 +711,8 @@ pub extern "win64" fn setsockopt(
         return SOCKET_ERROR;
     }
     // SO_EXCLUSIVEADDRUSE (~SO_REUSEADDR = -5 / 0xfffb / 0xfffffffb) is a no-op on Linux
-    if (level == 0xffff || level == 1) && (optname == -5 || optname == 0xfffb || optname == !0x0004) {
+    if (level == 0xffff || level == 1) && (optname == -5 || optname == 0xfffb || optname == !0x0004)
+    {
         set_wsa_last_error(0);
         trace!(s, "setsockopt SO_EXCLUSIVEADDRUSE -> success (no-op on linux)");
         return 0;
@@ -770,13 +786,7 @@ pub extern "win64" fn getsockopt(
     };
     let mut len = unsafe { (*optlen).max(0) as libc::socklen_t };
     let ret = unsafe {
-        libc::getsockopt(
-            s as c_int,
-            linux_level,
-            linux_optname,
-            optval.cast::<c_void>(),
-            &mut len,
-        )
+        libc::getsockopt(s as c_int, linux_level, linux_optname, optval.cast::<c_void>(), &mut len)
     };
     if ret == 0 {
         unsafe { *optlen = len as i32 };
@@ -800,11 +810,8 @@ pub extern "win64" fn ioctlsocket(s: usize, cmd: i32, argp: *mut u32) -> i32 {
             set_wsa_error_from_errno();
             return SOCKET_ERROR;
         }
-        let new_flags = if non_blocking {
-            flags | libc::O_NONBLOCK
-        } else {
-            flags & !libc::O_NONBLOCK
-        };
+        let new_flags =
+            if non_blocking { flags | libc::O_NONBLOCK } else { flags & !libc::O_NONBLOCK };
         if unsafe { libc::fcntl(s as c_int, libc::F_SETFL, new_flags) } < 0 {
             set_wsa_error_from_errno();
             return SOCKET_ERROR;
@@ -878,11 +885,8 @@ pub extern "win64" fn recvfrom(
     from: *mut libc::sockaddr,
     fromlen: *mut i32,
 ) -> i32 {
-    let mut sock_len = if fromlen.is_null() {
-        0
-    } else {
-        unsafe { (*fromlen).max(0) as libc::socklen_t }
-    };
+    let mut sock_len =
+        if fromlen.is_null() { 0 } else { unsafe { (*fromlen).max(0) as libc::socklen_t } };
     let ret = unsafe {
         libc::recvfrom(
             s as c_int,
@@ -1000,7 +1004,7 @@ pub extern "win64" fn gethostbyname(name: *const c_char) -> *mut Hostent {
     use std::cell::RefCell;
     use std::net::ToSocketAddrs;
     thread_local! {
-        static HOSTENT_BUF: RefCell<(Hostent, [u8; 256], [*mut c_char; 2], [u8; 16])> = 
+        static HOSTENT_BUF: RefCell<(Hostent, [u8; 256], [*mut c_char; 2], [u8; 16])> =
             RefCell::new((
                 Hostent {
                     h_name: std::ptr::null_mut(),
@@ -1019,7 +1023,7 @@ pub extern "win64" fn gethostbyname(name: *const c_char) -> *mut Hostent {
         return std::ptr::null_mut();
     }
     let host_name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap_or("localhost");
-    
+
     let Ok(addrs) = (host_name, 0).to_socket_addrs() else {
         set_wsa_last_error(WSAHOST_NOT_FOUND);
         return std::ptr::null_mut();
@@ -1030,23 +1034,23 @@ pub extern "win64" fn gethostbyname(name: *const c_char) -> *mut Hostent {
             return HOSTENT_BUF.with(|cell| {
                 let mut guard = cell.borrow_mut();
                 let (h, name_buf, addr_ptrs, ip_buf) = &mut *guard;
-                
+
                 let nb = host_name.as_bytes();
                 let nlen = nb.len().min(255);
                 name_buf[..nlen].copy_from_slice(&nb[..nlen]);
                 name_buf[nlen] = 0;
                 h.h_name = name_buf.as_mut_ptr().cast::<c_char>();
-                
+
                 let oct = v4.ip().octets();
                 ip_buf[..4].copy_from_slice(&oct);
                 addr_ptrs[0] = ip_buf.as_mut_ptr().cast::<c_char>();
                 addr_ptrs[1] = std::ptr::null_mut();
                 h.h_addr_list = addr_ptrs.as_mut_ptr();
-                
+
                 h.h_addrtype = 2; // AF_INET
                 h.h_length = 4;
                 h.h_aliases = std::ptr::null_mut();
-                
+
                 set_wsa_last_error(0);
                 h as *mut Hostent
             });
@@ -1056,11 +1060,7 @@ pub extern "win64" fn gethostbyname(name: *const c_char) -> *mut Hostent {
     std::ptr::null_mut()
 }
 
-pub extern "win64" fn gethostbyaddr(
-    addr: *const c_char,
-    len: i32,
-    _kind: i32,
-) -> *mut Hostent {
+pub extern "win64" fn gethostbyaddr(addr: *const c_char, len: i32, _kind: i32) -> *mut Hostent {
     if addr.is_null() || len < 4 {
         set_wsa_last_error(WSAEFAULT);
         return std::ptr::null_mut();
@@ -1085,7 +1085,7 @@ pub struct Protoent {
 pub extern "win64" fn getprotobyname(name: *const c_char) -> *mut Protoent {
     use std::cell::RefCell;
     thread_local! {
-        static PROTO_BUF: RefCell<(Protoent, [u8; 32])> = 
+        static PROTO_BUF: RefCell<(Protoent, [u8; 32])> =
             RefCell::new((
                 Protoent {
                     p_name: std::ptr::null_mut(),
@@ -1255,7 +1255,9 @@ pub extern "win64" fn getaddrinfo(
         set_wsa_last_error(WSAEINVAL);
         return libc::EAI_FAIL;
     }
-    unsafe { *res = ptr::null_mut(); }
+    unsafe {
+        *res = ptr::null_mut();
+    }
 
     let host_hints = if !hints.is_null() {
         let h = unsafe { &*hints };
@@ -1373,7 +1375,9 @@ pub extern "win64" fn GetAddrInfoW(
         set_wsa_last_error(WSAEINVAL);
         return libc::EAI_FAIL;
     }
-    unsafe { *res = ptr::null_mut(); }
+    unsafe {
+        *res = ptr::null_mut();
+    }
 
     let node_utf8 = if !node.is_null() {
         match unsafe { crate::utils::wide_string::from_wide_ptr(node) } {
@@ -2300,6 +2304,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("htonl", htonl as usize);
     exports.insert("ntohl", ntohl as usize);
     exports.insert("gethostname", gethostname as usize);
+    exports.insert("if_nametoindex", if_nametoindex as usize);
     exports.insert("getaddrinfo", getaddrinfo as usize);
     exports.insert("freeaddrinfo", freeaddrinfo as usize);
     exports.insert("GetAddrInfoA", getaddrinfo as usize);
@@ -2389,6 +2394,15 @@ mod tests {
         };
         assert_eq!(WSAStartup(0x0202, &raw mut data), 0);
         assert_eq!(WSACleanup(), 0);
+    }
+
+    #[test]
+    fn interface_name_to_index_uses_the_host_network_table() {
+        let loopback = CStr::from_bytes_with_nul(b"lo\0").expect("loopback name");
+        let index = if_nametoindex(loopback.as_ptr());
+
+        assert_ne!(index, 0);
+        assert_eq!(get_exports().get("if_nametoindex"), Some(&(if_nametoindex as usize)));
     }
 
     #[test]

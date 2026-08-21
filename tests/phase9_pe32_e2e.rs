@@ -133,6 +133,36 @@ fn pe64_run_hello_world_end_to_end() {
 }
 
 #[test]
+fn pe64_run_resolves_relative_exe_before_switching_to_its_directory() {
+    let _guard = serial_guard();
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let game_dir = temp_dir.path().join("game");
+    std::fs::create_dir(&game_dir).expect("create game dir");
+    let pe64_path = game_dir.join("hello64.exe");
+    compile_pe64_hello(&pe64_path);
+
+    let output = Command::new(tuxexe_bin())
+        .arg("--log-level")
+        .arg("error")
+        .arg("run")
+        .arg(Path::new("game").join("hello64.exe"))
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("failed to run tuxexe run with relative executable path");
+
+    assert!(
+        output.status.success(),
+        "relative tuxexe run failed: stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Hello, TuxExe-rs!"), "expected hello output, got:\n{stdout}");
+}
+
+#[test]
 #[ignore = "Enable when WoW64 runtime supports full PE32 process execution path"]
 fn pe32_run_hello_world_end_to_end() {
     let _guard = serial_guard();

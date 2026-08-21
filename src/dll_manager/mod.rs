@@ -4,9 +4,9 @@ pub mod loader;
 pub mod search;
 
 use crate::win32::{
-    advapi32, bcrypt, crypt32, d3d11, dbghelp, dwmapi, dxgi, gdi32, hid, imm32,
-    kernel32, msvcrt, ole32, oleaut32, opengl32, setupapi, shell32, shlwapi, unityplayer, user32,
-    version, winhttp, winmm, ws2_32,
+    advapi32, bcrypt, crypt32, d3d11, dbghelp, dwmapi, dxgi, gdi32, hid, imm32, kernel32, msvcrt,
+    ole32, oleaut32, opengl32, setupapi, shell32, shlwapi, unityplayer, user32, version, winhttp,
+    winmm, ws2_32,
 };
 use tracing::trace;
 
@@ -100,7 +100,6 @@ pub use loader::{
     NativeModule,
 };
 
-
 pub extern "win64" fn __wine_dbg_output(str_ptr: *const libc::c_char) -> i32 {
     if !str_ptr.is_null() {
         if let Ok(s) = unsafe { std::ffi::CStr::from_ptr(str_ptr) }.to_str() {
@@ -125,11 +124,8 @@ pub extern "win64" fn __wine_dbg_get_channel_flags(_ch: *const libc::c_char) -> 
 
 fn normalize_dll_base_name(dll_name: &str) -> String {
     let dll_lower = dll_name.to_lowercase();
-    let base_name = if let Some(idx) = dll_lower.find('.') {
-        &dll_lower[..idx]
-    } else {
-        &dll_lower
-    };
+    let base_name =
+        if let Some(idx) = dll_lower.find('.') { &dll_lower[..idx] } else { &dll_lower };
 
     if base_name == "kernelbase" {
         "kernel32".to_string()
@@ -166,7 +162,9 @@ fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Opt
             "__wine_dbg_header" => return Some(__wine_dbg_header as usize),
             "__wine_dbg_get_channel_flags" => return Some(__wine_dbg_get_channel_flags as usize),
             _ => {
-                if let Some(addr) = resolve_export_name(&crate::win32::ntdll::get_exports(), func_name) {
+                if let Some(addr) =
+                    resolve_export_name(&crate::win32::ntdll::get_exports(), func_name)
+                {
                     return Some(addr);
                 }
                 if let Some(addr) = resolve_export_name(&msvcrt::get_exports(), func_name) {
@@ -218,12 +216,27 @@ fn resolve_explicit_reimplemented_export(dll_name: &str, func_name: &str) -> Opt
         "dbghelp" => resolve_export_name(&dbghelp::get_exports(), func_name),
         "d3d11" => resolve_export_name(&d3d11::get_exports(), func_name),
         "dxgi" => resolve_export_name(&dxgi::get_exports(), func_name),
-        "vulkan-1" | "winevulkan" => resolve_export_name(&crate::win32::vulkan::get_exports(), func_name),
+        "vulkan-1" | "winevulkan" => {
+            resolve_export_name(&crate::win32::vulkan::get_exports(), func_name)
+        }
         "steam_api64" | "steam_api" => crate::win32::steam_api64::resolve_export(func_name),
         "comdlg32" => resolve_export_name(&crate::win32::comdlg32::get_exports(), func_name),
-        "winspool" | "winspool.drv" => resolve_export_name(&crate::win32::winspool::get_exports(), func_name),
+        "winspool" | "winspool.drv" => {
+            resolve_export_name(&crate::win32::winspool::get_exports(), func_name)
+        }
         _ => None,
     }
+}
+
+/// Resolve an export for a runtime feature probe without fabricating a
+/// compatibility stub. Windows `GetProcAddress` returns NULL for a symbol that
+/// the selected module does not export; missing optional symbols are expected
+/// and must not be reported as startup warnings.
+pub(crate) fn resolve_optional_reimplemented_export(
+    dll_name: &str,
+    func_name: &str,
+) -> Option<usize> {
+    resolve_explicit_reimplemented_export(dll_name, func_name)
 }
 
 /// Resolves an import in a static reimplemented DLL.
@@ -277,7 +290,11 @@ pub fn resolve_reimplemented_export(dll_name: &str, func_name: &str) -> usize {
             | "winspool.drv"
             | "shcore"
     ) {
-        tracing::warn!("{}!{} requested but not explicitly defined — providing generic stub", base_name, func_name);
+        tracing::warn!(
+            "{}!{} requested but not explicitly defined — providing generic stub",
+            base_name,
+            func_name
+        );
         msvcrt::generic_msvcrt_stub as usize
     } else {
         trace!("Unresolved import {}!{}", dll_name, func_name);
@@ -327,7 +344,10 @@ pub fn resolve_export_by_ordinal(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_export_name, resolve_export_status, ExportStatus};
+    use super::{
+        resolve_export_name, resolve_export_status, resolve_optional_reimplemented_export,
+        ExportStatus,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -383,5 +403,15 @@ mod tests {
             resolve_export_status("kernel32.dll", "DefinitelyMissing"),
             ExportStatus::Unsupported
         );
+    }
+
+    #[test]
+    fn optional_export_probe_never_fabricates_a_generic_stub() {
+        assert!(resolve_optional_reimplemented_export("kernel32.dll", "GetProcAddress").is_some());
+        assert!(
+            resolve_optional_reimplemented_export("shell32.dll", "mono_profiler_startup").is_none()
+        );
+        assert!(resolve_optional_reimplemented_export("kernel32.dll", "GetFileAttributesExWW")
+            .is_none());
     }
 }

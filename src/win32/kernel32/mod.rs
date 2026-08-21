@@ -69,6 +69,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("DeleteFileW", file::delete_file_w as usize);
     exports.insert("CopyFileA", file::copy_file_a as usize);
     exports.insert("CopyFileW", file::copy_file_w as usize);
+    exports.insert("CopyFileExA", file::copy_file_ex_a as usize);
+    exports.insert("CopyFileExW", file::copy_file_ex_w as usize);
     exports.insert("MoveFileA", file::move_file_a as usize);
     exports.insert("MoveFileW", file::move_file_w as usize);
     exports.insert("MoveFileExA", file::move_file_ex_a as usize);
@@ -149,10 +151,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SetDefaultDllDirectories", process::set_default_dll_directories as usize);
     exports.insert("IsWow64Process", process::is_wow64_process as usize);
     exports.insert("DelayLoadFailureHook", process::delay_load_failure_hook as usize);
-    exports.insert(
-        "ResolveDelayLoadedAPI",
-        process::resolve_delay_loaded_api as usize,
-    );
+    exports.insert("ResolveDelayLoadedAPI", process::resolve_delay_loaded_api as usize);
     exports.insert("GetCommandLineA", process::get_command_line_a as usize);
     exports.insert("GetCommandLineW", process::get_command_line_w as usize);
     exports.insert("GetEnvironmentStringsA", process::get_environment_strings_a as usize);
@@ -417,6 +416,17 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     );
     exports.insert("QueryPerformanceCounter", time::query_performance_counter as usize);
     exports.insert("QueryPerformanceFrequency", time::query_performance_frequency as usize);
+    exports.insert("QueryUnbiasedInterruptTime", time::query_unbiased_interrupt_time as usize);
+    exports.insert("QueryInterruptTime", time::query_interrupt_time as usize);
+    exports.insert("QueryInterruptTimePrecise", time::query_interrupt_time_precise as usize);
+    exports.insert(
+        "QueryUnbiasedInterruptTimePrecise",
+        time::query_unbiased_interrupt_time_precise as usize,
+    );
+    exports.insert(
+        "GetSystemTimePreciseAsFileTime",
+        time::get_system_time_precise_as_file_time as usize,
+    );
     exports.insert("GetTimeZoneInformation", time::get_time_zone_information as usize);
 
     // System Information
@@ -477,10 +487,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("FlushProcessWriteBuffers", process::flush_process_write_buffers as usize);
     exports.insert("GetCurrentPackageId", process::get_current_package_id as usize);
     exports.insert("CreateSymbolicLinkW", process::create_symbolic_link_w as usize);
-    exports.insert(
-        "GetFileInformationByHandleEx",
-        file::get_file_information_by_handle_ex as usize,
-    );
+    exports
+        .insert("GetFileInformationByHandleEx", file::get_file_information_by_handle_ex as usize);
     exports.insert("SetFileInformationByHandle", process::set_file_information_by_handle as usize);
     exports.insert("CreateThreadpoolTimer", process::create_threadpool_timer as usize);
     exports.insert("SetThreadpoolTimer", process::set_threadpool_timer as usize);
@@ -515,7 +523,8 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("RoActivateInstance", process::ro_activate_instance as usize);
     exports.insert("RoGetAgileReference", process::ro_get_agile_reference as usize);
     exports.insert("WindowsCreateString", process::windows_create_string as usize);
-    exports.insert("WindowsCreateStringReference", process::windows_create_string_reference as usize);
+    exports
+        .insert("WindowsCreateStringReference", process::windows_create_string_reference as usize);
     exports.insert("WindowsDeleteString", process::windows_delete_string as usize);
     exports.insert("WindowsDuplicateString", process::windows_duplicate_string as usize);
     exports.insert("WindowsGetStringRawBuffer", process::windows_get_string_raw_buffer as usize);

@@ -14,7 +14,12 @@ extern "win64" fn ReturnDummyInterface() -> *const usize {
     DUMMY_OBJECT.as_ptr()
 }
 
-extern "win64" fn ReturnDummyInterface4(_a: usize, _b: usize, _c: usize, _d: usize) -> *const usize {
+extern "win64" fn ReturnDummyInterface4(
+    _a: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> *const usize {
     DUMMY_OBJECT.as_ptr()
 }
 
@@ -69,7 +74,11 @@ extern "win64" fn SteamAPI_ISteamUGC_GetNumSubscribedItems(_instance: usize) -> 
     0
 }
 
-extern "win64" fn SteamAPI_ISteamUGC_GetSubscribedItems(_instance: usize, _pvec: *mut u64, _max: u32) -> u32 {
+extern "win64" fn SteamAPI_ISteamUGC_GetSubscribedItems(
+    _instance: usize,
+    _pvec: *mut u64,
+    _max: u32,
+) -> u32 {
     0
 }
 
@@ -176,14 +185,23 @@ extern "win64" fn SteamAPI_ISteamUserStats_RequestCurrentStats(_instance: usize)
     1
 }
 
-extern "win64" fn SteamAPI_ISteamUserStats_GetAchievement(_instance: usize, _name: *const i8, pbAchieved: *mut u32) -> u32 {
+extern "win64" fn SteamAPI_ISteamUserStats_GetAchievement(
+    _instance: usize,
+    _name: *const i8,
+    pbAchieved: *mut u32,
+) -> u32 {
     if !pbAchieved.is_null() {
-        unsafe { *pbAchieved = 0; }
+        unsafe {
+            *pbAchieved = 0;
+        }
     }
     1
 }
 
-extern "win64" fn SteamAPI_ISteamUserStats_SetAchievement(_instance: usize, _name: *const i8) -> u32 {
+extern "win64" fn SteamAPI_ISteamUserStats_SetAchievement(
+    _instance: usize,
+    _name: *const i8,
+) -> u32 {
     1
 }
 
@@ -191,14 +209,20 @@ extern "win64" fn SteamAPI_ISteamUserStats_StoreStats(_instance: usize) -> u32 {
     1
 }
 
-extern "win64" fn SteamAPI_ISteamUserStats_ResetAllStats(_instance: usize, _achievements_too: u32) -> u32 {
+extern "win64" fn SteamAPI_ISteamUserStats_ResetAllStats(
+    _instance: usize,
+    _achievements_too: u32,
+) -> u32 {
     1
 }
 
 // SteamAPI_ManualDispatch
 extern "win64" fn SteamAPI_ManualDispatch_Init() {}
 extern "win64" fn SteamAPI_ManualDispatch_RunFrame(_h_steam_pipe: i32) {}
-extern "win64" fn SteamAPI_ManualDispatch_GetNextCallback(_h_steam_pipe: i32, _p_callback_msg: *mut std::ffi::c_void) -> u32 {
+extern "win64" fn SteamAPI_ManualDispatch_GetNextCallback(
+    _h_steam_pipe: i32,
+    _p_callback_msg: *mut std::ffi::c_void,
+) -> u32 {
     0 // false - no pending callbacks
 }
 extern "win64" fn SteamAPI_ManualDispatch_FreeLastCallback(_h_steam_pipe: i32) {}
@@ -213,6 +237,10 @@ extern "win64" fn SteamAPI_ManualDispatch_GetAPICallResult(
     0 // false
 }
 
+extern "win64" fn SteamAPI_ISteamClient_SetWarningMessageHook(_self: usize, _hook: usize) {}
+extern "win64" fn SteamAPI_ISteamUtils_SetWarningMessageHook(_self: usize, _hook: usize) {}
+extern "win64" fn SteamAPI_SetWarningMessageHook(_hook: usize) {}
+
 // Generic dummy fallback for any unhandled SteamAPI function
 extern "win64" fn GenericSteamApiStub() -> usize {
     0
@@ -225,7 +253,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SteamAPI_InitFlat", SteamAPI_InitFlat as usize);
     exports.insert("SteamAPI_Shutdown", SteamAPI_Shutdown as usize);
     exports.insert("SteamAPI_RestartAppIfNecessary", SteamAPI_RestartAppIfNecessary as usize);
-    exports.insert("SteamAPI_ReleaseCurrentThreadMemory", SteamAPI_ReleaseCurrentThreadMemory as usize);
+    exports.insert(
+        "SteamAPI_ReleaseCurrentThreadMemory",
+        SteamAPI_ReleaseCurrentThreadMemory as usize,
+    );
     exports.insert("SteamAPI_RunCallbacks", SteamAPI_RunCallbacks as usize);
     exports.insert("SteamAPI_IsSteamRunning", SteamAPI_IsSteamRunning as usize);
     exports.insert("SteamAPI_GetHSteamUser", SteamAPI_GetHSteamUser as usize);
@@ -234,16 +265,31 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     // SteamAPI_ManualDispatch
     exports.insert("SteamAPI_ManualDispatch_Init", SteamAPI_ManualDispatch_Init as usize);
     exports.insert("SteamAPI_ManualDispatch_RunFrame", SteamAPI_ManualDispatch_RunFrame as usize);
-    exports.insert("SteamAPI_ManualDispatch_GetNextCallback", SteamAPI_ManualDispatch_GetNextCallback as usize);
-    exports.insert("SteamAPI_ManualDispatch_FreeLastCallback", SteamAPI_ManualDispatch_FreeLastCallback as usize);
-    exports.insert("SteamAPI_ManualDispatch_GetAPICallResult", SteamAPI_ManualDispatch_GetAPICallResult as usize);
+    exports.insert(
+        "SteamAPI_ManualDispatch_GetNextCallback",
+        SteamAPI_ManualDispatch_GetNextCallback as usize,
+    );
+    exports.insert(
+        "SteamAPI_ManualDispatch_FreeLastCallback",
+        SteamAPI_ManualDispatch_FreeLastCallback as usize,
+    );
+    exports.insert(
+        "SteamAPI_ManualDispatch_GetAPICallResult",
+        SteamAPI_ManualDispatch_GetAPICallResult as usize,
+    );
 
     exports.insert("SteamInternal_CreateInterface", ReturnDummyInterface as usize);
     exports.insert("SteamInternal_FindOrCreateUserInterface", ReturnDummyInterface2 as usize);
     exports.insert("SteamInternal_FindOrCreateGlobalInterface", ReturnDummyInterface as usize);
-    exports.insert("SteamAPI_SetWarningMessageHook", GenericSteamApiStub as usize);
-    exports.insert("SteamAPI_ISteamClient_SetWarningMessageHook", GenericSteamApiStub as usize);
-    exports.insert("SteamAPI_ISteamUtils_SetWarningMessageHook", GenericSteamApiStub as usize);
+    exports.insert("SteamAPI_SetWarningMessageHook", SteamAPI_SetWarningMessageHook as usize);
+    exports.insert(
+        "SteamAPI_ISteamClient_SetWarningMessageHook",
+        SteamAPI_ISteamClient_SetWarningMessageHook as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUtils_SetWarningMessageHook",
+        SteamAPI_ISteamUtils_SetWarningMessageHook as usize,
+    );
 
     exports.insert("SteamClient", ReturnDummyInterface as usize);
     exports.insert("SteamAPI_SteamClient_v020", ReturnDummyInterface as usize);
@@ -265,7 +311,10 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SteamAPI_ISteamClient_GetISteamFriends", ReturnDummyInterface4 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamUtils", ReturnDummyInterface3 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamMatchmaking", ReturnDummyInterface4 as usize);
-    exports.insert("SteamAPI_ISteamClient_GetISteamMatchmakingServers", ReturnDummyInterface4 as usize);
+    exports.insert(
+        "SteamAPI_ISteamClient_GetISteamMatchmakingServers",
+        ReturnDummyInterface4 as usize,
+    );
     exports.insert("SteamAPI_ISteamClient_GetISteamUserStats", ReturnDummyInterface4 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamApps", ReturnDummyInterface4 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamNetworking", ReturnDummyInterface4 as usize);
@@ -280,56 +329,130 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("SteamAPI_ISteamClient_GetISteamHTMLSurface", ReturnDummyInterface4 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamInventory", ReturnDummyInterface4 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamVideo", ReturnDummyInterface4 as usize);
-    exports.insert("SteamAPI_ISteamClient_GetISteamParentalSettings", ReturnDummyInterface4 as usize);
+    exports
+        .insert("SteamAPI_ISteamClient_GetISteamParentalSettings", ReturnDummyInterface4 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamInput", ReturnDummyInterface4 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamParties", ReturnDummyInterface4 as usize);
     exports.insert("SteamAPI_ISteamClient_GetISteamRemotePlay", ReturnDummyInterface4 as usize);
-    exports.insert("SteamAPI_ISteamClient_GetISteamNetworkingUtils", ReturnDummyInterface3 as usize);
-    exports.insert("SteamAPI_ISteamClient_GetISteamNetworkingSockets", ReturnDummyInterface4 as usize);
-    exports.insert("SteamAPI_ISteamClient_GetISteamNetworkingMessages", ReturnDummyInterface4 as usize);
+    exports
+        .insert("SteamAPI_ISteamClient_GetISteamNetworkingUtils", ReturnDummyInterface3 as usize);
+    exports
+        .insert("SteamAPI_ISteamClient_GetISteamNetworkingSockets", ReturnDummyInterface4 as usize);
+    exports.insert(
+        "SteamAPI_ISteamClient_GetISteamNetworkingMessages",
+        ReturnDummyInterface4 as usize,
+    );
     exports.insert("SteamAPI_ISteamClient_GetISteamGameServer", ReturnDummyInterface4 as usize);
-    exports.insert("SteamAPI_ISteamClient_GetISteamGameServerStats", ReturnDummyInterface4 as usize);
-    exports.insert("SteamAPI_ISteamClient_GetISteamGenericInterface", ReturnDummyInterface4 as usize);
+    exports
+        .insert("SteamAPI_ISteamClient_GetISteamGameServerStats", ReturnDummyInterface4 as usize);
+    exports
+        .insert("SteamAPI_ISteamClient_GetISteamGenericInterface", ReturnDummyInterface4 as usize);
 
     // SteamAPI_ISteamUGC
-    exports.insert("SteamAPI_ISteamUGC_GetNumSubscribedItems", SteamAPI_ISteamUGC_GetNumSubscribedItems as usize);
-    exports.insert("SteamAPI_ISteamUGC_GetSubscribedItems", SteamAPI_ISteamUGC_GetSubscribedItems as usize);
-    exports.insert("SteamAPI_ISteamUGC_GetItemInstallInfo", SteamAPI_ISteamUGC_GetItemInstallInfo as usize);
+    exports.insert(
+        "SteamAPI_ISteamUGC_GetNumSubscribedItems",
+        SteamAPI_ISteamUGC_GetNumSubscribedItems as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUGC_GetSubscribedItems",
+        SteamAPI_ISteamUGC_GetSubscribedItems as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUGC_GetItemInstallInfo",
+        SteamAPI_ISteamUGC_GetItemInstallInfo as usize,
+    );
 
     // SteamAPI_ISteamUtils
     exports.insert("SteamAPI_ISteamUtils_GetAppID", SteamAPI_ISteamUtils_GetAppID as usize);
-    exports.insert("SteamAPI_ISteamUtils_GetSteamUILanguage", SteamAPI_ISteamUtils_GetSteamUILanguage as usize);
+    exports.insert(
+        "SteamAPI_ISteamUtils_GetSteamUILanguage",
+        SteamAPI_ISteamUtils_GetSteamUILanguage as usize,
+    );
     exports.insert("SteamAPI_ISteamUtils_GetIPCountry", SteamAPI_ISteamUtils_GetIPCountry as usize);
-    exports.insert("SteamAPI_ISteamUtils_IsOverlayEnabled", SteamAPI_ISteamUtils_IsOverlayEnabled as usize);
-    exports.insert("SteamAPI_ISteamUtils_IsSteamInBigPictureMode", SteamAPI_ISteamUtils_IsSteamInBigPictureMode as usize);
-    exports.insert("SteamAPI_ISteamUtils_IsSteamRunningOnSteamDeck", SteamAPI_ISteamUtils_IsSteamRunningOnSteamDeck as usize);
-    exports.insert("SteamAPI_ISteamUtils_IsSteamRunningInVR", SteamAPI_ISteamUtils_IsSteamRunningInVR as usize);
-    exports.insert("SteamAPI_ISteamUtils_GetServerRealTime", SteamAPI_ISteamUtils_GetServerRealTime as usize);
-    exports.insert("SteamAPI_ISteamUtils_GetCurrentBatteryPower", SteamAPI_ISteamUtils_GetCurrentBatteryPower as usize);
+    exports.insert(
+        "SteamAPI_ISteamUtils_IsOverlayEnabled",
+        SteamAPI_ISteamUtils_IsOverlayEnabled as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUtils_IsSteamInBigPictureMode",
+        SteamAPI_ISteamUtils_IsSteamInBigPictureMode as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUtils_IsSteamRunningOnSteamDeck",
+        SteamAPI_ISteamUtils_IsSteamRunningOnSteamDeck as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUtils_IsSteamRunningInVR",
+        SteamAPI_ISteamUtils_IsSteamRunningInVR as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUtils_GetServerRealTime",
+        SteamAPI_ISteamUtils_GetServerRealTime as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUtils_GetCurrentBatteryPower",
+        SteamAPI_ISteamUtils_GetCurrentBatteryPower as usize,
+    );
 
     // SteamAPI_ISteamUser
     exports.insert("SteamAPI_ISteamUser_GetSteamID", SteamAPI_ISteamUser_GetSteamID as usize);
     exports.insert("SteamAPI_ISteamUser_BLoggedOn", SteamAPI_ISteamUser_BLoggedOn as usize);
-    exports.insert("SteamAPI_ISteamUser_GetPlayerSteamLevel", SteamAPI_ISteamUser_GetPlayerSteamLevel as usize);
+    exports.insert(
+        "SteamAPI_ISteamUser_GetPlayerSteamLevel",
+        SteamAPI_ISteamUser_GetPlayerSteamLevel as usize,
+    );
     exports.insert("SteamAPI_ISteamUser_GetHSteamUser", SteamAPI_ISteamUser_GetHSteamUser as usize);
 
     // SteamAPI_ISteamApps
     exports.insert("SteamAPI_ISteamApps_BIsSubscribed", SteamAPI_ISteamApps_BIsSubscribed as usize);
-    exports.insert("SteamAPI_ISteamApps_BIsSubscribedApp", SteamAPI_ISteamApps_BIsSubscribedApp as usize);
-    exports.insert("SteamAPI_ISteamApps_BIsDlcInstalled", SteamAPI_ISteamApps_BIsDlcInstalled as usize);
-    exports.insert("SteamAPI_ISteamApps_GetCurrentGameLanguage", SteamAPI_ISteamApps_GetCurrentGameLanguage as usize);
-    exports.insert("SteamAPI_ISteamApps_GetAvailableGameLanguages", SteamAPI_ISteamApps_GetAvailableGameLanguages as usize);
+    exports.insert(
+        "SteamAPI_ISteamApps_BIsSubscribedApp",
+        SteamAPI_ISteamApps_BIsSubscribedApp as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamApps_BIsDlcInstalled",
+        SteamAPI_ISteamApps_BIsDlcInstalled as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamApps_GetCurrentGameLanguage",
+        SteamAPI_ISteamApps_GetCurrentGameLanguage as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamApps_GetAvailableGameLanguages",
+        SteamAPI_ISteamApps_GetAvailableGameLanguages as usize,
+    );
 
     // SteamAPI_ISteamFriends
-    exports.insert("SteamAPI_ISteamFriends_GetPersonaName", SteamAPI_ISteamFriends_GetPersonaName as usize);
-    exports.insert("SteamAPI_ISteamFriends_GetPersonaState", SteamAPI_ISteamFriends_GetPersonaState as usize);
+    exports.insert(
+        "SteamAPI_ISteamFriends_GetPersonaName",
+        SteamAPI_ISteamFriends_GetPersonaName as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamFriends_GetPersonaState",
+        SteamAPI_ISteamFriends_GetPersonaState as usize,
+    );
 
     // SteamAPI_ISteamUserStats
-    exports.insert("SteamAPI_ISteamUserStats_RequestCurrentStats", SteamAPI_ISteamUserStats_RequestCurrentStats as usize);
-    exports.insert("SteamAPI_ISteamUserStats_GetAchievement", SteamAPI_ISteamUserStats_GetAchievement as usize);
-    exports.insert("SteamAPI_ISteamUserStats_SetAchievement", SteamAPI_ISteamUserStats_SetAchievement as usize);
-    exports.insert("SteamAPI_ISteamUserStats_StoreStats", SteamAPI_ISteamUserStats_StoreStats as usize);
-    exports.insert("SteamAPI_ISteamUserStats_ResetAllStats", SteamAPI_ISteamUserStats_ResetAllStats as usize);
+    exports.insert(
+        "SteamAPI_ISteamUserStats_RequestCurrentStats",
+        SteamAPI_ISteamUserStats_RequestCurrentStats as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUserStats_GetAchievement",
+        SteamAPI_ISteamUserStats_GetAchievement as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUserStats_SetAchievement",
+        SteamAPI_ISteamUserStats_SetAchievement as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUserStats_StoreStats",
+        SteamAPI_ISteamUserStats_StoreStats as usize,
+    );
+    exports.insert(
+        "SteamAPI_ISteamUserStats_ResetAllStats",
+        SteamAPI_ISteamUserStats_ResetAllStats as usize,
+    );
 
     exports
 }
@@ -349,12 +472,20 @@ pub fn resolve_export(func_name: &str) -> Option<usize> {
             return Some(addr);
         }
     }
-    if func_name.contains("GetISteam") || func_name.contains("CreateInterface") || func_name.contains("Interface") {
-        debug!("Unhandled steam_api64 interface getter '{}' -> returning ReturnDummyInterface", func_name);
+    if func_name.contains("GetISteam")
+        || func_name.contains("CreateInterface")
+        || func_name.contains("Interface")
+    {
+        debug!(
+            "Unhandled steam_api64 interface getter '{}' -> returning ReturnDummyInterface",
+            func_name
+        );
         Some(ReturnDummyInterface as usize)
     } else {
-        debug!("Unhandled steam_api64 function '{}' -> returning GenericSteamApiStub (0)", func_name);
+        debug!(
+            "Unhandled steam_api64 function '{}' -> returning GenericSteamApiStub (0)",
+            func_name
+        );
         Some(GenericSteamApiStub as usize)
     }
 }
-

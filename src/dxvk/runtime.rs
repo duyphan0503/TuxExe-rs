@@ -91,6 +91,24 @@ unsafe fn open(path: &Path) -> Option<*mut libc::c_void> {
     (!handle.is_null()).then_some(handle)
 }
 
+/// Build the DXVK configuration string for a requested target frame rate.
+///
+/// `0` means truly uncapped: presentation is not synchronized to vblank and no
+/// DXVK frame-rate limiter is emitted. Guest simulation time remains tied to
+/// the Windows wall-clock APIs rather than to the number of rendered frames.
+pub fn build_dxvk_config(target_fps: u32) -> String {
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(6);
+    let mut config = format!(
+        "dxgi.syncInterval=0;dxgi.maxFrameLatency=1;d3d11.relaxedBarriers=True;dxvk.useRawSsbo=True;dxvk.enableAsync=true;dxvk.numCompilerThreads={threads};d3d11.constantBufferRangeCheck=False;d3d11.zeroInit=False;dxvk.trackPipelineLifetime=False;d3d11.invariantPosition=False"
+    );
+    if target_fps > 0 {
+        config.push_str(&format!(
+            ";dxgi.maxFrameRate={target_fps};dxvk.maxFrameRate={target_fps};d3d11.maxFrameRate={target_fps};dxgi.forceRefreshRate={target_fps}"
+        ));
+    }
+    config
+}
+
 fn load() -> Option<Runtime> {
     // A runtime located in one of TuxExe's own package directories is part of
     // this release and is therefore known to have been built with the MS-ABI
@@ -115,8 +133,13 @@ fn load() -> Option<Runtime> {
     if env::var_os("DXVK_WSI_DRIVER").is_none() {
         unsafe { env::set_var("DXVK_WSI_DRIVER", "TUXEXE") };
     }
-    if env::var_os("DXVK_FRAME_RATE").is_none() {
-        unsafe { env::set_var("DXVK_FRAME_RATE", "60") };
+    let target_fps = env::var("TUXEXE_FPS").unwrap_or_else(|_| "0".to_string());
+    if env::var_os("DXVK_FRAME_RATE").is_none() && target_fps != "0" {
+        unsafe { env::set_var("DXVK_FRAME_RATE", &target_fps) };
+    }
+    if env::var_os("DXVK_CONFIG").is_none() {
+        let fps = target_fps.parse::<u32>().unwrap_or(0);
+        unsafe { env::set_var("DXVK_CONFIG", build_dxvk_config(fps)) };
     }
 
     // DXGI is loaded first so D3D11's DT_NEEDED soname is already available.
@@ -173,5 +196,22 @@ mod tests {
         std::fs::create_dir(&lib).unwrap();
         std::fs::write(lib.join("libdxvk_dxgi.so.0"), []).unwrap();
         assert!(library_path(temp.path(), Library::Dxgi).is_some());
+    }
+
+    #[test]
+    fn uncapped_config_does_not_apply_a_frame_rate_limit() {
+        let config = build_dxvk_config(0);
+
+        assert!(config.contains("dxgi.syncInterval=0"));
+        assert!(!config.contains("maxFrameRate="), "uncapped config was capped: {config}");
+    }
+
+    #[test]
+    fn explicit_target_applies_the_requested_frame_rate_limit() {
+        let config = build_dxvk_config(144);
+
+        assert!(config.contains("dxgi.maxFrameRate=144"));
+        assert!(config.contains("dxvk.maxFrameRate=144"));
+        assert!(config.contains("d3d11.maxFrameRate=144"));
     }
 }

@@ -446,8 +446,14 @@ pub extern "win64" fn CreateWindowExA(
     let is_visible = (_dwStyle & WS_VISIBLE) != 0;
 
     // Try to create a REAL X11 window first
-    let hwnd = if let Some(x11_hwnd) = crate::platform::x11::create_x11_window_with_visibility(&title, x, y, nWidth, nHeight, is_visible) {
-        tracing::info!(hwnd = format_args!("0x{:x}", x11_hwnd), is_visible, "X11 window created successfully");
+    let hwnd = if let Some(x11_hwnd) = crate::platform::x11::create_x11_window_with_visibility(
+        &title, x, y, nWidth, nHeight, is_visible,
+    ) {
+        tracing::info!(
+            hwnd = format_args!("0x{:x}", x11_hwnd),
+            is_visible,
+            "X11 window created successfully"
+        );
         let native_window_id = crate::platform::x11::hwnd_to_x11_window(x11_hwnd).unwrap_or(0);
         create_window_with_parent_and_handle(
             x11_hwnd,
@@ -463,7 +469,9 @@ pub extern "win64" fn CreateWindowExA(
         x11_hwnd
     } else {
         // Fallback to fake window if X11 unavailable
-        create_window_with_parent(wnd_proc, title, actual_x, actual_y, actual_w, actual_h, hWndParent)
+        create_window_with_parent(
+            wnd_proc, title, actual_x, actual_y, actual_w, actual_h, hWndParent,
+        )
     };
 
     #[repr(C)]
@@ -626,7 +634,8 @@ pub extern "win64" fn MoveWindow(
     let _ = crate::platform::x11::configure_x11_window(hWnd, X, Y, nWidth, nHeight);
 
     if X != cur_x || Y != cur_y {
-        let move_lparam = ((X as i16 as u16 as usize) | ((Y as i16 as u16 as usize) << 16)) as isize;
+        let move_lparam =
+            ((X as i16 as u16 as usize) | ((Y as i16 as u16 as usize) << 16)) as isize;
         enqueue_message(Msg {
             hwnd: hWnd,
             message: 0x0003, // WM_MOVE
@@ -638,7 +647,8 @@ pub extern "win64" fn MoveWindow(
     }
 
     if nWidth != cur_w || nHeight != cur_h {
-        let size_lparam = ((nWidth as i16 as u16 as usize) | ((nHeight as i16 as u16 as usize) << 16)) as isize;
+        let size_lparam =
+            ((nWidth as i16 as u16 as usize) | ((nHeight as i16 as u16 as usize) << 16)) as isize;
         enqueue_message(Msg {
             hwnd: hWnd,
             message: 0x0005, // WM_SIZE
@@ -678,12 +688,12 @@ pub extern "win64" fn SetWindowPos(
     let cur_w = cur_right - cur_left;
     let cur_h = cur_bottom - cur_top;
 
-    let new_x = if (uFlags & 0x0002 /* SWP_NOMOVE */) != 0 { cur_x } else { X };
-    let new_y = if (uFlags & 0x0002 /* SWP_NOMOVE */) != 0 { cur_y } else { Y };
-    let new_w = if (uFlags & 0x0001 /* SWP_NOSIZE */) != 0 { cur_w } else { cx };
-    let new_h = if (uFlags & 0x0001 /* SWP_NOSIZE */) != 0 { cur_h } else { cy };
+    let new_x = if (uFlags & 0x0002/* SWP_NOMOVE */) != 0 { cur_x } else { X };
+    let new_y = if (uFlags & 0x0002/* SWP_NOMOVE */) != 0 { cur_y } else { Y };
+    let new_w = if (uFlags & 0x0001/* SWP_NOSIZE */) != 0 { cur_w } else { cx };
+    let new_h = if (uFlags & 0x0001/* SWP_NOSIZE */) != 0 { cur_h } else { cy };
 
-    if (uFlags & 0x0040 /* SWP_SHOWWINDOW */) != 0 {
+    if (uFlags & 0x0040/* SWP_SHOWWINDOW */) != 0 {
         set_window_visibility(hWnd, true);
         let _ = crate::platform::x11::set_x11_window_visible(hWnd, true);
         enqueue_message(Msg {
@@ -694,7 +704,7 @@ pub extern "win64" fn SetWindowPos(
             time: 0,
             ..Default::default()
         });
-    } else if (uFlags & 0x0080 /* SWP_HIDEWINDOW */) != 0 {
+    } else if (uFlags & 0x0080/* SWP_HIDEWINDOW */) != 0 {
         set_window_visibility(hWnd, false);
         let _ = crate::platform::x11::set_x11_window_visible(hWnd, false);
         enqueue_message(Msg {
@@ -713,8 +723,9 @@ pub extern "win64" fn SetWindowPos(
     }
     let _ = crate::platform::x11::configure_x11_window(hWnd, new_x, new_y, new_w, new_h);
 
-    if (uFlags & 0x0002 /* SWP_NOMOVE */) == 0 && (new_x != cur_x || new_y != cur_y) {
-        let move_lparam = ((new_x as i16 as u16 as usize) | ((new_y as i16 as u16 as usize) << 16)) as isize;
+    if (uFlags & 0x0002/* SWP_NOMOVE */) == 0 && (new_x != cur_x || new_y != cur_y) {
+        let move_lparam =
+            ((new_x as i16 as u16 as usize) | ((new_y as i16 as u16 as usize) << 16)) as isize;
         enqueue_message(Msg {
             hwnd: hWnd,
             message: 0x0003, // WM_MOVE
@@ -725,8 +736,9 @@ pub extern "win64" fn SetWindowPos(
         });
     }
 
-    if (uFlags & 0x0001 /* SWP_NOSIZE */) == 0 && (new_w != cur_w || new_h != cur_h) {
-        let size_lparam = ((new_w as i16 as u16 as usize) | ((new_h as i16 as u16 as usize) << 16)) as isize;
+    if (uFlags & 0x0001/* SWP_NOSIZE */) == 0 && (new_w != cur_w || new_h != cur_h) {
+        let size_lparam =
+            ((new_w as i16 as u16 as usize) | ((new_h as i16 as u16 as usize) << 16)) as isize;
         enqueue_message(Msg {
             hwnd: hWnd,
             message: 0x0005, // WM_SIZE
@@ -839,7 +851,12 @@ pub extern "win64" fn EnumDisplayMonitors(
     let (monitor_rect, _) = get_primary_monitor_rects();
 
     if let Some(callback) = lpfn_enum {
-        tracing::info!(callback = callback as usize, hdc, data = dw_data, "EnumDisplayMonitors invoking guest callback");
+        tracing::info!(
+            callback = callback as usize,
+            hdc,
+            data = dw_data,
+            "EnumDisplayMonitors invoking guest callback"
+        );
         let callback_result =
             unsafe { callback(PRIMARY_MONITOR_HANDLE, hdc, &monitor_rect as *const Rect, dw_data) };
         tracing::info!(callback_result, "EnumDisplayMonitors guest callback returned");
@@ -1000,8 +1017,10 @@ pub extern "win64" fn MonitorFromRect(lprc: *const Rect, dwFlags: u32) -> usize 
 
     let rect = unsafe { *lprc };
     let (monitor_rect, _) = get_primary_monitor_rects();
-    let intersects_primary =
-        rect.right > monitor_rect.left && rect.bottom > monitor_rect.top && rect.left < monitor_rect.right && rect.top < monitor_rect.bottom;
+    let intersects_primary = rect.right > monitor_rect.left
+        && rect.bottom > monitor_rect.top
+        && rect.left < monitor_rect.right
+        && rect.top < monitor_rect.bottom;
     if intersects_primary {
         return PRIMARY_MONITOR_HANDLE;
     }
@@ -1029,11 +1048,7 @@ pub extern "win64" fn GetDC(hWnd: usize) -> usize {
         return 0;
     }
 
-    let hdc = if hWnd != 0 {
-        hWnd | 0x40_0000_0000usize
-    } else {
-        0x40_0000usize
-    };
+    let hdc = if hWnd != 0 { hWnd | 0x40_0000_0000usize } else { 0x40_0000usize };
     if let Ok(mut map) = hdc_map().lock() {
         map.insert(hdc, hWnd);
     }
@@ -1151,9 +1166,9 @@ pub extern "win64" fn AdjustWindowRectEx(
         return 0;
     }
 
-    let has_caption = (dw_style & 0x00C0_0000 /* WS_CAPTION */) == 0x00C0_0000;
-    let has_thick_frame = (dw_style & 0x0004_0000 /* WS_THICKFRAME */) != 0;
-    let is_popup = (dw_style & 0x8000_0000 /* WS_POPUP */) != 0;
+    let has_caption = (dw_style & 0x00C0_0000/* WS_CAPTION */) == 0x00C0_0000;
+    let has_thick_frame = (dw_style & 0x0004_0000/* WS_THICKFRAME */) != 0;
+    let is_popup = (dw_style & 0x8000_0000/* WS_POPUP */) != 0;
 
     let border = if has_thick_frame {
         8
@@ -1465,7 +1480,9 @@ pub extern "win64" fn SetProcessDpiAwarenessContext(_value: isize) -> i32 {
 
 pub extern "win64" fn GetProcessDpiAwarenessInternal(_hprocess: usize, level: *mut i32) -> i32 {
     if !level.is_null() {
-        unsafe { *level = 2; /* PROCESS_PER_MONITOR_DPI_AWARE */ }
+        unsafe {
+            *level = 2; /* PROCESS_PER_MONITOR_DPI_AWARE */
+        }
     }
     0 // S_OK
 }
@@ -1728,7 +1745,13 @@ pub extern "win64" fn LoadImageW(
     handle
 }
 
-unsafe fn populate_dev_mode_blob(blob: *mut u8, dm_size: u16, is_wide: bool, width: u32, height: u32) {
+unsafe fn populate_dev_mode_blob(
+    blob: *mut u8,
+    dm_size: u16,
+    is_wide: bool,
+    width: u32,
+    height: u32,
+) {
     let (fields_offset, bits_offset, width_offset, height_offset, freq_offset) = if is_wide {
         (72usize, 168usize, 172usize, 176usize, 184usize)
     } else {
@@ -1826,7 +1849,9 @@ pub extern "win64" fn EnumDisplaySettingsA(
 
     let (width, height) = match i_mode_num {
         ENUM_CURRENT_SETTINGS | 0xFFFF_FFFE => (current_w, current_h),
-        idx if (idx as usize) < SUPPORTED_DISPLAY_MODES.len() => SUPPORTED_DISPLAY_MODES[idx as usize],
+        idx if (idx as usize) < SUPPORTED_DISPLAY_MODES.len() => {
+            SUPPORTED_DISPLAY_MODES[idx as usize]
+        }
         _ => {
             set_last_error(ERROR_SUCCESS);
             return 0;
@@ -2798,10 +2823,37 @@ pub extern "win64" fn UnregisterClassW(lpClassName: *const u16, hInstance: usize
     UnregisterClassA(name_c.as_ptr(), hInstance)
 }
 
-fn timer_registry() -> &'static Mutex<std::collections::HashMap<(usize, usize), u32>> {
-    static TIMERS: OnceLock<Mutex<std::collections::HashMap<(usize, usize), u32>>> =
+fn timer_registry() -> &'static Mutex<std::collections::HashMap<(usize, usize), (u32, usize)>> {
+    static TIMERS: OnceLock<Mutex<std::collections::HashMap<(usize, usize), (u32, usize)>>> =
         OnceLock::new();
     TIMERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn timer_last_fired() -> &'static Mutex<std::collections::HashMap<(usize, usize), u32>> {
+    static TABLE: OnceLock<Mutex<std::collections::HashMap<(usize, usize), u32>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn check_and_fire_timers() {
+    let now = crate::win32::kernel32::time::get_tick_count();
+    let registry = timer_registry().lock().expect("timer registry poisoned");
+    let mut last_fired = timer_last_fired().lock().expect("timer last_fired poisoned");
+
+    for (&(hwnd, id), &(elapse, timer_func)) in registry.iter() {
+        let fired_time = last_fired.get(&(hwnd, id)).copied().unwrap_or(0);
+        if now.wrapping_sub(fired_time) >= elapse {
+            crate::win32::user32::enqueue_message(crate::win32::user32::Msg {
+                hwnd,
+                message: 0x0113,
+                wParam: id,
+                lParam: timer_func as isize,
+                time: now,
+                ..Default::default()
+            });
+            last_fired.insert((hwnd, id), now);
+            break;
+        }
+    }
 }
 
 fn next_timer_id() -> usize {
@@ -2810,19 +2862,25 @@ fn next_timer_id() -> usize {
 }
 
 /// Set a timer. Returns the timer identifier on success, 0 on failure.
-/// Timers are tracked but not actually fired in this compatibility layer.
 pub extern "win64" fn SetTimer(
     hWnd: usize,
     nIDEvent: usize,
     uElapse: u32,
-    _lpTimerFunc: usize,
+    lpTimerFunc: usize,
 ) -> usize {
     if hWnd != 0 && !is_desktop_window(hWnd) && !window_exists(hWnd) {
         set_last_error(ERROR_INVALID_WINDOW_HANDLE);
         return 0;
     }
     let id = if nIDEvent != 0 { nIDEvent } else { next_timer_id() };
-    timer_registry().lock().expect("timer registry poisoned").insert((hWnd, id), uElapse);
+    timer_registry()
+        .lock()
+        .expect("timer registry poisoned")
+        .insert((hWnd, id), (uElapse.max(1), lpTimerFunc));
+    timer_last_fired()
+        .lock()
+        .expect("timer last_fired poisoned")
+        .insert((hWnd, id), crate::win32::kernel32::time::get_tick_count());
     set_last_error(ERROR_SUCCESS);
     id
 }
@@ -2834,8 +2892,8 @@ pub extern "win64" fn KillTimer(hWnd: usize, uIDEvent: usize) -> i32 {
         .expect("timer registry poisoned")
         .remove(&(hWnd, uIDEvent))
         .is_some();
+    timer_last_fired().lock().expect("timer last_fired poisoned").remove(&(hWnd, uIDEvent));
     set_last_error(ERROR_SUCCESS);
-    // Return 1 even if the timer wasn't found — Unity ignores the return value.
     let _ = removed;
     1
 }
@@ -2893,16 +2951,10 @@ pub extern "win64" fn MsgWaitForMultipleObjectsEx(
     let deadline = (milliseconds != u32::MAX)
         .then(|| Instant::now() + Duration::from_millis(milliseconds as u64));
 
-    let mut loop_count = 0u32;
     loop {
         if alertable && crate::win32::kernel32::process::execute_queued_apc(current_tid) {
             set_last_error(ERROR_SUCCESS);
             return WAIT_IO_COMPLETION;
-        }
-
-        if !message_queue().0.lock().expect("message queue poisoned").is_empty() {
-            set_last_error(ERROR_SUCCESS);
-            return WAIT_OBJECT_0 + n_count;
         }
 
         crate::platform::x11::pump_x11_events();
@@ -2912,7 +2964,8 @@ pub extern "win64" fn MsgWaitForMultipleObjectsEx(
             return WAIT_OBJECT_0 + n_count;
         }
         if !guest_handles.is_empty() {
-            let wait = crate::nt_kernel::sync::wait_for_multiple_objects(&guest_handles, wait_all, 0);
+            let wait =
+                crate::nt_kernel::sync::wait_for_multiple_objects(&guest_handles, wait_all, 0);
             if wait != WAIT_TIMEOUT && wait != WAIT_FAILED {
                 set_last_error(ERROR_SUCCESS);
                 return wait;
@@ -2927,14 +2980,7 @@ pub extern "win64" fn MsgWaitForMultipleObjectsEx(
             return WAIT_TIMEOUT;
         }
 
-        loop_count = loop_count.saturating_add(1);
-        if loop_count < 32 {
-            std::hint::spin_loop();
-        } else if loop_count < 128 {
-            std::thread::yield_now();
-        } else {
-            std::thread::sleep(Duration::from_micros(50));
-        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -2964,7 +3010,9 @@ pub extern "win64" fn IsTouchWindow(_hWnd: usize, _pulFlags: *mut u32) -> i32 {
 
 pub extern "win64" fn GetPointerType(_pointerId: u32, pointerType: *mut u32) -> i32 {
     if !pointerType.is_null() {
-        unsafe { *pointerType = 1; /* PT_POINTER */ }
+        unsafe {
+            *pointerType = 1; /* PT_POINTER */
+        }
     }
     set_last_error(ERROR_SUCCESS);
     1
@@ -2981,7 +3029,9 @@ pub extern "win64" fn GetPointerTouchInfoHistory(
     _touchInfo: *mut c_void,
 ) -> i32 {
     if !entriesCount.is_null() {
-        unsafe { *entriesCount = 0; }
+        unsafe {
+            *entriesCount = 0;
+        }
     }
     set_last_error(ERROR_INVALID_PARAMETER);
     0
@@ -3735,29 +3785,100 @@ mod tests {
         assert_ne!(RegisterClassA(&raw const wnd_class), 0);
 
         let title = std::ffi::CString::new("Activation Test").expect("title");
-        let hwnd1 = CreateWindowExA(0, class_name.as_ptr(), title.as_ptr(), 0, 0, 0, 100, 100, 0, 0, 0, std::ptr::null());
-        let hwnd2 = CreateWindowExA(0, class_name.as_ptr(), title.as_ptr(), 0, 0, 0, 100, 100, 0, 0, 0, std::ptr::null());
+        let hwnd1 = CreateWindowExA(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            0,
+            0,
+            0,
+            100,
+            100,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+        );
+        let hwnd2 = CreateWindowExA(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            0,
+            0,
+            0,
+            100,
+            100,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+        );
         assert_ne!(hwnd1, 0);
         assert_ne!(hwnd2, 0);
 
         // SetFocus on hwnd1
         SetFocus(hwnd1);
         let mut msg = Msg::default();
-        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd1, WM_SETFOCUS, WM_SETFOCUS, 1), 1);
+        assert_eq!(
+            crate::win32::user32::message::PeekMessageA(
+                &mut msg as *mut _,
+                hwnd1,
+                WM_SETFOCUS,
+                WM_SETFOCUS,
+                1
+            ),
+            1
+        );
         assert_eq!(msg.message, WM_SETFOCUS);
 
         // Switch focus to hwnd2 -> should generate WM_KILLFOCUS for hwnd1 and WM_SETFOCUS for hwnd2
         SetFocus(hwnd2);
-        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd1, WM_KILLFOCUS, WM_KILLFOCUS, 1), 1);
+        assert_eq!(
+            crate::win32::user32::message::PeekMessageA(
+                &mut msg as *mut _,
+                hwnd1,
+                WM_KILLFOCUS,
+                WM_KILLFOCUS,
+                1
+            ),
+            1
+        );
         assert_eq!(msg.message, WM_KILLFOCUS);
-        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd2, WM_SETFOCUS, WM_SETFOCUS, 1), 1);
+        assert_eq!(
+            crate::win32::user32::message::PeekMessageA(
+                &mut msg as *mut _,
+                hwnd2,
+                WM_SETFOCUS,
+                WM_SETFOCUS,
+                1
+            ),
+            1
+        );
         assert_eq!(msg.message, WM_SETFOCUS);
 
         // SetActiveWindow on hwnd1
         SetActiveWindow(hwnd1);
-        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd1, WM_ACTIVATEAPP, WM_ACTIVATEAPP, 1), 1);
+        assert_eq!(
+            crate::win32::user32::message::PeekMessageA(
+                &mut msg as *mut _,
+                hwnd1,
+                WM_ACTIVATEAPP,
+                WM_ACTIVATEAPP,
+                1
+            ),
+            1
+        );
         assert_eq!(msg.message, WM_ACTIVATEAPP);
-        assert_eq!(crate::win32::user32::message::PeekMessageA(&mut msg as *mut _, hwnd1, WM_ACTIVATE, WM_ACTIVATE, 1), 1);
+        assert_eq!(
+            crate::win32::user32::message::PeekMessageA(
+                &mut msg as *mut _,
+                hwnd1,
+                WM_ACTIVATE,
+                WM_ACTIVATE,
+                1
+            ),
+            1
+        );
         assert_eq!(msg.message, WM_ACTIVATE);
 
         DestroyWindow(hwnd1);

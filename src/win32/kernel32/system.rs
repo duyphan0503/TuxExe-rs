@@ -614,6 +614,106 @@ fn get_hostname() -> String {
     "TUXEXE-PC".to_string() // Default hostname
 }
 
+static KUSER_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn update_kuser_shared_data() {
+    if !KUSER_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let base = 0x7ffe_0000 as *mut u8;
+    let elapsed_nanos = crate::win32::kernel32::time::START_TIME.elapsed().as_nanos() as u64;
+    let elapsed_100ns = elapsed_nanos / 100;
+    let elapsed_ms = elapsed_nanos / 1_000_000;
+
+    let unix_now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let system_100ns = (unix_now_nanos / 100).wrapping_add(116_444_736_000_000_000);
+
+    unsafe {
+        // 0x0000: TickCountLowDeprecated
+        base.add(0x0000).cast::<u32>().write_unaligned((elapsed_ms & 0xffff_ffff) as u32);
+        // 0x0004: TickCountMultiplier = 0x01000000 (1 << 24)
+        base.add(0x0004).cast::<u32>().write_unaligned(0x01000000);
+
+        // 0x0008: InterruptTime (LowPart, High1Time, High2Time)
+        let int_low = (elapsed_100ns & 0xffff_ffff) as u32;
+        let int_high = (elapsed_100ns >> 32) as i32;
+        base.add(0x0008).cast::<u32>().write_unaligned(int_low);
+        base.add(0x000c).cast::<i32>().write_unaligned(int_high);
+        base.add(0x0010).cast::<i32>().write_unaligned(int_high);
+
+        // 0x0014: SystemTime (LowPart, High1Time, High2Time)
+        let sys_low = (system_100ns & 0xffff_ffff) as u32;
+        let sys_high = (system_100ns >> 32) as i32;
+        base.add(0x0014).cast::<u32>().write_unaligned(sys_low);
+        base.add(0x0018).cast::<i32>().write_unaligned(sys_high);
+        base.add(0x001c).cast::<i32>().write_unaligned(sys_high);
+
+        // 0x0320: TickCount (64-bit millisecond count)
+        let tick_low = (elapsed_ms & 0xffff_ffff) as u32;
+        let tick_high = (elapsed_ms >> 32) as i32;
+        base.add(0x0320).cast::<u32>().write_unaligned(tick_low);
+        base.add(0x0324).cast::<i32>().write_unaligned(tick_high);
+        base.add(0x0328).cast::<i32>().write_unaligned(tick_high);
+    }
+}
+
+pub fn init_kuser_shared_data() {
+    let ptr = unsafe {
+        libc::mmap(
+            0x7ffe_0000 as *mut libc::c_void,
+            0x1000,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+            -1,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        tracing::warn!("Failed to map KUSER_SHARED_DATA at 0x7FFE0000");
+        return;
+    }
+    unsafe {
+        std::ptr::write_bytes(ptr as *mut u8, 0, 0x1000);
+        // 0x02d8: QpcFrequency (u64) = 10_000_000
+        ptr.add(0x02d8).cast::<u64>().write_unaligned(10_000_000);
+        // 0x026c: NtMajorVersion (u32) = 10
+        ptr.add(0x026c).cast::<u32>().write_unaligned(10);
+        // 0x0270: NtMinorVersion (u32) = 0
+        ptr.add(0x0270).cast::<u32>().write_unaligned(0);
+        // 0x0260: NtBuildNumber (u32) = 19045
+        ptr.add(0x0260).cast::<u32>().write_unaligned(19045);
+        // 0x0264: NtProductType (u32) = 1 (NtProductWinNt)
+        ptr.add(0x0264).cast::<u32>().write_unaligned(1);
+        // 0x0274: ProcessorFeatures (u8 array, 64 entries)
+        ptr.add(0x0274 + 2).cast::<u8>().write_unaligned(1); // PF_COMPARE_EXCHANGE_DOUBLE
+        ptr.add(0x0274 + 3).cast::<u8>().write_unaligned(1); // PF_MMX_INSTRUCTIONS_AVAILABLE
+        ptr.add(0x0274 + 6).cast::<u8>().write_unaligned(1); // PF_XMMI_INSTRUCTIONS_AVAILABLE
+        ptr.add(0x0274 + 10).cast::<u8>().write_unaligned(1); // PF_XMMI64_INSTRUCTIONS_AVAILABLE
+        ptr.add(0x0274 + 13).cast::<u8>().write_unaligned(1); // PF_SSE3_INSTRUCTIONS_AVAILABLE
+        ptr.add(0x0274 + 14).cast::<u8>().write_unaligned(1); // PF_COMPARE_EXCHANGE128
+        ptr.add(0x0274 + 17).cast::<u8>().write_unaligned(1); // PF_XSAVE_ENABLED
+        ptr.add(0x0274 + 23).cast::<u8>().write_unaligned(1); // PF_AVX_INSTRUCTIONS_AVAILABLE
+        ptr.add(0x0274 + 24).cast::<u8>().write_unaligned(1); // PF_AVX2_INSTRUCTIONS_AVAILABLE
+                                                              // 0x03b0: QpcBypassEnabled = 0 (Forces fallback to QPC API)
+        ptr.add(0x03b0).cast::<u8>().write_unaligned(0);
+    }
+
+    KUSER_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
+    update_kuser_shared_data();
+
+    // Spawn background updater for KUSER_SHARED_DATA timestamps
+    std::thread::Builder::new()
+        .name("kuser-shared-updater".to_string())
+        .spawn(|| loop {
+            update_kuser_shared_data();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        })
+        .expect("Failed to spawn KUSER_SHARED_DATA updater thread");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

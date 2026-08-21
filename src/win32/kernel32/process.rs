@@ -70,7 +70,8 @@ pub fn main_image_contains(address: usize) -> bool {
 
 /// Fast check for addresses inside mapped PE images
 pub fn is_likely_main_image_address(address: usize) -> bool {
-    main_image_contains(address) || crate::dll_manager::loader::module_base_for_address(address).is_some()
+    main_image_contains(address)
+        || crate::dll_manager::loader::module_base_for_address(address).is_some()
 }
 
 fn main_image_path_store() -> &'static RwLock<String> {
@@ -400,7 +401,10 @@ pub extern "win64" fn get_system_times(
     1
 }
 
-pub extern "win64" fn SetProcessAffinityMask(_hProcess: usize, _dwProcessAffinityMask: usize) -> i32 {
+pub extern "win64" fn SetProcessAffinityMask(
+    _hProcess: usize,
+    _dwProcessAffinityMask: usize,
+) -> i32 {
     tracing::info!("SetProcessAffinityMask called");
     set_last_error(ERROR_SUCCESS);
     1
@@ -413,10 +417,14 @@ pub extern "win64" fn GetProcessAffinityMask(
 ) -> i32 {
     tracing::info!("GetProcessAffinityMask called");
     if !lpProcessAffinityMask.is_null() {
-        unsafe { *lpProcessAffinityMask = 0xFF; }
+        unsafe {
+            *lpProcessAffinityMask = 0xFF;
+        }
     }
     if !lpSystemAffinityMask.is_null() {
-        unsafe { *lpSystemAffinityMask = 0xFF; }
+        unsafe {
+            *lpSystemAffinityMask = 0xFF;
+        }
     }
     set_last_error(ERROR_SUCCESS);
     1
@@ -684,15 +692,15 @@ pub extern "win64" fn load_library_a(lp_lib_file_name: *const i8) -> *mut c_void
         return std::ptr::null_mut();
     };
 
-    tracing::info!(name, "LoadLibraryA requested");
+    tracing::trace!(name, "LoadLibraryA requested");
     match load_library(name) {
         Ok(handle) => {
-            tracing::info!(name, handle = format_args!("0x{handle:x}"), "LoadLibraryA succeeded");
+            tracing::trace!(name, handle = format_args!("0x{handle:x}"), "LoadLibraryA succeeded");
             set_last_error(ERROR_SUCCESS);
             handle as *mut c_void
         }
         Err(ref e) => {
-            tracing::info!(name, error = %e, "LoadLibraryA failed");
+            tracing::trace!(name, error = %e, "LoadLibraryA failed");
             set_last_error(ERROR_MOD_NOT_FOUND);
             std::ptr::null_mut()
         }
@@ -709,7 +717,7 @@ pub extern "win64" fn load_library_w(lp_lib_file_name: *const u16) -> *mut c_voi
         return std::ptr::null_mut();
     };
 
-    tracing::info!(name = %name, "LoadLibraryW requested");
+    tracing::trace!(name = %name, "LoadLibraryW requested");
     let c_name = CString::new(name).unwrap_or_else(|_| CString::new("").expect("empty cstr"));
     load_library_a(c_name.as_ptr())
 }
@@ -739,11 +747,7 @@ pub extern "win64" fn get_proc_address(
         return std::ptr::null_mut();
     }
 
-    let handle = if h_module.is_null() {
-        unsafe { MAIN_IMAGE_BASE }
-    } else {
-        h_module as usize
-    };
+    let handle = if h_module.is_null() { unsafe { MAIN_IMAGE_BASE } } else { h_module as usize };
 
     // Ordinal form is MAKEINTRESOURCEA(ordinal) where pointer value is <= 0xFFFF.
     let proc_raw = lp_proc_name as usize;
@@ -828,9 +832,8 @@ pub extern "win64" fn resolve_delay_loaded_api(
         return std::ptr::null_mut();
     }
     let index = (slot - iat_start) / std::mem::size_of::<usize>();
-    let name_thunk = unsafe {
-        *((base + descriptor.import_name_table_rva as usize) as *const u64).add(index)
-    };
+    let name_thunk =
+        unsafe { *((base + descriptor.import_name_table_rva as usize) as *const u64).add(index) };
     // Ordinal imports are not currently emitted by the Wine components we
     // load.  Returning NULL is safer than treating the ordinal as an address.
     if name_thunk & (1u64 << 63) != 0 {
@@ -1433,18 +1436,9 @@ pub extern "win64" fn rtl_capture_context(context_record: *mut c_void) {
                 options(nostack, preserves_flags)
             );
 
-            std::ptr::write_unaligned(
-                context_record.cast::<u8>().add(OFF_RSP).cast::<u64>(),
-                rsp,
-            );
-            std::ptr::write_unaligned(
-                context_record.cast::<u8>().add(OFF_RBP).cast::<u64>(),
-                rbp,
-            );
-            std::ptr::write_unaligned(
-                context_record.cast::<u8>().add(OFF_RIP).cast::<u64>(),
-                rip,
-            );
+            std::ptr::write_unaligned(context_record.cast::<u8>().add(OFF_RSP).cast::<u64>(), rsp);
+            std::ptr::write_unaligned(context_record.cast::<u8>().add(OFF_RBP).cast::<u64>(), rbp);
+            std::ptr::write_unaligned(context_record.cast::<u8>().add(OFF_RIP).cast::<u64>(), rip);
         }
     }
 }
@@ -2002,7 +1996,9 @@ pub extern "win64" fn queue_user_apc(
                     .or_else(|| {
                         obj.as_any()
                             .downcast_ref::<crate::nt_kernel::thread::ThreadReferenceHandleObject>()
-                            .map(crate::nt_kernel::thread::ThreadReferenceHandleObject::os_thread_id)
+                            .map(
+                                crate::nt_kernel::thread::ThreadReferenceHandleObject::os_thread_id,
+                            )
                     })
             })
             .flatten()
@@ -2024,8 +2020,15 @@ pub extern "win64" fn queue_user_apc(
 }
 
 pub extern "win64" fn sleep_ex(dw_milliseconds: u32, b_alertable: i32) -> u32 {
+    crate::win32::kernel32::system::update_kuser_shared_data();
     if b_alertable == 0 {
-        if dw_milliseconds != u32::MAX {
+        if dw_milliseconds == 0 {
+            std::thread::yield_now();
+        } else if dw_milliseconds == u32::MAX {
+            loop {
+                std::thread::park();
+            }
+        } else {
             std::thread::sleep(std::time::Duration::from_millis(dw_milliseconds as u64));
         }
         return 0;
@@ -2103,7 +2106,7 @@ pub extern "win64" fn set_dll_directory_a(lp_path_name: *const i8) -> i32 {
             }
         })
     };
-    tracing::info!(?path, "SetDllDirectoryA called");
+    tracing::trace!(?path, "SetDllDirectoryA called");
     crate::dll_manager::search::set_user_dll_directory(path);
     set_last_error(ERROR_SUCCESS);
     1
@@ -2139,7 +2142,7 @@ pub extern "win64" fn set_dll_directory_w(lp_path_name: *const u16) -> i32 {
             }
         })
     };
-    tracing::info!(?path, "SetDllDirectoryW called");
+    tracing::trace!(?path, "SetDllDirectoryW called");
     crate::dll_manager::search::set_user_dll_directory(path);
     set_last_error(ERROR_SUCCESS);
     1
@@ -2148,8 +2151,10 @@ pub extern "win64" fn set_dll_directory_w(lp_path_name: *const u16) -> i32 {
 pub extern "win64" fn add_dll_directory(new_directory: *const u16) -> usize {
     if !new_directory.is_null() {
         if let Ok(dir_str) = unsafe { from_wide_ptr(new_directory) } {
-            tracing::info!(?dir_str, "AddDllDirectory called");
-            crate::dll_manager::search::set_user_dll_directory(Some(std::path::PathBuf::from(dir_str)));
+            tracing::trace!(?dir_str, "AddDllDirectory called");
+            crate::dll_manager::search::set_user_dll_directory(Some(std::path::PathBuf::from(
+                dir_str,
+            )));
         }
     }
     0x1000
@@ -2172,7 +2177,10 @@ pub extern "win64" fn is_wow64_process(_h_process: usize, p_wow64_process: *mut 
     1
 }
 
-pub extern "win64" fn delay_load_failure_hook(_psz_dll_name: *const i8, _psz_proc_name: *const i8) -> usize {
+pub extern "win64" fn delay_load_failure_hook(
+    _psz_dll_name: *const i8,
+    _psz_proc_name: *const i8,
+) -> usize {
     0
 }
 
@@ -3201,7 +3209,11 @@ mod tests {
         static CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         CALLED.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        unsafe extern "win64" fn tp_cb(_instance: *mut c_void, context: *mut c_void, _work: *mut c_void) {
+        unsafe extern "win64" fn tp_cb(
+            _instance: *mut c_void,
+            context: *mut c_void,
+            _work: *mut c_void,
+        ) {
             let flag = unsafe { &*(context as *const std::sync::atomic::AtomicBool) };
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -3216,7 +3228,9 @@ mod tests {
         submit_threadpool_work(work);
 
         let start = std::time::Instant::now();
-        while !CALLED.load(std::sync::atomic::Ordering::SeqCst) && start.elapsed() < std::time::Duration::from_secs(2) {
+        while !CALLED.load(std::sync::atomic::Ordering::SeqCst)
+            && start.elapsed() < std::time::Duration::from_secs(2)
+        {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(CALLED.load(std::sync::atomic::Ordering::SeqCst));
@@ -3288,15 +3302,12 @@ mod tests {
             .flatten()
             .expect("must have os_tid");
 
-        let ref_handle = crate::nt_kernel::thread::open_thread_by_id(os_tid).expect("open_thread_by_id");
+        let ref_handle =
+            crate::nt_kernel::thread::open_thread_by_id(os_tid).expect("open_thread_by_id");
 
         // Queue APC to the reference handle
         assert_eq!(
-            queue_user_apc(
-                apc_callback as usize,
-                ref_handle as usize as *mut c_void,
-                42,
-            ),
+            queue_user_apc(apc_callback as usize, ref_handle as usize as *mut c_void, 42,),
             1
         );
 
@@ -3555,17 +3566,18 @@ pub extern "win64" fn set_threadpool_timer(
 
     let timer_handle = timer as Handle;
 
-    let (callback_ptr, context_ptr, cancelled_ref) = match global_table().with(timer_handle, |obj| {
-        if let Some(tp_timer) = obj.as_any().downcast_ref::<ThreadPoolTimer>() {
-            tp_timer.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-            (tp_timer.callback, tp_timer.context, &tp_timer.cancelled as *const _)
-        } else {
-            (0, 0, std::ptr::null::<std::sync::atomic::AtomicBool>())
-        }
-    }) {
-        Some(res) => res,
-        None => (0, 0, std::ptr::null()),
-    };
+    let (callback_ptr, context_ptr, cancelled_ref) =
+        match global_table().with(timer_handle, |obj| {
+            if let Some(tp_timer) = obj.as_any().downcast_ref::<ThreadPoolTimer>() {
+                tp_timer.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                (tp_timer.callback, tp_timer.context, &tp_timer.cancelled as *const _)
+            } else {
+                (0, 0, std::ptr::null::<std::sync::atomic::AtomicBool>())
+            }
+        }) {
+            Some(res) => res,
+            None => (0, 0, std::ptr::null()),
+        };
 
     if callback_ptr == 0 || cancelled_ref.is_null() {
         set_last_error(ERROR_INVALID_HANDLE);
@@ -3576,6 +3588,18 @@ pub extern "win64" fn set_threadpool_timer(
     let due_time_100ns = if pft_due_time.is_null() { 0 } else { unsafe { *pft_due_time } };
     let due_time_ms = if due_time_100ns < 0 {
         ((-due_time_100ns) / 10000) as u64
+    } else if due_time_100ns > 0 {
+        let now = std::time::SystemTime::now();
+        let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let secs = since_epoch.as_secs() + 11_644_473_600;
+        let nanos = since_epoch.subsec_nanos() as u64;
+        let now_ft = (secs * 10_000_000) + (nanos / 100);
+        let target_ft = due_time_100ns as u64;
+        if target_ft > now_ft {
+            (target_ft - now_ft) / 10_000
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -3822,11 +3846,10 @@ pub extern "win64" fn sleep_condition_variable_cs(
     // waits, then reacquires it before returning. Holding it throughout the
     // wait deadlocks Mono's producer/consumer workers because the producer
     // cannot enter the same section to signal the condition.
-    let awakened = super::sync::sleep_condition_variable_with_unlock(
-        cond_var,
-        dw_milliseconds,
-        || super::sync::LeaveCriticalSection(crit_section),
-    );
+    let awakened =
+        super::sync::sleep_condition_variable_with_unlock(cond_var, dw_milliseconds, || {
+            super::sync::LeaveCriticalSection(crit_section)
+        });
     super::sync::EnterCriticalSection(crit_section);
     i32::from(awakened)
 }
@@ -3840,17 +3863,14 @@ pub extern "win64" fn sleep_condition_variable_srw(
     const CONDITION_VARIABLE_LOCKMODE_SHARED: u32 = 0x1;
     let shared = flags & CONDITION_VARIABLE_LOCKMODE_SHARED != 0;
 
-    let awakened = super::sync::sleep_condition_variable_with_unlock(
-        cond_var,
-        dw_milliseconds,
-        || {
+    let awakened =
+        super::sync::sleep_condition_variable_with_unlock(cond_var, dw_milliseconds, || {
             if shared {
                 super::sync::ReleaseSRWLockShared(srw_lock);
             } else {
                 super::sync::ReleaseSRWLockExclusive(srw_lock);
             }
-        },
-    );
+        });
 
     if shared {
         super::sync::AcquireSRWLockShared(srw_lock);
@@ -3872,7 +3892,8 @@ pub extern "win64" fn mul_div(n_number: i32, n_numerator: i32, n_denominator: i3
     if n_denominator == 0 {
         return -1;
     }
-    let res = (n_number as i64 * n_numerator as i64 + (n_denominator as i64 / 2)) / n_denominator as i64;
+    let res =
+        (n_number as i64 * n_numerator as i64 + (n_denominator as i64 / 2)) / n_denominator as i64;
     if res > i32::MAX as i64 || res < i32::MIN as i64 {
         -1
     } else {
@@ -3892,7 +3913,9 @@ pub extern "win64" fn ro_get_activation_factory(
     factory: *mut *mut c_void,
 ) -> i32 {
     if !factory.is_null() {
-        unsafe { *factory = std::ptr::null_mut(); }
+        unsafe {
+            *factory = std::ptr::null_mut();
+        }
     }
     -2147221164 // REGDB_E_CLASSNOTREG (0x80040154)
 }
@@ -3902,7 +3925,9 @@ pub extern "win64" fn ro_activate_instance(
     instance: *mut *mut c_void,
 ) -> i32 {
     if !instance.is_null() {
-        unsafe { *instance = std::ptr::null_mut(); }
+        unsafe {
+            *instance = std::ptr::null_mut();
+        }
     }
     -2147221164 // REGDB_E_CLASSNOTREG (0x80040154)
 }
@@ -3914,7 +3939,9 @@ pub extern "win64" fn ro_get_agile_reference(
     pp_agile_reference: *mut *mut c_void,
 ) -> i32 {
     if !pp_agile_reference.is_null() {
-        unsafe { *pp_agile_reference = std::ptr::null_mut(); }
+        unsafe {
+            *pp_agile_reference = std::ptr::null_mut();
+        }
     }
     -2147467262 // E_NOINTERFACE (0x80004002)
 }
@@ -3928,7 +3955,9 @@ pub extern "win64" fn windows_create_string(
         return -2147024809; // E_INVALIDARG
     }
     if source_string.is_null() || length == 0 {
-        unsafe { *string = std::ptr::null_mut(); }
+        unsafe {
+            *string = std::ptr::null_mut();
+        }
         return 0; // S_OK
     }
     unsafe {
@@ -3961,7 +3990,9 @@ pub extern "win64" fn windows_create_string_reference(
 
 pub extern "win64" fn windows_delete_string(string: *mut u16) -> i32 {
     if !string.is_null() {
-        unsafe { libc::free(string as *mut c_void); }
+        unsafe {
+            libc::free(string as *mut c_void);
+        }
     }
     0 // S_OK
 }
@@ -3974,7 +4005,9 @@ pub extern "win64" fn windows_duplicate_string(
         return -2147024809; // E_INVALIDARG
     }
     if string.is_null() {
-        unsafe { *new_string = std::ptr::null_mut(); }
+        unsafe {
+            *new_string = std::ptr::null_mut();
+        }
         return 0;
     }
     unsafe {
@@ -3989,7 +4022,9 @@ pub extern "win64" fn windows_get_string_raw_buffer(
 ) -> *const u16 {
     if string.is_null() {
         if !length.is_null() {
-            unsafe { *length = 0; }
+            unsafe {
+                *length = 0;
+            }
         }
         static EMPTY: [u16; 1] = [0];
         return EMPTY.as_ptr();
@@ -4011,7 +4046,9 @@ pub extern "win64" fn windows_compare_string_ordinal(
         return -2147024809; // E_INVALIDARG
     }
     if string1 == string2 {
-        unsafe { *result = 0; }
+        unsafe {
+            *result = 0;
+        }
         return 0;
     }
     let s1 = unsafe { crate::utils::wide_string::from_wide_ptr(string1) }.unwrap_or_default();

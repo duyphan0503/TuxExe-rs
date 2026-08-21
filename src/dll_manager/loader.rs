@@ -15,7 +15,9 @@ use crate::pe_loader::imports::{enumerate_delay_imports, enumerate_imports, reso
 use crate::pe_loader::mapper::{map_pe, MappedImage};
 use crate::pe_loader::parser::ParsedPe;
 use crate::pe_loader::relocations::apply_relocations;
-use crate::threading::tls::{initialize_static_tls, invoke_tls_callbacks_for, register_tls_callbacks};
+use crate::threading::tls::{
+    initialize_static_tls, invoke_tls_callbacks_for, register_tls_callbacks,
+};
 
 use super::search::resolve_dll_path;
 
@@ -346,6 +348,39 @@ fn unity_dispatch_prime_enabled() -> bool {
     )
 }
 
+/// Unity's D3D frame timer assumes a positive Present sync interval means the
+/// call blocked until vblank. In uncapped mode DXVK intentionally overrides
+/// that interval to zero, so using Unity's refresh-derived delta advances the
+/// simulation once per unthrottled frame. The timer already has a CPU-clock
+/// path for sync interval zero; turn its saved interval into zero before the
+/// existing conditional branch.
+///
+/// The guarded sequence is the pair `test ebx, ebx; jle ...` followed by the
+/// Unity 2021 D3D timer's `vsync-broken` flag check. Replacing `test ebx, ebx`
+/// with `xor ebx, ebx` preserves instruction size and makes the existing jump
+/// select CPU-side delta time. Unknown Unity versions are left untouched.
+fn patch_unity_uncapped_timing(image: &mut [u8], target_fps: u32) -> usize {
+    if target_fps != 0 {
+        return 0;
+    }
+
+    const PROBE_LEN: usize = 14;
+    let mut patched = 0;
+    let mut offset = 0;
+    while offset + PROBE_LEN <= image.len() {
+        let is_timer_probe = image[offset..offset + 4] == [0x85, 0xdb, 0x0f, 0x8e]
+            && image[offset + 8..offset + PROBE_LEN] == [0x80, 0x7f, 0x31, 0x00, 0x0f, 0x85];
+        if is_timer_probe {
+            image[offset] = 0x31; // test ebx,ebx -> xor ebx,ebx
+            patched += 1;
+            offset += PROBE_LEN;
+        } else {
+            offset += 1;
+        }
+    }
+    patched
+}
+
 fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
     let parsed = ParsedPe::from_file(&path).map_err(|e| format!("parse failed: {e}"))?;
     let mut mapped = map_pe(&parsed).map_err(|e| format!("map failed: {e}"))?;
@@ -370,6 +405,27 @@ fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
 
     prime_unity_dispatch_cache(&path, &mut mapped);
 
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    if name.eq_ignore_ascii_case("unityplayer.dll") {
+        let target_fps = std::env::var("TUXEXE_FPS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
+        let mapped_size = mapped.size();
+        let patched = mapped
+            .slice_at_mut(0, mapped_size)
+            .map(|image| patch_unity_uncapped_timing(image, target_fps))
+            .unwrap_or(0);
+        if patched > 0 {
+            info!(
+                patched,
+                "Forced Unity D3D timer to use CPU-side delta time for uncapped presentation"
+            );
+        } else if target_fps == 0 {
+            info!("Unity uncapped timing pattern not present; leaving module unchanged");
+        }
+    }
+
     // Runtime patch for UnityPlayer.dll crash at RVA 0x843c78
     // This is a known issue where Unity tries to write to a NULL pointer during init.
     //
@@ -382,7 +438,6 @@ fn load_native_module(path: PathBuf) -> Result<NativeModule, String> {
     //   0x843c7f: mov r13, [rsp+0x6f8]  <- continuation
     //
     // Fix: replace test+je with unconditional JMP to skip the crash block.
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
     if name.eq_ignore_ascii_case("unityplayer.dll") && unity_startup_patches_enabled() {
         // Patch 1: Jump over crash block (test eax,eax + je +0x0e -> jmp +0x10 + NOP + NOP)
         let patch1_rva = 0x843c6dusize;
@@ -442,7 +497,8 @@ pub fn load_library(module_name: &str) -> Result<usize, String> {
         }
     }
 
-    let local_path = if !is_reimplemented(&canonical) { resolve_dll_path(module_name) } else { None };
+    let local_path =
+        if !is_reimplemented(&canonical) { resolve_dll_path(module_name) } else { None };
 
     if local_path.is_none() && is_reimplemented(&canonical) {
         let handle = next_module_handle();
@@ -649,11 +705,7 @@ pub fn invoke_thread_attach_dll_mains() {
     };
 
     for (module, image_base, entry) in entries {
-        trace!(
-            module,
-            entry = format_args!("0x{entry:x}"),
-            "Invoking DllMain(DLL_THREAD_ATTACH)"
-        );
+        trace!(module, entry = format_args!("0x{entry:x}"), "Invoking DllMain(DLL_THREAD_ATTACH)");
         match crate::runtime::guest_stack::invoke_status(
             entry,
             image_base as *mut c_void,
@@ -689,8 +741,7 @@ pub fn resolve_export(module_handle: usize, proc_name: &str) -> Option<usize> {
 
     match &module.source {
         ModuleSource::Reimplemented => {
-            let addr = super::resolve_reimplemented_export(&module.canonical_name, proc_name);
-            (addr != 0).then_some(addr)
+            super::resolve_optional_reimplemented_export(&module.canonical_name, proc_name)
         }
         ModuleSource::Native(native) => {
             let trimmed = proc_name.trim().trim_end_matches('\0').trim();
@@ -731,6 +782,27 @@ pub(crate) fn reset_registry_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncapped_unity_timing_patch_forces_cpu_side_delta_time() {
+        const TIMING_PROBE: &[u8] =
+            &[0x85, 0xdb, 0x0f, 0x8e, 0x88, 0x01, 0x00, 0x00, 0x80, 0x7f, 0x31, 0x00, 0x0f, 0x85];
+        let mut image = [TIMING_PROBE, &[0x90, 0x90], TIMING_PROBE].concat();
+
+        assert_eq!(patch_unity_uncapped_timing(&mut image, 0), 2);
+        assert_eq!(&image[..2], &[0x31, 0xdb]);
+        let second = TIMING_PROBE.len() + 2;
+        assert_eq!(&image[second..second + 2], &[0x31, 0xdb]);
+    }
+
+    #[test]
+    fn explicit_fps_does_not_patch_unity_timing() {
+        let mut image =
+            [0x85, 0xdb, 0x0f, 0x8e, 0x88, 0x01, 0x00, 0x00, 0x80, 0x7f, 0x31, 0x00, 0x0f, 0x85];
+
+        assert_eq!(patch_unity_uncapped_timing(&mut image, 144), 0);
+        assert_eq!(&image[..2], &[0x85, 0xdb]);
+    }
 
     #[test]
     fn canonicalization_adds_dll_extension() {

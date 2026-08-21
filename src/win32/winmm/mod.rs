@@ -14,9 +14,9 @@ use std::{
     ffi::{c_char, c_void, CString},
     ptr,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Sender},
-        Arc, OnceLock, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
     },
     time::Duration,
 };
@@ -444,17 +444,76 @@ extern "win64" fn timeGetDevCaps(caps: *mut u8, size: u32) -> u32 {
     MMSYSERR_NOERROR
 }
 
-/// Host-created threads cannot safely enter a PE callback without guest TEB/TLS.
-extern "win64" fn timeSetEvent(
-    _delay: u32,
-    _resolution: u32,
-    _callback: usize,
-    _user: usize,
-    _event_type: u32,
-) -> u32 {
-    0
+fn winmm_timers() -> &'static Mutex<HashMap<u32, Arc<AtomicBool>>> {
+    static TIMERS: OnceLock<Mutex<HashMap<u32, Arc<AtomicBool>>>> = OnceLock::new();
+    TIMERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
-extern "win64" fn timeKillEvent(_timer_id: u32) -> u32 {
+
+fn next_winmm_timer_id() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+extern "win64" fn timeSetEvent(
+    delay: u32,
+    _resolution: u32,
+    callback: usize,
+    user: usize,
+    event_type: u32,
+) -> u32 {
+    if delay == 0 {
+        return 0;
+    }
+    let timer_id = next_winmm_timer_id();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    winmm_timers().lock().expect("winmm timers poisoned").insert(timer_id, Arc::clone(&cancelled));
+
+    let is_periodic = (event_type & 0x0001) != 0;
+    let is_event_set = (event_type & 0x0030) == 0x0010;
+    let is_event_pulse = (event_type & 0x0030) == 0x0020;
+
+    std::thread::Builder::new()
+        .name(format!("winmm-timer-{}", timer_id))
+        .spawn(move || {
+            let delay_dur = Duration::from_millis(delay as u64);
+            loop {
+                std::thread::sleep(delay_dur);
+                if cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                if is_event_set {
+                    crate::nt_kernel::sync::set_event(callback as crate::utils::handle::Handle);
+                } else if is_event_pulse {
+                    let h = callback as crate::utils::handle::Handle;
+                    crate::nt_kernel::sync::set_event(h);
+                    crate::nt_kernel::sync::reset_event(h);
+                } else if callback != 0 {
+                    if crate::threading::teb::attach_spawned_thread().is_ok() {
+                        type TimeProc = unsafe extern "win64" fn(u32, u32, usize, usize, usize);
+                        let func: TimeProc = unsafe { std::mem::transmute(callback) };
+                        unsafe {
+                            func(timer_id, 0, user, 0, 0);
+                        }
+                    }
+                }
+
+                if !is_periodic || cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            winmm_timers().lock().expect("winmm timers poisoned").remove(&timer_id);
+        })
+        .ok();
+
+    timer_id
+}
+
+extern "win64" fn timeKillEvent(timer_id: u32) -> u32 {
+    if let Some(cancelled) = winmm_timers().lock().expect("winmm timers poisoned").remove(&timer_id)
+    {
+        cancelled.store(true, Ordering::SeqCst);
+    }
     MMSYSERR_NOERROR
 }
 

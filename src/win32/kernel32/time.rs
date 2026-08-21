@@ -4,7 +4,6 @@
 
 use std::thread;
 use std::time::{Duration, Instant, SystemTime as StdSystemTime, UNIX_EPOCH};
-use tracing::trace;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -122,22 +121,30 @@ fn current_system_time(local: bool) -> Option<SystemTime> {
 }
 
 pub extern "win64" fn sleep(dw_milliseconds: u32) {
+    crate::win32::kernel32::system::update_kuser_shared_data();
     if dw_milliseconds == 0 {
         thread::yield_now();
         return;
+    }
+    if dw_milliseconds == u32::MAX {
+        loop {
+            thread::park();
+        }
     }
     thread::sleep(Duration::from_millis(dw_milliseconds as u64));
 }
 
 lazy_static::lazy_static! {
-    static ref START_TIME: Instant = Instant::now();
+    pub static ref START_TIME: Instant = Instant::now();
 }
 
 pub extern "win64" fn get_tick_count() -> u32 {
+    crate::win32::kernel32::system::update_kuser_shared_data();
     START_TIME.elapsed().as_millis() as u32
 }
 
 pub extern "win64" fn get_tick_count_64() -> u64 {
+    crate::win32::kernel32::system::update_kuser_shared_data();
     START_TIME.elapsed().as_millis() as u64
 }
 
@@ -341,6 +348,7 @@ pub extern "win64" fn get_local_time(lp_system_time: *mut SystemTime) {
 }
 
 pub extern "win64" fn query_performance_counter(lp_performance_count: *mut u64) -> i32 {
+    crate::win32::kernel32::system::update_kuser_shared_data();
     if !lp_performance_count.is_null() {
         // Standard Windows 10/11 QPC frequency is 10 MHz (10,000,000 Hz, 100 ns ticks).
         let elapsed_ticks = (START_TIME.elapsed().as_nanos() / 100) as u64;
@@ -386,6 +394,40 @@ pub extern "win64" fn get_time_zone_information(
     TIME_ZONE_ID_UNKNOWN
 }
 
+pub extern "win64" fn query_unbiased_interrupt_time(unbiased_time: *mut u64) -> i32 {
+    if !unbiased_time.is_null() {
+        let elapsed_ticks = (START_TIME.elapsed().as_nanos() / 100) as u64;
+        unsafe {
+            *unbiased_time = elapsed_ticks;
+        }
+        1
+    } else {
+        crate::win32::kernel32::error::set_last_error(87);
+        0
+    }
+}
+
+pub extern "win64" fn query_interrupt_time(interrupt_time: *mut u64) {
+    if !interrupt_time.is_null() {
+        let elapsed_ticks = (START_TIME.elapsed().as_nanos() / 100) as u64;
+        unsafe {
+            *interrupt_time = elapsed_ticks;
+        }
+    }
+}
+
+pub extern "win64" fn query_interrupt_time_precise(interrupt_time: *mut u64) {
+    query_interrupt_time(interrupt_time);
+}
+
+pub extern "win64" fn query_unbiased_interrupt_time_precise(unbiased_time: *mut u64) {
+    let _ = query_unbiased_interrupt_time(unbiased_time);
+}
+
+pub extern "win64" fn get_system_time_precise_as_file_time(lp_system_time_as_file_time: *mut u64) {
+    get_system_time_as_file_time(lp_system_time_as_file_time);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +444,42 @@ mod tests {
         assert!(st.wMinute <= 59);
         assert!(st.wSecond <= 60);
         assert!(st.wMilliseconds <= 999);
+    }
+
+    #[test]
+    fn time_apis_advance_at_wall_clock_rate() {
+        // The game-speed symptom depends on time APIs advancing in real time.
+        // QPC at 10 MHz must gain ~10M ticks per wall second; GetTickCount64
+        // must gain ~1000 ms per wall second.
+        let wall = std::time::Instant::now();
+
+        let mut qpc0: u64 = 0;
+        let mut qpc1: u64 = 0;
+        let mut freq: u64 = 0;
+        assert_eq!(query_performance_counter(&mut qpc0), 1);
+        assert_eq!(query_performance_frequency(&mut freq), 1);
+        let tick0 = get_tick_count_64();
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        assert_eq!(query_performance_counter(&mut qpc1), 1);
+        let tick1 = get_tick_count_64();
+        let wall_elapsed = wall.elapsed().as_secs_f64();
+
+        let qpc_elapsed_secs = (qpc1 - qpc0) as f64 / freq as f64;
+        let tick_elapsed_secs = (tick1 - tick0) as f64 / 1000.0;
+
+        // Both must track wall time within 10% (sleep over-sleep tolerance).
+        let qpc_ratio = qpc_elapsed_secs / wall_elapsed;
+        let tick_ratio = tick_elapsed_secs / wall_elapsed;
+        assert!(
+            (0.9..=1.1).contains(&qpc_ratio),
+            "QPC advanced {qpc_elapsed_secs:.3}s per {wall_elapsed:.3}s wall ({qpc_ratio:.2}x)"
+        );
+        assert!(
+            (0.9..=1.1).contains(&tick_ratio),
+            "GetTickCount64 advanced {tick_elapsed_secs:.3}s per {wall_elapsed:.3}s wall ({tick_ratio:.2}x)"
+        );
     }
 
     #[test]

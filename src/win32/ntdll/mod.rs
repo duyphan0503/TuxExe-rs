@@ -1,11 +1,11 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+use crate::nt_kernel::file::*;
+use crate::utils::handle::Handle;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;
-use crate::nt_kernel::file::*;
-use crate::utils::handle::Handle;
 
 pub const STATUS_NO_MORE_FILES: u32 = 0x8000_0006;
 
@@ -103,9 +103,8 @@ pub extern "win64" fn NtQueryDirectoryFile(
 
         if !prev_offset_ptr.is_null() {
             unsafe {
-                *prev_offset_ptr = (written
-                    - (prev_offset_ptr as usize - file_information as usize))
-                    as u32;
+                *prev_offset_ptr =
+                    (written - (prev_offset_ptr as usize - file_information as usize)) as u32;
             }
         }
 
@@ -183,9 +182,166 @@ pub extern "win64" fn NtQueryDirectoryFile(
     STATUS_SUCCESS
 }
 
+fn current_filetime_now() -> u64 {
+    let now = std::time::SystemTime::now();
+    let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = since_epoch.as_secs() + 11_644_473_600;
+    let nanos = since_epoch.subsec_nanos() as u64;
+    (secs * 10_000_000) + (nanos / 100)
+}
+
+pub extern "win64" fn NtDelayExecution(_alertable: u8, delay_interval: *const i64) -> u32 {
+    if delay_interval.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    let interval = unsafe { *delay_interval };
+    if interval < 0 {
+        let nanos = (-interval as u64).saturating_mul(100);
+        let duration = std::time::Duration::from_nanos(nanos);
+        if duration.is_zero() {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(duration);
+        }
+    } else if interval > 0 {
+        let now_ft = current_filetime_now();
+        let target_ft = interval as u64;
+        if target_ft > now_ft {
+            let diff_100ns = target_ft - now_ft;
+            let duration = std::time::Duration::from_nanos(diff_100ns.saturating_mul(100));
+            std::thread::sleep(duration);
+        } else {
+            std::thread::yield_now();
+        }
+    } else {
+        std::thread::yield_now();
+    }
+    STATUS_SUCCESS
+}
+
+pub extern "win64" fn NtQueryPerformanceCounter(
+    performance_counter: *mut u64,
+    performance_frequency: *mut u64,
+) -> u32 {
+    crate::win32::kernel32::system::update_kuser_shared_data();
+    if !performance_counter.is_null() {
+        let elapsed_ticks =
+            (crate::win32::kernel32::time::START_TIME.elapsed().as_nanos() / 100) as u64;
+        unsafe {
+            *performance_counter = elapsed_ticks;
+        }
+    }
+    if !performance_frequency.is_null() {
+        unsafe {
+            *performance_frequency = 10_000_000;
+        }
+    }
+    STATUS_SUCCESS
+}
+
+/// `RtlQueryPerformanceCounter` has a one-argument BOOLEAN ABI. It must not be
+/// aliased to `NtQueryPerformanceCounter`, whose second argument is an optional
+/// frequency output pointer.
+pub extern "win64" fn RtlQueryPerformanceCounter(performance_counter: *mut u64) -> u8 {
+    (crate::win32::kernel32::time::query_performance_counter(performance_counter) != 0) as u8
+}
+
+pub extern "win64" fn RtlQueryPerformanceFrequency(performance_frequency: *mut u64) -> u8 {
+    (crate::win32::kernel32::time::query_performance_frequency(performance_frequency) != 0) as u8
+}
+
+pub extern "win64" fn NtQuerySystemTime(system_time: *mut u64) -> u32 {
+    if system_time.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    crate::win32::kernel32::system::update_kuser_shared_data();
+    unsafe {
+        *system_time = current_filetime_now();
+    }
+    STATUS_SUCCESS
+}
+
+pub extern "win64" fn NtQueryTimerResolution(
+    min_resolution: *mut u32,
+    max_resolution: *mut u32,
+    current_resolution: *mut u32,
+) -> u32 {
+    if !min_resolution.is_null() {
+        unsafe {
+            *min_resolution = 156_250;
+        } // 15.625ms in 100ns units
+    }
+    if !max_resolution.is_null() {
+        unsafe {
+            *max_resolution = 5_000;
+        } // 0.5ms in 100ns units
+    }
+    if !current_resolution.is_null() {
+        unsafe {
+            *current_resolution = 10_000;
+        } // 1.0ms in 100ns units
+    }
+    STATUS_SUCCESS
+}
+
+pub extern "win64" fn NtSetTimerResolution(
+    desired_resolution: u32,
+    _set_resolution: u8,
+    current_resolution: *mut u32,
+) -> u32 {
+    if !current_resolution.is_null() {
+        unsafe {
+            *current_resolution = desired_resolution.clamp(5_000, 156_250);
+        }
+    }
+    STATUS_SUCCESS
+}
+
+pub extern "win64" fn NtGetTickCount() -> u32 {
+    crate::win32::kernel32::time::get_tick_count()
+}
+
 pub fn get_exports() -> HashMap<&'static str, usize> {
     let mut exports = HashMap::new();
     exports.insert("NtQueryDirectoryFile", NtQueryDirectoryFile as usize);
     exports.insert("ZwQueryDirectoryFile", NtQueryDirectoryFile as usize);
+    exports.insert("NtDelayExecution", NtDelayExecution as usize);
+    exports.insert("ZwDelayExecution", NtDelayExecution as usize);
+    exports.insert("NtQueryPerformanceCounter", NtQueryPerformanceCounter as usize);
+    exports.insert("ZwQueryPerformanceCounter", NtQueryPerformanceCounter as usize);
+    exports.insert("RtlQueryPerformanceCounter", RtlQueryPerformanceCounter as usize);
+    exports.insert("RtlQueryPerformanceFrequency", RtlQueryPerformanceFrequency as usize);
+    exports.insert("NtQuerySystemTime", NtQuerySystemTime as usize);
+    exports.insert("ZwQuerySystemTime", NtQuerySystemTime as usize);
+    exports.insert("NtQueryTimerResolution", NtQueryTimerResolution as usize);
+    exports.insert("ZwQueryTimerResolution", NtQueryTimerResolution as usize);
+    exports.insert("NtSetTimerResolution", NtSetTimerResolution as usize);
+    exports.insert("ZwSetTimerResolution", NtSetTimerResolution as usize);
+    exports.insert("NtGetTickCount", NtGetTickCount as usize);
+    exports.insert("RtlGetVersion", crate::win32::kernel32::system::RtlGetVersion as usize);
     exports
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rtl_qpc_exports_use_their_one_argument_abi() {
+        let mut before = 0_u64;
+        let mut after = 0_u64;
+        let mut frequency = 0_u64;
+
+        assert_eq!(RtlQueryPerformanceCounter(&mut before), 1);
+        assert_eq!(RtlQueryPerformanceFrequency(&mut frequency), 1);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(RtlQueryPerformanceCounter(&mut after), 1);
+
+        assert_eq!(frequency, 10_000_000);
+        assert!((100_000..=1_000_000).contains(&(after - before)));
+        assert_eq!(
+            get_exports().get("RtlQueryPerformanceCounter"),
+            Some(&(RtlQueryPerformanceCounter as usize))
+        );
+    }
 }

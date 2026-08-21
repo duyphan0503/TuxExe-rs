@@ -10,9 +10,7 @@ struct CaseFoldCache {
 
 impl CaseFoldCache {
     fn new() -> Self {
-        Self {
-            entries: RwLock::new(HashMap::with_capacity(4096)),
-        }
+        Self { entries: RwLock::new(HashMap::with_capacity(4096)) }
     }
 
     fn get(&self, key: &str) -> Option<Option<PathBuf>> {
@@ -89,7 +87,7 @@ fn normalize_numeric_key(s: &str) -> String {
 
 /// Resolve a path using case-insensitive file and directory matching.
 ///
-/// If the exact path exists, returns it directly.
+/// If in cache, returns immediately without filesystem syscalls.
 /// Otherwise traverses from the root component by component, matching directory and
 /// file names case-insensitively while caching directory entries for sub-microsecond lookups.
 pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
@@ -97,26 +95,24 @@ pub fn resolve_case_insensitive(path: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    if path.exists() {
-        let path_buf = path.to_path_buf();
-        let key = cache_key(path);
-        global_cache().insert_batch(vec![(key, path_buf.clone())]);
-        return Some(path_buf);
+    let key = cache_key(path);
+
+    // Fast-path: Check memory cache first (instant hit, 0 syscalls)
+    if let Some(cached_opt) = global_cache().get(&key) {
+        return cached_opt;
     }
 
-    let key = cache_key(path);
-    if let Some(Some(cached)) = global_cache().get(&key) {
-        if cached.exists() {
-            return Some(cached);
-        }
+    // Check if the exact path exists on disk
+    if path.exists() {
+        let path_buf = path.to_path_buf();
+        global_cache().insert_batch(vec![(key, path_buf.clone())]);
+        return Some(path_buf);
     }
 
     // Resolve parent directory (fast via cache or single lookup)
     if let Some(parent) = path.parent() {
         let resolved_parent = if parent.as_os_str().is_empty() {
             Some(PathBuf::from("."))
-        } else if parent.exists() {
-            Some(parent.to_path_buf())
         } else {
             resolve_case_insensitive(parent)
         };

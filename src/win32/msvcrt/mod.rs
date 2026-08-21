@@ -172,21 +172,21 @@ pub extern "win64" fn mbrtowc(
     let b = unsafe { *s as u8 };
     if b == 0 {
         if !pwc.is_null() {
-            unsafe { *pwc = 0; }
+            unsafe {
+                *pwc = 0;
+            }
         }
         return 0;
     }
     if !pwc.is_null() {
-        unsafe { *pwc = b as u16; }
+        unsafe {
+            *pwc = b as u16;
+        }
     }
     1
 }
 
-pub extern "win64" fn wcrtomb(
-    s: *mut c_char,
-    wc: u16,
-    _ps: *mut c_void,
-) -> usize {
+pub extern "win64" fn wcrtomb(s: *mut c_char, wc: u16, _ps: *mut c_void) -> usize {
     if s.is_null() {
         return 1;
     }
@@ -312,59 +312,139 @@ pub extern "win64" fn ceil(x: f64) -> f64 {
 pub extern "win64" fn floor(x: f64) -> f64 {
     x.floor()
 }
-pub extern "win64" fn acos(x: f64) -> f64 { x.acos() }
-pub extern "win64" fn acosf(x: f32) -> f32 { x.acos() }
-pub extern "win64" fn asin(x: f64) -> f64 { x.asin() }
-pub extern "win64" fn asinf(x: f32) -> f32 { x.asin() }
-pub extern "win64" fn atanf(x: f32) -> f32 { x.atan() }
-pub extern "win64" fn atan2f(y: f32, x: f32) -> f32 { y.atan2(x) }
-pub extern "win64" fn sinf(x: f32) -> f32 { x.sin() }
-pub extern "win64" fn cosf(x: f32) -> f32 { x.cos() }
-pub extern "win64" fn tanf(x: f32) -> f32 { x.tan() }
-pub extern "win64" fn sinh(x: f64) -> f64 { x.sinh() }
-pub extern "win64" fn cosh(x: f64) -> f64 { x.cosh() }
-pub extern "win64" fn tanh(x: f64) -> f64 { x.tanh() }
-pub extern "win64" fn expf(x: f32) -> f32 { x.exp() }
-pub extern "win64" fn exp2(x: f64) -> f64 { x.exp2() }
-pub extern "win64" fn exp2f(x: f32) -> f32 { x.exp2() }
-pub extern "win64" fn logf(x: f32) -> f32 { x.ln() }
-pub extern "win64" fn log10(x: f64) -> f64 { x.log10() }
-pub extern "win64" fn log10f(x: f32) -> f32 { x.log10() }
-pub extern "win64" fn log2f(x: f32) -> f32 { x.log2() }
-pub extern "win64" fn sqrtf(x: f32) -> f32 { x.sqrt() }
-pub extern "win64" fn ceilf(x: f32) -> f32 { x.ceil() }
-pub extern "win64" fn floorf(x: f32) -> f32 { x.floor() }
-pub extern "win64" fn fmod(x: f64, y: f64) -> f64 { x % y }
-pub extern "win64" fn fmodf(x: f32, y: f32) -> f32 { x % y }
-pub extern "win64" fn hypot(x: f64, y: f64) -> f64 { x.hypot(y) }
-pub extern "win64" fn _hypot(x: f64, y: f64) -> f64 { x.hypot(y) }
-pub extern "win64" fn round(x: f64) -> f64 { x.round() }
-pub extern "win64" fn roundf(x: f32) -> f32 { x.round() }
-pub extern "win64" fn trunc(x: f64) -> f64 { x.trunc() }
-pub extern "win64" fn truncf(x: f32) -> f32 { x.trunc() }
-pub extern "win64" fn cbrt(x: f64) -> f64 { x.cbrt() }
+pub extern "win64" fn acos(x: f64) -> f64 {
+    x.acos()
+}
+pub extern "win64" fn acosf(x: f32) -> f32 {
+    x.acos()
+}
+pub extern "win64" fn asin(x: f64) -> f64 {
+    x.asin()
+}
+pub extern "win64" fn asinf(x: f32) -> f32 {
+    x.asin()
+}
+pub extern "win64" fn atanf(x: f32) -> f32 {
+    x.atan()
+}
+pub extern "win64" fn atan2f(y: f32, x: f32) -> f32 {
+    y.atan2(x)
+}
+pub extern "win64" fn sinf(x: f32) -> f32 {
+    x.sin()
+}
+pub extern "win64" fn cosf(x: f32) -> f32 {
+    x.cos()
+}
+pub extern "win64" fn tanf(x: f32) -> f32 {
+    x.tan()
+}
+pub extern "win64" fn sinh(x: f64) -> f64 {
+    x.sinh()
+}
+pub extern "win64" fn cosh(x: f64) -> f64 {
+    x.cosh()
+}
+pub extern "win64" fn tanh(x: f64) -> f64 {
+    x.tanh()
+}
+pub extern "win64" fn expf(x: f32) -> f32 {
+    x.exp()
+}
+pub extern "win64" fn exp2(x: f64) -> f64 {
+    x.exp2()
+}
+pub extern "win64" fn exp2f(x: f32) -> f32 {
+    x.exp2()
+}
+pub extern "win64" fn logf(x: f32) -> f32 {
+    x.ln()
+}
+pub extern "win64" fn log10(x: f64) -> f64 {
+    x.log10()
+}
+pub extern "win64" fn log10f(x: f32) -> f32 {
+    x.log10()
+}
+pub extern "win64" fn log2f(x: f32) -> f32 {
+    x.log2()
+}
+pub extern "win64" fn sqrtf(x: f32) -> f32 {
+    x.sqrt()
+}
+pub extern "win64" fn ceilf(x: f32) -> f32 {
+    x.ceil()
+}
+pub extern "win64" fn floorf(x: f32) -> f32 {
+    x.floor()
+}
+pub extern "win64" fn fmod(x: f64, y: f64) -> f64 {
+    x % y
+}
+pub extern "win64" fn fmodf(x: f32, y: f32) -> f32 {
+    x % y
+}
+pub extern "win64" fn hypot(x: f64, y: f64) -> f64 {
+    x.hypot(y)
+}
+pub extern "win64" fn _hypot(x: f64, y: f64) -> f64 {
+    x.hypot(y)
+}
+pub extern "win64" fn round(x: f64) -> f64 {
+    x.round()
+}
+pub extern "win64" fn roundf(x: f32) -> f32 {
+    x.round()
+}
+pub extern "win64" fn trunc(x: f64) -> f64 {
+    x.trunc()
+}
+pub extern "win64" fn truncf(x: f32) -> f32 {
+    x.trunc()
+}
+pub extern "win64" fn cbrt(x: f64) -> f64 {
+    x.cbrt()
+}
 pub extern "win64" fn frexp(x: f64, exp: *mut i32) -> f64 {
     if x == 0.0 {
-        if !exp.is_null() { unsafe { *exp = 0; } }
+        if !exp.is_null() {
+            unsafe {
+                *exp = 0;
+            }
+        }
         return 0.0;
     }
     let bits = x.to_bits();
     let e = ((bits >> 52) & 0x7ff) as i32 - 1022;
     let normalized = f64::from_bits((bits & !(0x7ff << 52)) | (1022 << 52));
-    if !exp.is_null() { unsafe { *exp = e; } }
+    if !exp.is_null() {
+        unsafe {
+            *exp = e;
+        }
+    }
     normalized
 }
 pub extern "win64" fn modf(x: f64, iptr: *mut f64) -> f64 {
     let int_part = x.trunc();
     if !iptr.is_null() {
-        unsafe { *iptr = int_part; }
+        unsafe {
+            *iptr = int_part;
+        }
     }
     x.fract()
 }
-pub extern "win64" fn rint(x: f64) -> f64 { x.round() }
-pub extern "win64" fn lrint(x: f64) -> i64 { x.round() as i64 }
-pub extern "win64" fn lround(x: f64) -> i64 { x.round() as i64 }
-pub extern "win64" fn lroundf(x: f32) -> i64 { x.round() as i64 }
+pub extern "win64" fn rint(x: f64) -> f64 {
+    x.round()
+}
+pub extern "win64" fn lrint(x: f64) -> i64 {
+    x.round() as i64
+}
+pub extern "win64" fn lround(x: f64) -> i64 {
+    x.round() as i64
+}
+pub extern "win64" fn lroundf(x: f32) -> i64 {
+    x.round() as i64
+}
 pub extern "win64" fn fabsf(x: f32) -> f32 {
     x.abs()
 }
@@ -391,7 +471,9 @@ struct Stat64 {
 fn guest_path_to_host(path_str: &str) -> std::path::PathBuf {
     let drives = crate::filesystem::drives::DriveMap::default();
     let special = crate::filesystem::path::SpecialFolders::from_host_env();
-    let host_path = if let Ok(host_path) = crate::filesystem::path::windows_to_host(path_str, &drives, &special) {
+    let host_path = if let Ok(host_path) =
+        crate::filesystem::path::windows_to_host(path_str, &drives, &special)
+    {
         host_path
     } else {
         let normalized = path_str.replace('\\', "/");
@@ -408,7 +490,9 @@ fn guest_path_to_host(path_str: &str) -> std::path::PathBuf {
     };
     if host_path.exists() {
         host_path
-    } else if let Some(resolved) = crate::filesystem::case_fold::resolve_case_insensitive(&host_path) {
+    } else if let Some(resolved) =
+        crate::filesystem::case_fold::resolve_case_insensitive(&host_path)
+    {
         resolved
     } else {
         host_path
@@ -497,7 +581,9 @@ pub extern "win64" fn _fstat64(fd: i32, buf: *mut c_void) -> i32 {
     if buf.is_null() {
         return -1;
     }
-    unsafe { std::ptr::write_bytes(buf.cast::<u8>(), 0, std::mem::size_of::<Stat64>()); }
+    unsafe {
+        std::ptr::write_bytes(buf.cast::<u8>(), 0, std::mem::size_of::<Stat64>());
+    }
     0
 }
 
@@ -505,7 +591,9 @@ pub extern "win64" fn _fstat64i32(fd: i32, buf: *mut c_void) -> i32 {
     if buf.is_null() {
         return -1;
     }
-    unsafe { std::ptr::write_bytes(buf.cast::<u8>(), 0, std::mem::size_of::<Stat64i32>()); }
+    unsafe {
+        std::ptr::write_bytes(buf.cast::<u8>(), 0, std::mem::size_of::<Stat64i32>());
+    }
     0
 }
 
@@ -521,7 +609,7 @@ pub extern "win64" fn _stat64(path: *const c_char, buf: *mut c_void) -> i32 {
     } else {
         -1
     };
-    tracing::info!(guest_path = %s, ?host_path, ?res, "MSVCRT _stat64");
+    tracing::trace!(guest_path = %s, ?host_path, ?res, "MSVCRT _stat64");
     res
 }
 
@@ -529,9 +617,7 @@ pub extern "win64" fn _wstat64(path: *const u16, buf: *mut c_void) -> i32 {
     if path.is_null() || buf.is_null() {
         return -1;
     }
-    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }
-        .ok()
-        .unwrap_or_default();
+    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&s);
     let res = if let Ok(meta) = std::fs::metadata(&host_path) {
         fill_stat64_from_metadata(&meta, buf);
@@ -539,7 +625,7 @@ pub extern "win64" fn _wstat64(path: *const u16, buf: *mut c_void) -> i32 {
     } else {
         -1
     };
-    tracing::info!(guest_path = %s, ?host_path, ?res, "MSVCRT _wstat64");
+    tracing::trace!(guest_path = %s, ?host_path, ?res, "MSVCRT _wstat64");
     res
 }
 
@@ -555,7 +641,7 @@ pub extern "win64" fn _stat64i32(path: *const c_char, buf: *mut c_void) -> i32 {
     } else {
         -1
     };
-    tracing::info!(guest_path = %s, ?host_path, ?res, "MSVCRT _stat64i32");
+    tracing::trace!(guest_path = %s, ?host_path, ?res, "MSVCRT _stat64i32");
     res
 }
 
@@ -563,9 +649,7 @@ pub extern "win64" fn _wstat64i32(path: *const u16, buf: *mut c_void) -> i32 {
     if path.is_null() || buf.is_null() {
         return -1;
     }
-    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }
-        .ok()
-        .unwrap_or_default();
+    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&s);
     let res = if let Ok(meta) = std::fs::metadata(&host_path) {
         fill_stat64i32_from_metadata(&meta, buf);
@@ -573,7 +657,7 @@ pub extern "win64" fn _wstat64i32(path: *const u16, buf: *mut c_void) -> i32 {
     } else {
         -1
     };
-    tracing::info!(guest_path = %s, ?host_path, ?res, "MSVCRT _wstat64i32");
+    tracing::trace!(guest_path = %s, ?host_path, ?res, "MSVCRT _wstat64i32");
     res
 }
 
@@ -583,27 +667,31 @@ pub extern "win64" fn _access(path: *const c_char, _mode: i32) -> i32 {
     }
     let s = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or_default();
     let host_path = guest_path_to_host(s);
-    if host_path.exists() { 0 } else { -1 }
+    if host_path.exists() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub extern "win64" fn _waccess(path: *const u16, _mode: i32) -> i32 {
     if path.is_null() {
         return -1;
     }
-    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }
-        .ok()
-        .unwrap_or_default();
+    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&s);
-    if host_path.exists() { 0 } else { -1 }
+    if host_path.exists() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub extern "win64" fn _wfullpath(buffer: *mut u16, path: *const u16, maxlen: usize) -> *mut u16 {
     if path.is_null() {
         return std::ptr::null_mut();
     }
-    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }
-        .ok()
-        .unwrap_or_default();
+    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&s);
     let full = host_path.to_string_lossy();
     let wide = crate::utils::wide_string::to_wide_null(&full);
@@ -634,27 +722,31 @@ pub extern "win64" fn _mkdir(path: *const c_char) -> i32 {
     }
     let s = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or_default();
     let host_path = guest_path_to_host(s);
-    if std::fs::create_dir_all(host_path).is_ok() { 0 } else { -1 }
+    if std::fs::create_dir_all(host_path).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub extern "win64" fn _wmkdir(path: *const u16) -> i32 {
     if path.is_null() {
         return -1;
     }
-    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }
-        .ok()
-        .unwrap_or_default();
+    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&s);
-    if std::fs::create_dir_all(host_path).is_ok() { 0 } else { -1 }
+    if std::fs::create_dir_all(host_path).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub extern "win64" fn _wremove(path: *const u16) -> i32 {
     if path.is_null() {
         return -1;
     }
-    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }
-        .ok()
-        .unwrap_or_default();
+    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&s);
     if std::fs::remove_file(&host_path).is_ok() || std::fs::remove_dir(&host_path).is_ok() {
         0
@@ -669,18 +761,24 @@ pub extern "win64" fn _chdir(path: *const c_char) -> i32 {
     }
     let s = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or_default();
     let host_path = guest_path_to_host(s);
-    if std::env::set_current_dir(host_path).is_ok() { 0 } else { -1 }
+    if std::env::set_current_dir(host_path).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub extern "win64" fn _wchdir(path: *const u16) -> i32 {
     if path.is_null() {
         return -1;
     }
-    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }
-        .ok()
-        .unwrap_or_default();
+    let s = unsafe { crate::utils::wide_string::from_wide_ptr(path) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&s);
-    if std::env::set_current_dir(host_path).is_ok() { 0 } else { -1 }
+    if std::env::set_current_dir(host_path).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub extern "win64" fn _lock_file(_stream: *mut c_void) {}
@@ -707,7 +805,11 @@ pub extern "win64" fn rename(oldname: *const c_char, newname: *const c_char) -> 
     let new_s = unsafe { CStr::from_ptr(newname) }.to_str().unwrap_or_default();
     let old_host = guest_path_to_host(old_s);
     let new_host = guest_path_to_host(new_s);
-    if std::fs::rename(old_host, new_host).is_ok() { 0 } else { -1 }
+    if std::fs::rename(old_host, new_host).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub extern "win64" fn _unlink(filename: *const c_char) -> i32 {
@@ -775,7 +877,7 @@ pub extern "win64" fn _open(filename: *const c_char, oflag: i32, pmode: i32) -> 
     if fd >= 0 {
         register_fd_handle(fd, host_path.clone());
     }
-    tracing::info!(guest_path = %s, ?host_path, oflag, linux_flags, fd, "MSVCRT _open");
+    tracing::trace!(guest_path = %s, ?host_path, oflag, linux_flags, fd, "MSVCRT _open");
     fd
 }
 
@@ -783,9 +885,7 @@ pub extern "win64" fn _wopen(filename: *const u16, oflag: i32, pmode: i32) -> i3
     if filename.is_null() {
         return -1;
     }
-    let s = unsafe { crate::utils::wide_string::from_wide_ptr(filename) }
-        .ok()
-        .unwrap_or_default();
+    let s = unsafe { crate::utils::wide_string::from_wide_ptr(filename) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&s);
     let c_file = match std::ffi::CString::new(host_path.to_string_lossy().as_bytes()) {
         Ok(c) => c,
@@ -797,7 +897,7 @@ pub extern "win64" fn _wopen(filename: *const u16, oflag: i32, pmode: i32) -> i3
     if fd >= 0 {
         register_fd_handle(fd, host_path.clone());
     }
-    tracing::info!(guest_path = %s, ?host_path, oflag, linux_flags, fd, "MSVCRT _wopen");
+    tracing::trace!(guest_path = %s, ?host_path, oflag, linux_flags, fd, "MSVCRT _wopen");
     fd
 }
 
@@ -933,7 +1033,8 @@ pub extern "win64" fn malloc(size: usize) -> *mut c_void {
     // interchangeably.  Backing one with libc and the other with a custom
     // mmap allocator corrupts memory as soon as a Wine/Unity component hands
     // ownership across that boundary.
-    let allocation = crate::memory::heap::heap_alloc(crate::memory::heap::get_process_heap(), 0, size);
+    let allocation =
+        crate::memory::heap::heap_alloc(crate::memory::heap::get_process_heap(), 0, size);
     remember_allocation(allocation, size);
     allocation
 }
@@ -955,7 +1056,8 @@ pub extern "win64" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     if ptr.is_null() {
         return malloc(size);
     }
-    let allocation = crate::memory::heap::heap_realloc(crate::memory::heap::get_process_heap(), 0, ptr, size);
+    let allocation =
+        crate::memory::heap::heap_realloc(crate::memory::heap::get_process_heap(), 0, ptr, size);
     replace_allocation(ptr, allocation, size);
     allocation
 }
@@ -972,15 +1074,17 @@ pub extern "win64" fn _recalloc(ptr: *mut c_void, count: usize, size: usize) -> 
     }
 
     let heap = crate::memory::heap::get_process_heap();
-    let old_size = allocation_size(ptr)
-        .unwrap_or_else(|| crate::memory::heap::heap_size(heap, 0, ptr));
+    let old_size =
+        allocation_size(ptr).unwrap_or_else(|| crate::memory::heap::heap_size(heap, 0, ptr));
     let replacement = crate::memory::heap::heap_realloc(heap, 0, ptr, total);
     if replacement.is_null() {
         return replacement;
     }
     replace_allocation(ptr, replacement, total);
     if total > old_size {
-        unsafe { std::ptr::write_bytes(replacement.cast::<u8>().add(old_size), 0, total - old_size) };
+        unsafe {
+            std::ptr::write_bytes(replacement.cast::<u8>().add(old_size), 0, total - old_size)
+        };
     }
     replacement
 }
@@ -1008,7 +1112,11 @@ pub extern "win64" fn _aligned_free(ptr: *mut c_void) {
     }
 }
 
-pub extern "win64" fn _aligned_realloc(ptr: *mut c_void, size: usize, alignment: usize) -> *mut c_void {
+pub extern "win64" fn _aligned_realloc(
+    ptr: *mut c_void,
+    size: usize,
+    alignment: usize,
+) -> *mut c_void {
     if ptr.is_null() {
         return _aligned_malloc(size, alignment);
     }
@@ -1033,10 +1141,7 @@ fn allocations() -> &'static Mutex<HashMap<usize, usize>> {
 
 fn remember_allocation(pointer: *mut c_void, size: usize) {
     if !pointer.is_null() {
-        allocations()
-            .lock()
-            .expect("UCRT allocation map poisoned")
-            .insert(pointer as usize, size);
+        allocations().lock().expect("UCRT allocation map poisoned").insert(pointer as usize, size);
     }
 }
 
@@ -1052,10 +1157,7 @@ fn allocation_size(pointer: *mut c_void) -> Option<usize> {
 
 fn forget_allocation(pointer: *mut c_void) {
     if !pointer.is_null() {
-        allocations()
-            .lock()
-            .expect("UCRT allocation map poisoned")
-            .remove(&(pointer as usize));
+        allocations().lock().expect("UCRT allocation map poisoned").remove(&(pointer as usize));
     }
 }
 
@@ -1069,7 +1171,6 @@ fn replace_allocation(original: *mut c_void, replacement: *mut c_void, size: usi
     }
     allocations.insert(replacement as usize, size);
 }
-
 
 pub extern "win64" fn _set_new_mode(_newmode: i32) -> i32 {
     0
@@ -1158,17 +1259,12 @@ pub extern "win64" fn wcstol(nptr: *const u16, endptr: *mut *mut u16, base: i32)
             if digit >= radix {
                 break;
             }
-            value = value
-                .saturating_mul(radix as i64)
-                .saturating_add(digit as i64);
+            value = value.saturating_mul(radix as i64).saturating_add(digit as i64);
             index += 1;
         }
         if !endptr.is_null() {
-            *endptr = if index == first_digit {
-                nptr.cast_mut()
-            } else {
-                nptr.add(index).cast_mut()
-            };
+            *endptr =
+                if index == first_digit { nptr.cast_mut() } else { nptr.add(index).cast_mut() };
         }
         let signed = if negative { value.saturating_neg() } else { value };
         signed.clamp(i32::MIN as i64, i32::MAX as i64) as i32
@@ -1246,7 +1342,9 @@ pub extern "win64" fn fputs(s: *const c_char, stream: *mut c_void) -> i32 {
 }
 
 pub extern "win64" fn fprintf(stream: *mut c_void, format: *const c_char) -> i32 {
-    if stream.is_null() || format.is_null() { return -1; }
+    if stream.is_null() || format.is_null() {
+        return -1;
+    }
     fputs(format, stream)
 }
 
@@ -1371,7 +1469,9 @@ pub extern "win64" fn _time64(timeptr: *mut i64) -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     if !timeptr.is_null() {
-        unsafe { *timeptr = now; }
+        unsafe {
+            *timeptr = now;
+        }
     }
     now
 }
@@ -1397,7 +1497,9 @@ pub extern "win64" fn _umask(pmode: i32) -> i32 {
 }
 
 pub extern "win64" fn _wputenv(envstring: *const u16) -> i32 {
-    if envstring.is_null() { return -1; }
+    if envstring.is_null() {
+        return -1;
+    }
     let s = unsafe { crate::utils::wide_string::from_wide_ptr(envstring) }.unwrap_or_default();
     if let Some((k, v)) = s.split_once('=') {
         std::env::set_var(k, v);
@@ -1408,21 +1510,31 @@ pub extern "win64" fn _wputenv(envstring: *const u16) -> i32 {
 }
 
 pub extern "win64" fn _wputenv_s(name: *const u16, value: *const u16) -> i32 {
-    if name.is_null() { return -1; }
+    if name.is_null() {
+        return -1;
+    }
     let k = unsafe { crate::utils::wide_string::from_wide_ptr(name) }.unwrap_or_default();
-    let v = if value.is_null() { String::new() } else { unsafe { crate::utils::wide_string::from_wide_ptr(value) }.unwrap_or_default() };
+    let v = if value.is_null() {
+        String::new()
+    } else {
+        unsafe { crate::utils::wide_string::from_wide_ptr(value) }.unwrap_or_default()
+    };
     std::env::set_var(k, v);
     0
 }
 
 pub extern "win64" fn wcscpy_s(dest: *mut u16, dest_sz: usize, src: *const u16) -> i32 {
-    if dest.is_null() || src.is_null() || dest_sz == 0 { return 22; }
+    if dest.is_null() || src.is_null() || dest_sz == 0 {
+        return 22;
+    }
     let mut i = 0;
     unsafe {
         while i < dest_sz {
             let ch = *src.add(i);
             *dest.add(i) = ch;
-            if ch == 0 { return 0; }
+            if ch == 0 {
+                return 0;
+            }
             i += 1;
         }
         *dest = 0;
@@ -1430,14 +1542,25 @@ pub extern "win64" fn wcscpy_s(dest: *mut u16, dest_sz: usize, src: *const u16) 
     34
 }
 
-pub extern "win64" fn wcsncpy_s(dest: *mut u16, dest_sz: usize, src: *const u16, count: usize) -> i32 {
-    if dest.is_null() || dest_sz == 0 { return 22; }
+pub extern "win64" fn wcsncpy_s(
+    dest: *mut u16,
+    dest_sz: usize,
+    src: *const u16,
+    count: usize,
+) -> i32 {
+    if dest.is_null() || dest_sz == 0 {
+        return 22;
+    }
     if count == 0 {
-        unsafe { *dest = 0; }
+        unsafe {
+            *dest = 0;
+        }
         return 0;
     }
     if src.is_null() {
-        unsafe { *dest = 0; }
+        unsafe {
+            *dest = 0;
+        }
         return 22;
     }
     let mut i = 0;
@@ -1445,7 +1568,9 @@ pub extern "win64" fn wcsncpy_s(dest: *mut u16, dest_sz: usize, src: *const u16,
         while i < count && i < dest_sz {
             let ch = *src.add(i);
             *dest.add(i) = ch;
-            if ch == 0 { return 0; }
+            if ch == 0 {
+                return 0;
+            }
             i += 1;
         }
         if i < dest_sz {
@@ -1458,18 +1583,24 @@ pub extern "win64" fn wcsncpy_s(dest: *mut u16, dest_sz: usize, src: *const u16,
 }
 
 pub extern "win64" fn wcscat_s(dest: *mut u16, dest_sz: usize, src: *const u16) -> i32 {
-    if dest.is_null() || src.is_null() || dest_sz == 0 { return 22; }
+    if dest.is_null() || src.is_null() || dest_sz == 0 {
+        return 22;
+    }
     let mut cur_len = 0;
     unsafe {
         while cur_len < dest_sz && *dest.add(cur_len) != 0 {
             cur_len += 1;
         }
-        if cur_len >= dest_sz { return 22; }
+        if cur_len >= dest_sz {
+            return 22;
+        }
         let mut i = 0;
         while cur_len + i < dest_sz {
             let ch = *src.add(i);
             *dest.add(cur_len + i) = ch;
-            if ch == 0 { return 0; }
+            if ch == 0 {
+                return 0;
+            }
             i += 1;
         }
         *dest = 0;
@@ -1482,18 +1613,27 @@ pub extern "win64" fn wcstok_s(
     delim: *const u16,
     ptr_save: *mut *mut u16,
 ) -> *mut u16 {
-    if delim.is_null() || ptr_save.is_null() { return std::ptr::null_mut(); }
+    if delim.is_null() || ptr_save.is_null() {
+        return std::ptr::null_mut();
+    }
     let mut s = if !str_tok.is_null() { str_tok } else { unsafe { *ptr_save } };
-    if s.is_null() { return std::ptr::null_mut(); }
+    if s.is_null() {
+        return std::ptr::null_mut();
+    }
     unsafe {
         while *s != 0 {
             let mut is_del = false;
             let mut d = delim;
             while *d != 0 {
-                if *d == *s { is_del = true; break; }
+                if *d == *s {
+                    is_del = true;
+                    break;
+                }
                 d = d.add(1);
             }
-            if !is_del { break; }
+            if !is_del {
+                break;
+            }
             s = s.add(1);
         }
         if *s == 0 {
@@ -1505,7 +1645,10 @@ pub extern "win64" fn wcstok_s(
             let mut is_del = false;
             let mut d = delim;
             while *d != 0 {
-                if *d == *s { is_del = true; break; }
+                if *d == *s {
+                    is_del = true;
+                    break;
+                }
                 d = d.add(1);
             }
             if is_del {
@@ -1520,22 +1663,46 @@ pub extern "win64" fn wcstok_s(
     }
 }
 
-pub extern "win64" fn acosh(x: f64) -> f64 { x.acosh() }
-pub extern "win64" fn asinh(x: f64) -> f64 { x.asinh() }
-pub extern "win64" fn atanh(x: f64) -> f64 { x.atanh() }
-pub extern "win64" fn copysign(x: f64, y: f64) -> f64 { x.copysign(y) }
-pub extern "win64" fn expm1(x: f64) -> f64 { x.exp_m1() }
-pub extern "win64" fn log1p(x: f64) -> f64 { x.ln_1p() }
-pub extern "win64" fn log2(x: f64) -> f64 { x.log2() }
-pub extern "win64" fn fma(x: f64, y: f64, z: f64) -> f64 { x.mul_add(y, z) }
+pub extern "win64" fn acosh(x: f64) -> f64 {
+    x.acosh()
+}
+pub extern "win64" fn asinh(x: f64) -> f64 {
+    x.asinh()
+}
+pub extern "win64" fn atanh(x: f64) -> f64 {
+    x.atanh()
+}
+pub extern "win64" fn copysign(x: f64, y: f64) -> f64 {
+    x.copysign(y)
+}
+pub extern "win64" fn expm1(x: f64) -> f64 {
+    x.exp_m1()
+}
+pub extern "win64" fn log1p(x: f64) -> f64 {
+    x.ln_1p()
+}
+pub extern "win64" fn log2(x: f64) -> f64 {
+    x.log2()
+}
+pub extern "win64" fn fma(x: f64, y: f64, z: f64) -> f64 {
+    x.mul_add(y, z)
+}
 pub extern "win64" fn nextafter(x: f64, y: f64) -> f64 {
-    if x < y { f64::from_bits(x.to_bits() + 1) }
-    else if x > y { f64::from_bits(x.to_bits() - 1) }
-    else { x }
+    if x < y {
+        f64::from_bits(x.to_bits() + 1)
+    } else if x > y {
+        f64::from_bits(x.to_bits() - 1)
+    } else {
+        x
+    }
 }
 
 pub extern "win64" fn rewind(stream: *mut c_void) {
-    if !stream.is_null() { unsafe { libc::rewind(stream.cast()); } }
+    if !stream.is_null() {
+        unsafe {
+            libc::rewind(stream.cast());
+        }
+    }
 }
 
 pub extern "win64" fn putchar(c: i32) -> i32 {
@@ -1546,7 +1713,9 @@ pub extern "win64" fn raise(sig: i32) -> i32 {
     unsafe { libc::raise(sig) }
 }
 
-pub extern "win64" fn _heapmin() -> i32 { 0 }
+pub extern "win64" fn _heapmin() -> i32 {
+    0
+}
 
 static mut FMODE: i32 = 0;
 static mut COMMODE: i32 = 0;
@@ -1703,7 +1872,11 @@ pub extern "win64" fn _configure_narrow_argv(_mode: i32) -> i32 {
             let cstr_bytes = bytes.into_bytes_with_nul();
             let arg_layout = std::alloc::Layout::array::<u8>(cstr_bytes.len()).unwrap();
             let arg_ptr = std::alloc::alloc(arg_layout) as *mut c_char;
-            std::ptr::copy_nonoverlapping(cstr_bytes.as_ptr(), arg_ptr as *mut u8, cstr_bytes.len());
+            std::ptr::copy_nonoverlapping(
+                cstr_bytes.as_ptr(),
+                arg_ptr as *mut u8,
+                cstr_bytes.len(),
+            );
             *argv.add(i) = arg_ptr;
         }
         *argv.add(args.len()) = std::ptr::null_mut();
@@ -1924,54 +2097,148 @@ pub extern "win64" fn strncat(dest: *mut c_char, src: *const c_char, n: usize) -
 }
 
 pub extern "win64" fn strnlen(s: *const c_char, maxlen: usize) -> usize {
-    if s.is_null() { 0 } else { unsafe { libc::strnlen(s, maxlen) } }
+    if s.is_null() {
+        0
+    } else {
+        unsafe { libc::strnlen(s, maxlen) }
+    }
 }
 
 pub extern "win64" fn strpbrk(s: *const c_char, accept: *const c_char) -> *mut c_char {
-    if s.is_null() || accept.is_null() { return std::ptr::null_mut(); }
+    if s.is_null() || accept.is_null() {
+        return std::ptr::null_mut();
+    }
     unsafe { libc::strpbrk(s, accept) as *mut c_char }
 }
 
 pub extern "win64" fn strspn(s: *const c_char, accept: *const c_char) -> usize {
-    if s.is_null() || accept.is_null() { return 0; }
+    if s.is_null() || accept.is_null() {
+        return 0;
+    }
     unsafe { libc::strspn(s, accept) }
 }
 
 pub extern "win64" fn strtok(s: *mut c_char, delim: *const c_char) -> *mut c_char {
-    if delim.is_null() { return std::ptr::null_mut(); }
+    if delim.is_null() {
+        return std::ptr::null_mut();
+    }
     unsafe { libc::strtok(s, delim) }
 }
 
-pub extern "win64" fn tolower(c: i32) -> i32 { (c as u8 as char).to_ascii_lowercase() as i32 }
-pub extern "win64" fn toupper(c: i32) -> i32 { (c as u8 as char).to_ascii_uppercase() as i32 }
-pub extern "win64" fn isalnum(c: i32) -> i32 { if (c as u8 as char).is_ascii_alphanumeric() { 1 } else { 0 } }
-pub extern "win64" fn isalpha(c: i32) -> i32 { if (c as u8 as char).is_ascii_alphabetic() { 1 } else { 0 } }
-pub extern "win64" fn isblank(c: i32) -> i32 { if c == b' ' as i32 || c == b'\t' as i32 { 1 } else { 0 } }
-pub extern "win64" fn iscntrl(c: i32) -> i32 { if (c as u8 as char).is_ascii_control() { 1 } else { 0 } }
-pub extern "win64" fn isdigit(c: i32) -> i32 { if (c as u8 as char).is_ascii_digit() { 1 } else { 0 } }
-pub extern "win64" fn isgraph(c: i32) -> i32 { if (c as u8 as char).is_ascii_graphic() { 1 } else { 0 } }
-pub extern "win64" fn islower(c: i32) -> i32 { if (c as u8 as char).is_ascii_lowercase() { 1 } else { 0 } }
-pub extern "win64" fn isprint(c: i32) -> i32 { if (c as u8 as char).is_ascii() && !(c as u8 as char).is_ascii_control() { 1 } else { 0 } }
-pub extern "win64" fn ispunct(c: i32) -> i32 { if (c as u8 as char).is_ascii_punctuation() { 1 } else { 0 } }
-pub extern "win64" fn isspace(c: i32) -> i32 { if (c as u8 as char).is_ascii_whitespace() { 1 } else { 0 } }
-pub extern "win64" fn isupper(c: i32) -> i32 { if (c as u8 as char).is_ascii_uppercase() { 1 } else { 0 } }
-pub extern "win64" fn isxdigit(c: i32) -> i32 { if (c as u8 as char).is_ascii_hexdigit() { 1 } else { 0 } }
+pub extern "win64" fn tolower(c: i32) -> i32 {
+    (c as u8 as char).to_ascii_lowercase() as i32
+}
+pub extern "win64" fn toupper(c: i32) -> i32 {
+    (c as u8 as char).to_ascii_uppercase() as i32
+}
+pub extern "win64" fn isalnum(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_alphanumeric() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn isalpha(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_alphabetic() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn isblank(c: i32) -> i32 {
+    if c == b' ' as i32 || c == b'\t' as i32 {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn iscntrl(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_control() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn isdigit(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_digit() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn isgraph(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_graphic() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn islower(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_lowercase() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn isprint(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii() && !(c as u8 as char).is_ascii_control() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn ispunct(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_punctuation() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn isspace(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_whitespace() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn isupper(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_uppercase() {
+        1
+    } else {
+        0
+    }
+}
+pub extern "win64" fn isxdigit(c: i32) -> i32 {
+    if (c as u8 as char).is_ascii_hexdigit() {
+        1
+    } else {
+        0
+    }
+}
 
 pub extern "win64" fn wcschr(s: *const u16, c: u16) -> *mut u16 {
-    if s.is_null() { return std::ptr::null_mut(); }
+    if s.is_null() {
+        return std::ptr::null_mut();
+    }
     let mut i = 0;
     unsafe {
         loop {
             let ch = *s.add(i);
-            if ch == c { return s.add(i) as *mut u16; }
-            if ch == 0 { return std::ptr::null_mut(); }
+            if ch == c {
+                return s.add(i) as *mut u16;
+            }
+            if ch == 0 {
+                return std::ptr::null_mut();
+            }
             i += 1;
         }
     }
 }
 
 pub extern "win64" fn wcsstr(s1: *const u16, s2: *const u16) -> *mut u16 {
-    if s1.is_null() || s2.is_null() { return std::ptr::null_mut(); }
+    if s1.is_null() || s2.is_null() {
+        return std::ptr::null_mut();
+    }
     let s1_str = unsafe { crate::utils::wide_string::from_wide_ptr(s1) }.unwrap_or_default();
     let s2_str = unsafe { crate::utils::wide_string::from_wide_ptr(s2) }.unwrap_or_default();
     if let Some(idx) = s1_str.find(&s2_str) {
@@ -1982,13 +2249,17 @@ pub extern "win64" fn wcsstr(s1: *const u16, s2: *const u16) -> *mut u16 {
 }
 
 pub extern "win64" fn wcscpy(dest: *mut u16, src: *const u16) -> *mut u16 {
-    if dest.is_null() || src.is_null() { return dest; }
+    if dest.is_null() || src.is_null() {
+        return dest;
+    }
     let mut i = 0;
     unsafe {
         loop {
             let ch = *src.add(i);
             *dest.add(i) = ch;
-            if ch == 0 { break; }
+            if ch == 0 {
+                break;
+            }
             i += 1;
         }
     }
@@ -1996,7 +2267,9 @@ pub extern "win64" fn wcscpy(dest: *mut u16, src: *const u16) -> *mut u16 {
 }
 
 pub extern "win64" fn wcsncpy(dest: *mut u16, src: *const u16, n: usize) -> *mut u16 {
-    if dest.is_null() || src.is_null() || n == 0 { return dest; }
+    if dest.is_null() || src.is_null() || n == 0 {
+        return dest;
+    }
     let mut i = 0;
     let mut null_seen = false;
     unsafe {
@@ -2004,7 +2277,9 @@ pub extern "win64" fn wcsncpy(dest: *mut u16, src: *const u16, n: usize) -> *mut
             if !null_seen {
                 let ch = *src.add(i);
                 *dest.add(i) = ch;
-                if ch == 0 { null_seen = true; }
+                if ch == 0 {
+                    null_seen = true;
+                }
             } else {
                 *dest.add(i) = 0;
             }
@@ -2015,7 +2290,9 @@ pub extern "win64" fn wcsncpy(dest: *mut u16, src: *const u16, n: usize) -> *mut
 }
 
 pub extern "win64" fn wcsnlen(s: *const u16, maxlen: usize) -> usize {
-    if s.is_null() { return 0; }
+    if s.is_null() {
+        return 0;
+    }
     let mut i = 0;
     unsafe {
         while i < maxlen && *s.add(i) != 0 {
@@ -2026,13 +2303,17 @@ pub extern "win64" fn wcsnlen(s: *const u16, maxlen: usize) -> usize {
 }
 
 pub extern "win64" fn _wcsnicmp(s1: *const u16, s2: *const u16, n: usize) -> i32 {
-    if s1.is_null() || s2.is_null() || n == 0 { return 0; }
+    if s1.is_null() || s2.is_null() || n == 0 {
+        return 0;
+    }
     let mut i = 0;
     unsafe {
         while i < n {
             let c1 = (*s1.add(i) as u8 as char).to_ascii_lowercase() as i32;
             let c2 = (*s2.add(i) as u8 as char).to_ascii_lowercase() as i32;
-            if c1 != c2 || c1 == 0 { return c1 - c2; }
+            if c1 != c2 || c1 == 0 {
+                return c1 - c2;
+            }
             i += 1;
         }
     }
@@ -2040,7 +2321,9 @@ pub extern "win64" fn _wcsnicmp(s1: *const u16, s2: *const u16, n: usize) -> i32
 }
 
 pub extern "win64" fn _strlwr(s: *mut c_char) -> *mut c_char {
-    if s.is_null() { return s; }
+    if s.is_null() {
+        return s;
+    }
     let mut i = 0;
     unsafe {
         while *s.add(i) != 0 {
@@ -2052,7 +2335,9 @@ pub extern "win64" fn _strlwr(s: *mut c_char) -> *mut c_char {
 }
 
 pub extern "win64" fn _strupr(s: *mut c_char) -> *mut c_char {
-    if s.is_null() { return s; }
+    if s.is_null() {
+        return s;
+    }
     let mut i = 0;
     unsafe {
         while *s.add(i) != 0 {
@@ -2064,7 +2349,9 @@ pub extern "win64" fn _strupr(s: *mut c_char) -> *mut c_char {
 }
 
 pub extern "win64" fn _putenv(envstring: *const c_char) -> i32 {
-    if envstring.is_null() { return -1; }
+    if envstring.is_null() {
+        return -1;
+    }
     let s = unsafe { CStr::from_ptr(envstring) }.to_str().unwrap_or_default();
     if let Some((k, v)) = s.split_once('=') {
         std::env::set_var(k, v);
@@ -2075,13 +2362,17 @@ pub extern "win64" fn _putenv(envstring: *const c_char) -> i32 {
 }
 
 pub extern "win64" fn _wgetenv(varname: *const u16) -> *mut u16 {
-    if varname.is_null() { return std::ptr::null_mut(); }
+    if varname.is_null() {
+        return std::ptr::null_mut();
+    }
     let s = unsafe { crate::utils::wide_string::from_wide_ptr(varname) }.unwrap_or_default();
     if let Ok(val) = std::env::var(s) {
         let wide = crate::utils::wide_string::to_wide_null(&val);
         let ptr = malloc(wide.len() * 2).cast::<u16>();
         if !ptr.is_null() {
-            unsafe { std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len()); }
+            unsafe {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+            }
         }
         ptr
     } else {
@@ -2095,8 +2386,12 @@ pub extern "win64" fn qsort(
     size: usize,
     compar: Option<extern "win64" fn(*const c_void, *const c_void) -> i32>,
 ) {
-    if base.is_null() || nmemb <= 1 || size == 0 { return; }
-    let Some(cmp) = compar else { return; };
+    if base.is_null() || nmemb <= 1 || size == 0 {
+        return;
+    }
+    let Some(cmp) = compar else {
+        return;
+    };
     unsafe {
         let ptr = base as *mut u8;
         let mut temp = vec![0u8; size];
@@ -2125,8 +2420,12 @@ pub extern "win64" fn bsearch(
     size: usize,
     compar: Option<extern "win64" fn(*const c_void, *const c_void) -> i32>,
 ) -> *mut c_void {
-    if key.is_null() || base.is_null() || nmemb == 0 || size == 0 { return std::ptr::null_mut(); }
-    let Some(cmp) = compar else { return std::ptr::null_mut(); };
+    if key.is_null() || base.is_null() || nmemb == 0 || size == 0 {
+        return std::ptr::null_mut();
+    }
+    let Some(cmp) = compar else {
+        return std::ptr::null_mut();
+    };
     let mut low = 0usize;
     let mut high = nmemb;
     let ptr = base as *const u8;
@@ -2154,7 +2453,9 @@ pub extern "win64" fn atof(nptr: *const c_char) -> f64 {
 }
 
 pub extern "win64" fn _itoa(val: i32, buf: *mut c_char, radix: i32) -> *mut c_char {
-    if buf.is_null() { return buf; }
+    if buf.is_null() {
+        return buf;
+    }
     let s = match radix {
         10 => format!("{val}\0"),
         16 => format!("{:x}\0", val as u32),
@@ -2162,7 +2463,9 @@ pub extern "win64" fn _itoa(val: i32, buf: *mut c_char, radix: i32) -> *mut c_ch
         2 => format!("{:b}\0", val as u32),
         _ => format!("{val}\0"),
     };
-    unsafe { std::ptr::copy_nonoverlapping(s.as_ptr() as *const c_char, buf, s.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(s.as_ptr() as *const c_char, buf, s.len());
+    }
     buf
 }
 
@@ -2171,7 +2474,9 @@ pub extern "win64" fn _ltoa(val: i32, buf: *mut c_char, radix: i32) -> *mut c_ch
 }
 
 pub extern "win64" fn _i64toa(val: i64, buf: *mut c_char, radix: i32) -> *mut c_char {
-    if buf.is_null() { return buf; }
+    if buf.is_null() {
+        return buf;
+    }
     let s = match radix {
         10 => format!("{val}\0"),
         16 => format!("{:x}\0", val as u64),
@@ -2179,12 +2484,16 @@ pub extern "win64" fn _i64toa(val: i64, buf: *mut c_char, radix: i32) -> *mut c_
         2 => format!("{:b}\0", val as u64),
         _ => format!("{val}\0"),
     };
-    unsafe { std::ptr::copy_nonoverlapping(s.as_ptr() as *const c_char, buf, s.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(s.as_ptr() as *const c_char, buf, s.len());
+    }
     buf
 }
 
 pub extern "win64" fn _ui64toa(val: u64, buf: *mut c_char, radix: i32) -> *mut c_char {
-    if buf.is_null() { return buf; }
+    if buf.is_null() {
+        return buf;
+    }
     let s = match radix {
         10 => format!("{val}\0"),
         16 => format!("{:x}\0", val),
@@ -2192,7 +2501,9 @@ pub extern "win64" fn _ui64toa(val: u64, buf: *mut c_char, radix: i32) -> *mut c
         2 => format!("{:b}\0", val),
         _ => format!("{val}\0"),
     };
-    unsafe { std::ptr::copy_nonoverlapping(s.as_ptr() as *const c_char, buf, s.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(s.as_ptr() as *const c_char, buf, s.len());
+    }
     buf
 }
 
@@ -2205,33 +2516,51 @@ pub extern "win64" fn wcstoul(nptr: *const u16, endptr: *mut *mut u16, base: i32
 }
 
 pub extern "win64" fn wcstoull(nptr: *const u16, endptr: *mut *mut u16, base: i32) -> u64 {
-    if nptr.is_null() { return 0; }
+    if nptr.is_null() {
+        return 0;
+    }
     let s = unsafe { crate::utils::wide_string::from_wide_ptr(nptr) }.unwrap_or_default();
     let trimmed = s.trim_start();
     let offset = s.len() - trimmed.len();
     let radix = if base == 0 { 10 } else { base as u32 };
-    let parsed = u64::from_str_radix(trimmed.split(|c: char| !c.is_alphanumeric()).next().unwrap_or(""), radix).unwrap_or(0);
+    let parsed = u64::from_str_radix(
+        trimmed.split(|c: char| !c.is_alphanumeric()).next().unwrap_or(""),
+        radix,
+    )
+    .unwrap_or(0);
     if !endptr.is_null() {
-        unsafe { *endptr = nptr.add(offset) as *mut u16; }
+        unsafe {
+            *endptr = nptr.add(offset) as *mut u16;
+        }
     }
     parsed
 }
 
 pub extern "win64" fn wcstoll(nptr: *const u16, endptr: *mut *mut u16, base: i32) -> i64 {
-    if nptr.is_null() { return 0; }
+    if nptr.is_null() {
+        return 0;
+    }
     let s = unsafe { crate::utils::wide_string::from_wide_ptr(nptr) }.unwrap_or_default();
     let trimmed = s.trim_start();
     let offset = s.len() - trimmed.len();
     let radix = if base == 0 { 10 } else { base as u32 };
-    let parsed = i64::from_str_radix(trimmed.split(|c: char| !c.is_alphanumeric() && c != '-').next().unwrap_or(""), radix).unwrap_or(0);
+    let parsed = i64::from_str_radix(
+        trimmed.split(|c: char| !c.is_alphanumeric() && c != '-').next().unwrap_or(""),
+        radix,
+    )
+    .unwrap_or(0);
     if !endptr.is_null() {
-        unsafe { *endptr = nptr.add(offset) as *mut u16; }
+        unsafe {
+            *endptr = nptr.add(offset) as *mut u16;
+        }
     }
     parsed
 }
 
 pub extern "win64" fn wcstod(nptr: *const u16, endptr: *mut *mut u16) -> f64 {
-    if nptr.is_null() { return 0.0; }
+    if nptr.is_null() {
+        return 0.0;
+    }
     let s = unsafe { crate::utils::wide_string::from_wide_ptr(nptr) }.unwrap_or_default();
     s.trim().parse::<f64>().unwrap_or(0.0)
 }
@@ -2239,7 +2568,10 @@ pub extern "win64" fn wcstod(nptr: *const u16, endptr: *mut *mut u16) -> f64 {
 pub extern "win64" fn clock() -> i64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let start = START.get_or_init(std::time::Instant::now);
-    start.elapsed().as_micros() as i64
+    // MSVC CLOCKS_PER_SEC is 1000 and clock() reports elapsed wall-clock
+    // milliseconds; returning microseconds here would make any guest that
+    // divides by CLOCKS_PER_SEC see time advance 1000x too fast.
+    start.elapsed().as_millis() as i64
 }
 
 #[repr(C)]
@@ -2256,9 +2588,19 @@ pub struct Tm {
 }
 
 pub extern "win64" fn _gmtime64(time: *const i64) -> *mut Tm {
-    if time.is_null() { return std::ptr::null_mut(); }
+    if time.is_null() {
+        return std::ptr::null_mut();
+    }
     static mut TM_RES: Tm = Tm {
-        tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 1, tm_mon: 0, tm_year: 70, tm_wday: 4, tm_yday: 0, tm_isdst: 0,
+        tm_sec: 0,
+        tm_min: 0,
+        tm_hour: 0,
+        tm_mday: 1,
+        tm_mon: 0,
+        tm_year: 70,
+        tm_wday: 4,
+        tm_yday: 0,
+        tm_isdst: 0,
     };
     let t = unsafe { *time } as libc::time_t;
     let mut ltm: libc::tm = unsafe { std::mem::zeroed() };
@@ -2278,7 +2620,9 @@ pub extern "win64" fn _gmtime64(time: *const i64) -> *mut Tm {
 }
 
 pub extern "win64" fn _gmtime64_s(tm: *mut Tm, time: *const i64) -> i32 {
-    if tm.is_null() || time.is_null() { return -1; }
+    if tm.is_null() || time.is_null() {
+        return -1;
+    }
     let t = unsafe { *time } as libc::time_t;
     let mut ltm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe {
@@ -2297,7 +2641,9 @@ pub extern "win64" fn _gmtime64_s(tm: *mut Tm, time: *const i64) -> i32 {
 }
 
 pub extern "win64" fn _localtime64_s(tm: *mut Tm, time: *const i64) -> i32 {
-    if tm.is_null() || time.is_null() { return -1; }
+    if tm.is_null() || time.is_null() {
+        return -1;
+    }
     let t = unsafe { *time } as libc::time_t;
     let mut ltm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe {
@@ -2316,7 +2662,9 @@ pub extern "win64" fn _localtime64_s(tm: *mut Tm, time: *const i64) -> i32 {
 }
 
 pub extern "win64" fn _mktime64(tm: *mut Tm) -> i64 {
-    if tm.is_null() { return -1; }
+    if tm.is_null() {
+        return -1;
+    }
     let mut ltm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe {
         ltm.tm_sec = (*tm).tm_sec;
@@ -2339,7 +2687,9 @@ pub extern "win64" fn _strftime_l(
     timeptr: *const Tm,
     _locale: usize,
 ) -> usize {
-    if str_dest.is_null() || format.is_null() || timeptr.is_null() || maxsize == 0 { return 0; }
+    if str_dest.is_null() || format.is_null() || timeptr.is_null() || maxsize == 0 {
+        return 0;
+    }
     unsafe {
         let ltm = timeptr as *const libc::tm;
         libc::strftime(str_dest, maxsize, format, ltm)
@@ -2407,7 +2757,11 @@ pub extern "win64" fn _strnicmp(s1: *const c_char, s2: *const c_char, n: usize) 
 }
 
 pub extern "win64" fn iswctype(c: u16, _ctype: u16) -> i32 {
-    if c == 0 { 0 } else { 1 }
+    if c == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 pub extern "win64" fn towlower(c: u16) -> u16 {
@@ -2449,12 +2803,16 @@ pub extern "win64" fn __tzname() -> *mut *const c_char {
 pub extern "win64" fn _tzset() {}
 
 pub extern "win64" fn strcoll(s1: *const c_char, s2: *const c_char) -> i32 {
-    if s1.is_null() || s2.is_null() { return 0; }
+    if s1.is_null() || s2.is_null() {
+        return 0;
+    }
     unsafe { libc::strcoll(s1, s2) }
 }
 
 pub extern "win64" fn strxfrm(dest: *mut c_char, src: *const c_char, n: usize) -> usize {
-    if src.is_null() { return 0; }
+    if src.is_null() {
+        return 0;
+    }
     unsafe { libc::strxfrm(dest, src, n) }
 }
 
@@ -2463,7 +2821,9 @@ pub extern "win64" fn wcscoll(s1: *const u16, s2: *const u16) -> i32 {
 }
 
 pub extern "win64" fn wcsxfrm(dest: *mut u16, src: *const u16, n: usize) -> usize {
-    if src.is_null() { return 0; }
+    if src.is_null() {
+        return 0;
+    }
     let mut i = 0;
     unsafe {
         while i < n && *src.add(i) != 0 {
@@ -2479,14 +2839,30 @@ pub extern "win64" fn wcsxfrm(dest: *mut u16, src: *const u16, n: usize) -> usiz
     i
 }
 
-pub extern "win64" fn strftime(s: *mut c_char, maxsize: usize, format: *const c_char, timeptr: *const c_void) -> usize {
-    if s.is_null() || format.is_null() || timeptr.is_null() { return 0; }
+pub extern "win64" fn strftime(
+    s: *mut c_char,
+    maxsize: usize,
+    format: *const c_char,
+    timeptr: *const c_void,
+) -> usize {
+    if s.is_null() || format.is_null() || timeptr.is_null() {
+        return 0;
+    }
     unsafe { libc::strftime(s, maxsize, format, timeptr.cast()) }
 }
 
-pub extern "win64" fn wcsftime(s: *mut u16, _maxsize: usize, _format: *const u16, _timeptr: *const c_void) -> usize {
-    if s.is_null() { return 0; }
-    unsafe { *s = 0; }
+pub extern "win64" fn wcsftime(
+    s: *mut u16,
+    _maxsize: usize,
+    _format: *const u16,
+    _timeptr: *const c_void,
+) -> usize {
+    if s.is_null() {
+        return 0;
+    }
+    unsafe {
+        *s = 0;
+    }
     0
 }
 
@@ -2499,26 +2875,39 @@ pub extern "win64" fn getwc(stream: *mut c_void) -> i32 {
 }
 
 pub extern "win64" fn putc(c: i32, stream: *mut c_void) -> i32 {
-    if stream.is_null() { return -1; }
+    if stream.is_null() {
+        return -1;
+    }
     unsafe { libc::fputc(c, stream.cast()) }
 }
 
 pub extern "win64" fn putwc(c: u16, stream: *mut c_void) -> i32 {
-    if stream.is_null() { return -1; }
+    if stream.is_null() {
+        return -1;
+    }
     unsafe { libc::fputc(c as i32, stream.cast()) }
 }
 
-pub extern "win64" fn setvbuf(_stream: *mut c_void, _buf: *mut c_char, _mode: i32, _size: usize) -> i32 {
+pub extern "win64" fn setvbuf(
+    _stream: *mut c_void,
+    _buf: *mut c_char,
+    _mode: i32,
+    _size: usize,
+) -> i32 {
     0
 }
 
 pub extern "win64" fn ungetc(c: i32, stream: *mut c_void) -> i32 {
-    if stream.is_null() { return -1; }
+    if stream.is_null() {
+        return -1;
+    }
     unsafe { libc::ungetc(c, stream.cast()) }
 }
 
 pub extern "win64" fn ungetwc(c: u16, stream: *mut c_void) -> i32 {
-    if stream.is_null() { return -1; }
+    if stream.is_null() {
+        return -1;
+    }
     unsafe { libc::ungetc(c as i32, stream.cast()) }
 }
 
@@ -2633,22 +3022,16 @@ unsafe fn format_wide_args(format: *const u16, argptr: usize) -> Vec<u16> {
                     }
                     'd' | 'i' => {
                         let is_64 = length_mod.contains("ll") || length_mod.contains("I64");
-                        let num_str = if is_64 {
-                            (val as i64).to_string()
-                        } else {
-                            (val as i32).to_string()
-                        };
+                        let num_str =
+                            if is_64 { (val as i64).to_string() } else { (val as i32).to_string() };
                         for u in num_str.encode_utf16() {
                             result.push(u);
                         }
                     }
                     'u' => {
                         let is_64 = length_mod.contains("ll") || length_mod.contains("I64");
-                        let num_str = if is_64 {
-                            (val as u64).to_string()
-                        } else {
-                            (val as u32).to_string()
-                        };
+                        let num_str =
+                            if is_64 { (val as u64).to_string() } else { (val as u32).to_string() };
                         for u in num_str.encode_utf16() {
                             result.push(u);
                         }
@@ -2760,8 +3143,9 @@ unsafe fn format_narrow_args(format: *const c_char, argptr: usize) -> Vec<u8> {
                 let spec_char = spec as char;
                 match spec_char {
                     's' | 'S' => {
-                        let is_wide =
-                            length_mod.contains('l') || length_mod.contains('w') || spec_char == 'S';
+                        let is_wide = length_mod.contains('l')
+                            || length_mod.contains('w')
+                            || spec_char == 'S';
                         if is_wide {
                             let wide_ptr = val as *const u16;
                             if !wide_ptr.is_null() {
@@ -2787,20 +3171,14 @@ unsafe fn format_narrow_args(format: *const c_char, argptr: usize) -> Vec<u8> {
                     }
                     'd' | 'i' => {
                         let is_64 = length_mod.contains("ll") || length_mod.contains("I64");
-                        let num_str = if is_64 {
-                            (val as i64).to_string()
-                        } else {
-                            (val as i32).to_string()
-                        };
+                        let num_str =
+                            if is_64 { (val as i64).to_string() } else { (val as i32).to_string() };
                         result.extend_from_slice(num_str.as_bytes());
                     }
                     'u' => {
                         let is_64 = length_mod.contains("ll") || length_mod.contains("I64");
-                        let num_str = if is_64 {
-                            (val as u64).to_string()
-                        } else {
-                            (val as u32).to_string()
-                        };
+                        let num_str =
+                            if is_64 { (val as u64).to_string() } else { (val as u32).to_string() };
                         result.extend_from_slice(num_str.as_bytes());
                     }
                     'x' => {
@@ -2878,6 +3256,18 @@ pub extern "win64" fn __stdio_common_vsnprintf_s(
         max_count
     };
     __stdio_common_vsprintf(_options, buffer, count, format, _locale, argptr)
+}
+
+/// Legacy MSVCRT/NTDLL `_vsnprintf` entry point. Unlike `snprintf`, its final
+/// argument is a Windows `va_list`, represented by a pointer to argument slots
+/// on x64.
+pub extern "win64" fn _vsnprintf(
+    buffer: *mut c_char,
+    count: usize,
+    format: *const c_char,
+    argptr: usize,
+) -> i32 {
+    __stdio_common_vsprintf(0, buffer, count, format, 0, argptr)
 }
 
 pub extern "win64" fn __stdio_common_vfprintf(
@@ -2987,7 +3377,7 @@ pub extern "win64" fn fopen(filename: *const c_char, mode: *const c_char) -> *mu
         Err(_) => return std::ptr::null_mut(),
     };
     let res = unsafe { libc::fopen(c_file.as_ptr(), mode).cast::<c_void>() };
-    tracing::info!(guest_path = %s, ?host_path, ?res, "MSVCRT fopen");
+    tracing::trace!(guest_path = %s, ?host_path, ?res, "MSVCRT fopen");
     res
 }
 
@@ -2995,12 +3385,10 @@ pub extern "win64" fn _wfopen(filename: *const u16, mode: *const u16) -> *mut c_
     if filename.is_null() || mode.is_null() {
         return std::ptr::null_mut();
     }
-    let filename_utf8 = unsafe { crate::utils::wide_string::from_wide_ptr(filename) }
-        .ok()
-        .unwrap_or_default();
-    let mode_utf8 = unsafe { crate::utils::wide_string::from_wide_ptr(mode) }
-        .ok()
-        .unwrap_or_default();
+    let filename_utf8 =
+        unsafe { crate::utils::wide_string::from_wide_ptr(filename) }.ok().unwrap_or_default();
+    let mode_utf8 =
+        unsafe { crate::utils::wide_string::from_wide_ptr(mode) }.ok().unwrap_or_default();
     let host_path = guest_path_to_host(&filename_utf8);
     let c_file = match std::ffi::CString::new(host_path.to_string_lossy().as_bytes()) {
         Ok(c) => c,
@@ -3011,7 +3399,7 @@ pub extern "win64" fn _wfopen(filename: *const u16, mode: *const u16) -> *mut c_
         Err(_) => return std::ptr::null_mut(),
     };
     let res = unsafe { libc::fopen(c_file.as_ptr(), c_mode.as_ptr()).cast::<c_void>() };
-    tracing::info!(guest_path = %filename_utf8, ?host_path, ?res, "MSVCRT _wfopen");
+    tracing::trace!(guest_path = %filename_utf8, ?host_path, ?res, "MSVCRT _wfopen");
     res
 }
 
@@ -3022,7 +3410,12 @@ pub extern "win64" fn fclose(stream: *mut c_void) -> i32 {
     unsafe { libc::fclose(stream.cast()) }
 }
 
-pub extern "win64" fn fread(ptr: *mut c_void, size: usize, count: usize, stream: *mut c_void) -> usize {
+pub extern "win64" fn fread(
+    ptr: *mut c_void,
+    size: usize,
+    count: usize,
+    stream: *mut c_void,
+) -> usize {
     if ptr.is_null() || stream.is_null() {
         return 0;
     }
@@ -3050,7 +3443,6 @@ pub extern "win64" fn fgetc(stream: *mut c_void) -> i32 {
     unsafe { libc::fgetc(stream.cast()) }
 }
 
-
 pub extern "win64" fn fgets(s: *mut c_char, n: i32, stream: *mut c_void) -> *mut c_char {
     if s.is_null() || stream.is_null() {
         return std::ptr::null_mut();
@@ -3074,7 +3466,9 @@ pub extern "win64" fn ferror(stream: *mut c_void) -> i32 {
 
 pub extern "win64" fn clearerr(stream: *mut c_void) {
     if !stream.is_null() {
-        unsafe { libc::clearerr(stream.cast()); }
+        unsafe {
+            libc::clearerr(stream.cast());
+        }
     }
 }
 
@@ -3087,10 +3481,8 @@ pub fn register_fd_handle(fd: i32, host_path: std::path::PathBuf) -> (i32, usize
     if fd < 0 {
         return (fd, 0);
     }
-    let handle = crate::utils::handle::global_table().alloc(Box::new(crate::nt_kernel::file::FileHandle {
-        fd,
-        host_path,
-    }));
+    let handle = crate::utils::handle::global_table()
+        .alloc(Box::new(crate::nt_kernel::file::FileHandle { fd, host_path }));
     let mut map1 = FD_TO_HANDLE.lock().unwrap();
     let mut map2 = HANDLE_TO_FD.lock().unwrap();
     map1.insert(fd, handle);
@@ -3115,10 +3507,11 @@ pub extern "win64" fn _get_osfhandle(fd: i32) -> isize {
     if let Some(&handle) = map1.get(&fd) {
         return handle as isize;
     }
-    let handle = crate::utils::handle::global_table().alloc(Box::new(crate::nt_kernel::file::FileHandle {
-        fd,
-        host_path: std::path::PathBuf::new(),
-    }));
+    let handle =
+        crate::utils::handle::global_table().alloc(Box::new(crate::nt_kernel::file::FileHandle {
+            fd,
+            host_path: std::path::PathBuf::new(),
+        }));
     map1.insert(fd, handle);
     HANDLE_TO_FD.lock().unwrap().insert(handle, fd);
     tracing::info!(fd, handle, "MSVCRT _get_osfhandle registered handle");
@@ -3130,9 +3523,15 @@ pub extern "win64" fn _open_osfhandle(osfhandle: isize, _flags: i32) -> i32 {
         return -1;
     }
     let h = osfhandle as usize;
-    if h == crate::utils::handle::PSEUDO_STDIN { return 0; }
-    if h == crate::utils::handle::PSEUDO_STDOUT { return 1; }
-    if h == crate::utils::handle::PSEUDO_STDERR { return 2; }
+    if h == crate::utils::handle::PSEUDO_STDIN {
+        return 0;
+    }
+    if h == crate::utils::handle::PSEUDO_STDOUT {
+        return 1;
+    }
+    if h == crate::utils::handle::PSEUDO_STDERR {
+        return 2;
+    }
 
     let map2 = HANDLE_TO_FD.lock().unwrap();
     if let Some(&fd) = map2.get(&h) {
@@ -3229,14 +3628,30 @@ static PCTYPE_TABLE: [u16; 256] = {
     while i < 256 {
         let c = i as u8;
         let mut mask = 0u16;
-        if c.is_ascii_uppercase() { mask |= 0x0001 | 0x0100; }
-        if c.is_ascii_lowercase() { mask |= 0x0002 | 0x0100; }
-        if c.is_ascii_digit() { mask |= 0x0004; }
-        if c == b' ' || c == b'\t' || c == b'\n' || c == 0x0b || c == 0x0c || c == b'\r' { mask |= 0x0008; }
-        if c.is_ascii_punctuation() { mask |= 0x0010; }
-        if c.is_ascii_control() { mask |= 0x0020; }
-        if c == b' ' || c == b'\t' { mask |= 0x0040; }
-        if c.is_ascii_hexdigit() { mask |= 0x0080; }
+        if c.is_ascii_uppercase() {
+            mask |= 0x0001 | 0x0100;
+        }
+        if c.is_ascii_lowercase() {
+            mask |= 0x0002 | 0x0100;
+        }
+        if c.is_ascii_digit() {
+            mask |= 0x0004;
+        }
+        if c == b' ' || c == b'\t' || c == b'\n' || c == 0x0b || c == 0x0c || c == b'\r' {
+            mask |= 0x0008;
+        }
+        if c.is_ascii_punctuation() {
+            mask |= 0x0010;
+        }
+        if c.is_ascii_control() {
+            mask |= 0x0020;
+        }
+        if c == b' ' || c == b'\t' {
+            mask |= 0x0040;
+        }
+        if c.is_ascii_hexdigit() {
+            mask |= 0x0080;
+        }
         table[i] = mask;
         i += 1;
     }
@@ -3328,12 +3743,16 @@ pub extern "win64" fn _mbtowc_l(
     let b = unsafe { *s as u8 };
     if b == 0 {
         if !pwc.is_null() {
-            unsafe { *pwc = 0; }
+            unsafe {
+                *pwc = 0;
+            }
         }
         return 0;
     }
     if !pwc.is_null() {
-        unsafe { *pwc = b as u16; }
+        unsafe {
+            *pwc = b as u16;
+        }
     }
     1
 }
@@ -3535,6 +3954,7 @@ pub fn get_exports() -> HashMap<&'static str, usize> {
     exports.insert("__acrt_iob_func", __acrt_iob_func as usize);
     exports.insert("__stdio_common_vsprintf", __stdio_common_vsprintf as usize);
     exports.insert("__stdio_common_vsnprintf_s", __stdio_common_vsnprintf_s as usize);
+    exports.insert("_vsnprintf", _vsnprintf as usize);
     exports.insert("__stdio_common_vfprintf", __stdio_common_vfprintf as usize);
     exports.insert("__stdio_common_vfwprintf", __stdio_common_vfwprintf as usize);
     exports.insert("__stdio_common_vswprintf", __stdio_common_vswprintf as usize);
@@ -3702,6 +4122,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn underscore_vsnprintf_formats_a_windows_va_list() {
+        let format = c"value=%d";
+        let args = [42usize];
+        let mut output = [0_i8; 32];
+
+        let written =
+            _vsnprintf(output.as_mut_ptr(), output.len(), format.as_ptr(), args.as_ptr() as usize);
+
+        assert_eq!(written, 8);
+        assert_eq!(unsafe { CStr::from_ptr(output.as_ptr()) }.to_bytes(), b"value=42");
+        assert_eq!(get_exports().get("_vsnprintf"), Some(&(_vsnprintf as usize)));
+    }
+
+    #[test]
+    fn clock_uses_msvc_millisecond_ticks() {
+        let start = clock();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let elapsed = clock() - start;
+
+        assert!((15..=250).contains(&elapsed), "clock advanced by {elapsed} ticks in 25 ms");
+    }
+
+    #[test]
     fn recalloc_preserves_prefix_and_zeros_extension() {
         let allocation = malloc(4).cast::<u8>();
         assert!(!allocation.is_null());
@@ -3712,9 +4155,7 @@ mod tests {
         assert!(!grown.is_null());
         unsafe {
             assert_eq!(std::slice::from_raw_parts(grown, 4), &[1, 2, 3, 4]);
-            assert!(std::slice::from_raw_parts(grown.add(4), 12)
-                .iter()
-                .all(|byte| *byte == 0));
+            assert!(std::slice::from_raw_parts(grown.add(4), 12).iter().all(|byte| *byte == 0));
             free(grown.cast());
         }
     }
